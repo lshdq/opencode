@@ -41,10 +41,12 @@ slash: true
    - 无冲突 → 进入验证。
    - 用户显式要求 rebase 时改用 `git rebase upstream/dev`（提醒：rebase 后需 force push，仅单人分支可用）。
 6. 冲突处理（如有）：
-   - `git diff --name-only --diff-filter=U` 列出冲突文件，**停下让用户决策**。
-   - 用户解决后 `git add <files>` + `git merge --continue`（rebase 用 `git rebase --continue`）。
+   - `git diff --name-only --diff-filter=U` 列出冲突文件。
+   - **优先自行解决**：先理解本 fork 的改造意图——查 `win-adapt` 相对 `upstream/dev` 的自有提交（`git log upstream/dev..win-adapt`）与相关 `// win-adapt:` 标记，按"保留本 fork 改造 + 吸收上游变更"的原则解决，**不盲目取一边**。
+   - **仅当确实难以判断**（改造意图与上游变更语义冲突、无法确定取舍）时，才停下请用户决策该处。
+   - 解决后 `git add <files>` + `git merge --continue`（rebase 用 `git rebase --continue`）。
    - 用户要放弃 → `git merge --abort`（或 `git rebase --abort`）。
-   - **禁止**擅自自动解冲突、`--force`、丢弃改动。
+   - **禁止**：不理解 fork 意图就解冲突、`--force`、丢弃本 fork 的改造。
 7. 验证（默认）：
    - `bun turbo typecheck`（仓库根；或 `bun run --cwd packages/opencode typecheck`）。
    - bun 未安装则跳过并明确告知用户。
@@ -60,4 +62,4 @@ slash: true
 - **合并前必做变更确认**：先给用户变更说明，获明确确认后才合并。
 - 推送目标必须是 fork；**绝不向 upstream（官方）推送**。
 - 不 force push（除非用户明确要求 rebase 路线并知情）。
-- 不自动解决冲突。
+- 解冲突须先理解本 fork 改造意图，**仅在确实难解时**停下问用户；不盲目取一边、不丢弃 fork 改造。
