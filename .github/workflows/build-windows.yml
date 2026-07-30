@@ -1,0 +1,50 @@
+name: build-windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --linker hoisted --ignore-scripts
+
+      - name: Compute version
+        id: version
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          $version = ""
+          if ("${{ github.ref_type }}" -eq "tag") { $version = $ref.TrimStart("v") }
+          if ($version) { echo "value=$version" >> $env:GITHUB_OUTPUT } else { echo "value=" >> $env:GITHUB_OUTPUT }
+
+      - name: Build
+        shell: pwsh
+        env:
+          OPENCODE_VERSION: ${{ steps.version.outputs.value }}
+        run: bun ./packages/opencode/script/build.ts --single --skip-embed-web-ui
+
+      - name: Archive
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "packages/opencode/dist/opencode-windows-x64/bin/*" -DestinationPath ("opencode-windows-x64-" + "${{ github.ref_name }}" + ".zip") -Force
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: opencode-windows-x64-*.zip
+          generate_release_notes: true
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'latest' }}
