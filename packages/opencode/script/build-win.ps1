@@ -1,10 +1,11 @@
-# opencode-win 构建包装：版本号 = <upstream/dev 版本>.w<适配号>（如 1.18.9.w1）
+# opencode-win 构建包装：版本号 = <fork 基准版本>.w<适配号>（如 1.18.9.w2）
+# 基准版本 = win-adapt 与 upstream/dev 的 merge-base 处的版本，不随上游推进而变
 # 用法:
-#   .\packages\opencode\script\build-win.ps1                  # 适配号默认 1
-#   .\packages\opencode\script\build-win.ps1 -WinVersion 2    # 适配号 2
+#   .\packages\opencode\script\build-win.ps1                  # 适配号默认 2
+#   .\packages\opencode\script\build-win.ps1 -WinVersion 3    # 适配号 3
 #   .\packages\opencode\script\build-win.ps1 -SkipWebUi:$false  # 嵌入 Web UI
 param(
-  [int]$WinVersion = 1,
+  [int]$WinVersion = 2,
   [switch]$SkipWebUi = $true
 )
 
@@ -22,8 +23,9 @@ if ($remotes -notcontains "upstream") {
 }
 git fetch upstream
 
-# base = upstream/dev 的 packages/opencode/package.json version
-$base = (git show upstream/dev:packages/opencode/package.json | ConvertFrom-Json).version
+# base = fork 点（merge-base）处的版本，保持与 fork 时原版版本一致
+$mergeBase = git merge-base HEAD upstream/dev
+$base = (git show "${mergeBase}:packages/opencode/package.json" | ConvertFrom-Json).version
 $version = "$base.w$WinVersion"
 Write-Output "[build-win] base=$base  winVersion=$WinVersion  =>  version=$version"
 
