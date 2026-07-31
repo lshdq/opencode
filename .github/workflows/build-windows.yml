@@ -26,15 +26,24 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $ref = "${{ github.ref_name }}"
-          $version = ""
-          if ("${{ github.ref_type }}" -eq "tag") { $version = $ref.TrimStart("v") }
-          if ($version) { echo "value=$version" >> $env:GITHUB_OUTPUT } else { echo "value=" >> $env:GITHUB_OUTPUT }
+          git remote add upstream https://github.com/anomalyco/opencode.git
+          git fetch upstream dev
+          $base = (git show upstream/dev:packages/opencode/package.json | ConvertFrom-Json).version
+          $win = 1
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+            $idx = $tag.LastIndexOf(".w")
+            if ($idx -ge 0) { $win = [int]$tag.Substring($idx + 2) }
+          }
+          $version = "$base.w$win"
+          echo "value=$version" >> $env:GITHUB_OUTPUT
+          Write-Output "base=$base win=$win version=$version"
 
       - name: Build
         shell: pwsh
         env:
           OPENCODE_VERSION: ${{ steps.version.outputs.value }}
+          MODELS_DEV_API_JSON: ${{ vars.MODELS_DEV_API_JSON }}
         run: bun ./packages/opencode/script/build.ts --single --skip-embed-web-ui
 
       - name: Archive
