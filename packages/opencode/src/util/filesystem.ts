@@ -1,10 +1,11 @@
-import { chmod, mkdir, readFile, stat as statFile, writeFile } from "fs/promises"
+import { mkdir, readFile, stat as statFile, writeFile } from "fs/promises"
 import { createWriteStream, existsSync, statSync } from "fs"
 import { realpathSync } from "fs"
 import { dirname, isAbsolute, join, resolve as pathResolve, win32 } from "path"
 import { Readable } from "stream"
 import { pipeline } from "stream/promises"
 import { Glob } from "@opencode-ai/core/util/glob"
+import { applyFileMode } from "@opencode-ai/core/util/file-mode"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { fileURLToPath } from "url"
 
@@ -98,13 +99,31 @@ export async function writeStream(
   await pipeline(nodeStream, writeStream)
 
   if (mode) {
-    await chmod(p, mode)
+    await applyFileMode(p, mode)
   }
 }
 
 export async function mimeType(p: string): Promise<string> {
   const { lookup } = await import("mime-types")
   return lookup(p) || "application/octet-stream"
+}
+
+/**
+ * Retry a filesystem operation that can transiently fail on Windows when
+ * antivirus or indexing briefly locks freshly written/extracted files
+ * (EBUSY/EPERM). Matches the attempt counts used by worktree cleanup.
+ */
+export async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
+  const attempts = process.platform === "win32" ? 50 : 5
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await operation()
+    } catch (error) {
+      if (attempt === attempts - 1) throw error
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+  }
+  throw new Error("unreachable")
 }
 
 /**

@@ -1,5 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { mkdir, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 export const FolderWorkspacePlugin: Plugin = async ({ experimental_workspace }) => {
   experimental_workspace.register("folder", {
@@ -10,7 +12,7 @@ export const FolderWorkspacePlugin: Plugin = async ({ experimental_workspace }) 
 
       return {
         ...config,
-        directory: `/tmp/folder/folder-${rand}`,
+        directory: join(tmpdir(), "folder", `folder-${rand}`),
       }
     },
     async create(config) {

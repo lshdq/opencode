@@ -17,6 +17,10 @@ const cfg = [
   "core.quotepath=false",
 ] as const
 
+// `git diff --no-index` needs an empty reference file; `/dev/null` is not a real
+// path on non-MSYS git builds, so use `NUL` on Windows.
+const devNull = process.platform === "win32" ? "NUL" : "/dev/null"
+
 const out = (result: { text(): string }) => result.text().trim()
 const nuls = (text: string) => text.split("\0").filter(Boolean)
 const fail = (err: unknown) =>
@@ -290,7 +294,7 @@ const layer = Layer.effect(
           "--no-renames",
           `--unified=${options?.context ?? 3}`,
           "--",
-          "/dev/null",
+          devNull,
           file,
         ],
         { cwd, maxOutputBytes: options?.maxOutputBytes },
@@ -299,7 +303,7 @@ const layer = Layer.effect(
     })
 
     const statUntracked = Effect.fn("Git.statUntracked")(function* (cwd: string, file: string) {
-      const result = yield* run(["diff", "--no-index", "--numstat", "--", "/dev/null", file], {
+      const result = yield* run(["diff", "--no-index", "--numstat", "--", devNull, file], {
         cwd,
         maxOutputBytes: 4096,
       })

@@ -76,6 +76,11 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
     if (proc.exitCode !== null || proc.signalCode !== null) return
     closed = true
 
+    if (process.platform === "win32") {
+      void stop(proc)
+      return
+    }
+
     proc.kill(opts.kill ?? "SIGTERM")
 
     const ms = opts.timeout ?? 5_000

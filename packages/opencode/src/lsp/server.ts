@@ -192,16 +192,16 @@ export const ESLint: Info = {
           return false
         })
       if (!ok) return
-      await fs.rm(zipPath, { force: true })
+      await Filesystem.withRetry(() => fs.rm(zipPath, { force: true }))
 
       const extractedPath = path.join(Global.Path.bin, "vscode-eslint-main")
       const finalPath = path.join(Global.Path.bin, "vscode-eslint")
 
       const stats = await fs.stat(finalPath).catch(() => undefined)
       if (stats) {
-        await fs.rm(finalPath, { force: true, recursive: true })
+        await Filesystem.withRetry(() => fs.rm(finalPath, { force: true, recursive: true }))
       }
-      await fs.rename(extractedPath, finalPath)
+      await Filesystem.withRetry(() => fs.rename(extractedPath, finalPath))
 
       const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm"
       await Process.run([npmCmd, "install"], { cwd: finalPath })
@@ -561,10 +561,12 @@ export const ElixirLS: Info = {
           })
         if (!ok) return
 
-        await fs.rm(zipPath, {
-          force: true,
-          recursive: true,
-        })
+        await Filesystem.withRetry(() =>
+          fs.rm(zipPath, {
+            force: true,
+            recursive: true,
+          }),
+        )
 
         const cwd = path.join(Global.Path.bin, "elixir-ls-master")
         const env = { MIX_ENV: "prod", ...process.env }
@@ -663,7 +665,7 @@ export const Zls: Info = {
         await run(["tar", "-xf", tempPath], { cwd: Global.Path.bin })
       }
 
-      await fs.rm(tempPath, { force: true })
+      await Filesystem.withRetry(() => fs.rm(tempPath, { force: true }))
 
       bin = path.join(Global.Path.bin, "zls" + (platform === "win32" ? ".exe" : ""))
 
@@ -1044,7 +1046,7 @@ export const Clangd: Info = {
     if (tar) {
       await run(["tar", "-xf", archive], { cwd: Global.Path.bin })
     }
-    await fs.rm(archive, { force: true })
+    await Filesystem.withRetry(() => fs.rm(archive, { force: true }))
 
     const bin = path.join(Global.Path.bin, "clangd_" + tag, "bin", "clangd" + ext)
     if (!(await Filesystem.exists(bin))) {
@@ -1055,8 +1057,15 @@ export const Clangd: Info = {
       await fs.chmod(bin, 0o755).catch(() => {})
     }
 
-    await fs.unlink(path.join(Global.Path.bin, "clangd")).catch(() => {})
-    await fs.symlink(bin, path.join(Global.Path.bin, "clangd")).catch(() => {})
+    if (process.platform === "win32") {
+      // Symlinks require admin or developer mode on Windows; the alias is a
+      // convenience only, so copy the binary instead.
+      await fs.unlink(path.join(Global.Path.bin, "clangd.exe")).catch(() => {})
+      await fs.copyFile(bin, path.join(Global.Path.bin, "clangd.exe")).catch(() => {})
+    } else {
+      await fs.unlink(path.join(Global.Path.bin, "clangd")).catch(() => {})
+      await fs.symlink(bin, path.join(Global.Path.bin, "clangd")).catch(() => {})
+    }
 
     return {
       process: spawn(bin, args, {
@@ -1218,7 +1227,7 @@ export const JDTLS: Info = {
         return
       }
 
-      await fs.rm(path.join(distPath, archiveName), { force: true })
+      await Filesystem.withRetry(() => fs.rm(path.join(distPath, archiveName), { force: true }))
     }
     const jarFileName =
       (await fs.readdir(launcherDir).catch(() => []))
@@ -1342,7 +1351,7 @@ export const KotlinLS: Info = {
           return false
         })
       if (!ok) return
-      await fs.rm(archivePath, { force: true })
+      await Filesystem.withRetry(() => fs.rm(archivePath, { force: true }))
       if (process.platform !== "win32") {
         await fs.chmod(launcherScript, 0o755).catch(() => {})
       }
@@ -1463,7 +1472,7 @@ export const LuaLS: Info = {
       // Remove old installation if exists
       const stats = await fs.stat(installDir).catch(() => undefined)
       if (stats) {
-        await fs.rm(installDir, { force: true, recursive: true })
+        await Filesystem.withRetry(() => fs.rm(installDir, { force: true, recursive: true }))
       }
 
       await fs.mkdir(installDir, { recursive: true })
@@ -1484,7 +1493,7 @@ export const LuaLS: Info = {
         if (!ok) return
       }
 
-      await fs.rm(tempPath, { force: true })
+      await Filesystem.withRetry(() => fs.rm(tempPath, { force: true }))
 
       // Binary is located in bin/ subdirectory within the extracted archive
       bin = path.join(installDir, "bin", "lua-language-server" + (platform === "win32" ? ".exe" : ""))
@@ -1665,7 +1674,7 @@ export const TerraformLS: Info = {
           return false
         })
       if (!ok) return
-      await fs.rm(tempPath, { force: true })
+      await Filesystem.withRetry(() => fs.rm(tempPath, { force: true }))
 
       bin = path.join(Global.Path.bin, "terraform-ls" + (platform === "win32" ? ".exe" : ""))
 
@@ -1750,7 +1759,7 @@ export const TexLab: Info = {
         await run(["tar", "-xzf", tempPath], { cwd: Global.Path.bin })
       }
 
-      await fs.rm(tempPath, { force: true })
+      await Filesystem.withRetry(() => fs.rm(tempPath, { force: true }))
 
       bin = path.join(Global.Path.bin, "texlab" + (platform === "win32" ? ".exe" : ""))
 
@@ -1929,7 +1938,7 @@ export const Tinymist: Info = {
         await run(["tar", "-xzf", tempPath, "--strip-components=1"], { cwd: Global.Path.bin })
       }
 
-      await fs.rm(tempPath, { force: true })
+      await Filesystem.withRetry(() => fs.rm(tempPath, { force: true }))
 
       bin = path.join(Global.Path.bin, "tinymist" + (platform === "win32" ? ".exe" : ""))
 

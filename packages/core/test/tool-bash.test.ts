@@ -26,6 +26,7 @@ const sessionID = SessionV2.ID.make("ses_bash_tool_test")
 const assertions: PermissionV2.AssertInput[] = []
 const runs: Array<{
   readonly command: string
+  readonly args: readonly string[]
   readonly cwd?: string
   readonly shell?: string | boolean
   readonly options?: AppProcess.RunOptions
@@ -67,15 +68,27 @@ const appProcess = Layer.succeed(
     run: (command: ChildProcess.Command, options?: AppProcess.RunOptions) =>
       Effect.suspend(() => {
         if (command._tag !== "StandardCommand") throw new Error("expected standard command")
-        runs.push({ command: command.command, cwd: command.options.cwd, shell: command.options.shell, options })
+        runs.push({
+          command: command.command,
+          args: command.args,
+          cwd: command.options.cwd,
+          shell: command.options.shell,
+          options,
+        })
         return runFailure ? Effect.fail(runFailure) : Effect.succeed(result)
       }),
   } as unknown as AppProcess.Interface),
 )
+let configShell: string | undefined
 const config = Layer.succeed(
   Config.Service,
   Config.Service.of({
-    entries: () => Effect.succeed([]),
+    entries: () =>
+      Effect.succeed(
+        configShell === undefined
+          ? []
+          : [new Config.Document({ type: "document", info: new Config.Info({ shell: configShell }) })],
+      ),
   }),
 )
 
@@ -84,6 +97,7 @@ const reset = () => {
   runs.length = 0
   denyAction = undefined
   runFailure = undefined
+  configShell = undefined
   afterPermission = () => Effect.void
   result = {
     command: "mock",
@@ -260,6 +274,78 @@ describe("BashTool", () => {
     )
   }
 
+  if (process.platform === "win32") {
+    it.live("builds an explicit PowerShell invocation on Windows", () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => {
+          reset()
+          configShell = "pwsh"
+          return withTool(tmp.path, (registry) => executeTool(registry, call({ command: "Get-Date" }))).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                expect(runs).toHaveLength(1)
+                expect(runs[0]?.command).toBe("pwsh")
+                expect(runs[0]?.args).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Get-Date"])
+                expect(runs[0]?.shell).toBeUndefined()
+              }),
+            ),
+          )
+        },
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      ),
+    )
+
+    it.live("keeps the shell option for non-PowerShell shells on Windows", () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => {
+          reset()
+          return withTool(tmp.path, (registry) => executeTool(registry, call({ command: "echo hi" }))).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                expect(runs).toHaveLength(1)
+                expect(runs[0]?.command).toBe("echo hi")
+                expect(runs[0]?.args).toEqual([])
+                expect(runs[0]?.shell).toBe(process.env.COMSPEC ?? "cmd.exe")
+              }),
+            ),
+          )
+        },
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      ),
+    )
+
+    it.live("executes a real PowerShell command through AppProcess on Windows", () =>
+      Effect.acquireUseRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => {
+          reset()
+          configShell = "pwsh"
+          return withTool(
+            tmp.path,
+            (registry) => settleTool(registry, call({ command: "Write-Output core-bash-ps" })),
+            LayerNode.compile(AppProcess.node),
+          ).pipe(
+            Effect.andThen((settled) =>
+              Effect.sync(() => {
+                expect(settled.output?.content[0]).toMatchObject({
+                  type: "text",
+                  text: expect.stringContaining("core-bash-ps"),
+                })
+                expect(settled.output?.structured).toMatchObject({
+                  exit: 0,
+                  truncated: false,
+                })
+              }),
+            ),
+          )
+        },
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      ),
+    )
+  }
+
   it.live("approves an explicit external workdir before bash execution", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => Promise.all([tmpdir(), tmpdir()])),
@@ -424,7 +510,7 @@ test("keeps locked deferred parity TODOs visible", async () => {
     "Port tree-sitter bash / PowerShell parser-based approval reduction.",
     "Port BashArity reusable command-prefix approvals.",
     "Replace token-based command-argument external-directory advisories with parser-based detection.",
-    "Restore PowerShell and cmd-specific invocation/path handling on Windows.",
+    "Restore Git Bash discovery and MSYS/Cygwin path handling on Windows.",
     "Add plugin shell.env environment augmentation once V2 plugin hooks exist.",
     "Add durable/live progress metadata streaming for long-running commands once V2 tool invocation progress context is wired.",
     "Persist background job status and define restart recovery before exposing remote observation.",

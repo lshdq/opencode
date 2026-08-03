@@ -233,6 +233,9 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
 }
 
 async function getShellConfigFile(): Promise<string | null> {
+  // On Windows SHELL is typically unset and bash-style rc files do not apply;
+  // still honor an explicitly set SHELL (e.g. Git Bash environments).
+  if (process.platform === "win32" && !process.env.SHELL) return null
   const shell = path.basename(process.env.SHELL || "bash")
   const home = os.homedir()
   const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(home, ".config")

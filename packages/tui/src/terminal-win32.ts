@@ -1,8 +1,11 @@
-import { dlopen, ptr } from "bun:ffi"
+import { dlopen, JSCallback, ptr } from "bun:ffi"
 import type { ReadStream } from "node:tty"
 
 const STD_INPUT_HANDLE = -10
 const ENABLE_PROCESSED_INPUT = 0x0001
+const CTRL_CLOSE_EVENT = 2
+const CTRL_LOGOFF_EVENT = 5
+const CTRL_SHUTDOWN_EVENT = 6
 
 const kernel = () =>
   dlopen("kernel32.dll", {
@@ -10,6 +13,8 @@ const kernel = () =>
     GetConsoleMode: { args: ["ptr", "ptr"], returns: "i32" },
     SetConsoleMode: { args: ["ptr", "u32"], returns: "i32" },
     FlushConsoleInputBuffer: { args: ["ptr"], returns: "i32" },
+    SetConsoleCtrlHandler: { args: ["ptr", "i32"], returns: "i32" },
+    GetConsoleWindow: { args: [], returns: "ptr" },
   })
 
 let k32: ReturnType<typeof kernel> | undefined
@@ -127,4 +132,51 @@ export function win32InstallCtrlCGuard() {
   }
 
   return unhook
+}
+
+let ctrlUnhook: (() => void) | undefined
+
+/**
+ * Invoke `callback` when the console window is closed or the system logs
+ * off/shuts down. Windows has no SIGHUP; this is the closest equivalent and
+ * gives the process a short grace period to restore the terminal and run
+ * cleanup before it is terminated.
+ *
+ * Only CTRL_CLOSE/LOGOFF/SHUTDOWN are intercepted; CTRL_C/CTRL_BREAK are left
+ * to the runtime. Requires a real attached console.
+ */
+export function win32InstallCloseHandler(callback: () => void): (() => void) | undefined {
+  if (process.platform !== "win32") return
+  if (!process.stdin.isTTY) return
+  if (!load()) return
+  if (ctrlUnhook) return ctrlUnhook
+  if (!k32!.symbols.GetConsoleWindow()) return
+
+  const handler = new JSCallback(
+    (type: number) => {
+      if (type === CTRL_CLOSE_EVENT || type === CTRL_LOGOFF_EVENT || type === CTRL_SHUTDOWN_EVENT) {
+        try {
+          callback()
+        } catch {}
+        return 1
+      }
+      return 0
+    },
+    { args: ["i32"], returns: "i32" },
+  )
+
+  if (k32!.symbols.SetConsoleCtrlHandler(handler.ptr, 1) === 0) {
+    handler.close()
+    return
+  }
+
+  let done = false
+  ctrlUnhook = () => {
+    if (done) return
+    done = true
+    k32!.symbols.SetConsoleCtrlHandler(handler.ptr, 0)
+    handler.close()
+    ctrlUnhook = undefined
+  }
+  return ctrlUnhook
 }

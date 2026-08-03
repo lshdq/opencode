@@ -11,6 +11,7 @@ import { LocationMutation } from "../location-mutation"
 import { AppProcess } from "../process"
 import { PermissionV2 } from "../permission"
 import { PositiveInt } from "../schema"
+import { Shell } from "../shell"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
@@ -66,7 +67,7 @@ const isTimeout = (error: AppProcess.AppProcessError) =>
 // TODO: Port tree-sitter bash / PowerShell parser-based approval reduction.
 // TODO: Port BashArity reusable command-prefix approvals.
 // TODO: Replace token-based command-argument external-directory advisories with parser-based detection.
-// TODO: Restore PowerShell and cmd-specific invocation/path handling on Windows.
+// TODO: Restore Git Bash discovery and MSYS/Cygwin path handling on Windows.
 // TODO: Add plugin shell.env environment augmentation once V2 plugin hooks exist.
 // TODO: Add durable/live progress metadata streaming for long-running commands once V2 tool invocation progress context is wired.
 // TODO: Persist background job status and define restart recovery before exposing remote observation.
@@ -155,13 +156,23 @@ const layer = Layer.effectDiscard(
               const shell =
                 Object.assign({}, ...entries.flatMap((entry) => (entry.type === "document" ? [entry.info] : [])))
                   .shell ?? defaultShell()
-              const command = ChildProcess.make(input.command, [], {
-                cwd: target.canonical,
-                shell,
-                stdin: "ignore",
-                detached: process.platform !== "win32",
-                forceKillAfter: Duration.seconds(3),
-              })
+              // Bun wraps shell invocations with `-c`, which loads PowerShell profiles and
+              // prints the 5.1 banner; invoke PowerShell explicitly instead.
+              const command =
+                process.platform === "win32" && Shell.ps(shell)
+                  ? ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", input.command], {
+                      cwd: target.canonical,
+                      stdin: "ignore",
+                      detached: false,
+                      forceKillAfter: Duration.seconds(3),
+                    })
+                  : ChildProcess.make(input.command, [], {
+                      cwd: target.canonical,
+                      shell,
+                      stdin: "ignore",
+                      detached: process.platform !== "win32",
+                      forceKillAfter: Duration.seconds(3),
+                    })
               const timeout = input.timeout ?? DEFAULT_TIMEOUT_MS
               const result = yield* appProcess
                 .run(command, {

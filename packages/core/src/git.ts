@@ -11,6 +11,10 @@ import { makeGlobalNode } from "./effect/app-node"
 import { File } from "./file"
 import { KeyedMutex } from "./effect/keyed-mutex"
 
+// `git diff --no-index` needs an empty reference file; `/dev/null` is not a real
+// path on non-MSYS git builds, so use `NUL` on Windows.
+const devNull = process.platform === "win32" ? "NUL" : "/dev/null"
+
 export class Repository extends Schema.Class<Repository>("Git.Repository")({
   worktree: AbsolutePath,
   gitDirectory: AbsolutePath,
@@ -764,7 +768,7 @@ const layer = Layer.effect(
         execute(
           input.repository.worktree,
           proc,
-        )(["diff", "--binary", "--no-index", "--", "/dev/null", file]).pipe(
+        )(["diff", "--binary", "--no-index", "--", devNull, file]).pipe(
           Effect.mapError(
             (cause) => new PatchError({ operation: "capture", directory: input.path, message: cause.message, cause }),
           ),

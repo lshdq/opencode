@@ -417,7 +417,44 @@ const layer = Layer.effect(
 
     const descendants = Effect.fnUntraced(
       function* (pid: number) {
-        if (process.platform === "win32") return [] as number[]
+        if (process.platform === "win32") {
+          // `pgrep` does not exist on Windows and `wmic` is deprecated/removed, so dump the
+          // (pid, parent) pairs once via CIM and walk the tree locally.
+          const handle = yield* spawner.spawn(
+            ChildProcess.make(
+              "powershell",
+              [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId) $($_.ParentProcessId)\" }",
+              ],
+              { stdin: "ignore" },
+            ),
+          )
+          const text = yield* Stream.mkString(Stream.decodeText(handle.stdout))
+          yield* handle.exitCode
+          const children = new Map<number, number[]>()
+          for (const line of text.split("\n")) {
+            const [cpid, ppid] = line.trim().split(/\s+/).map((tok) => parseInt(tok, 10))
+            if (isNaN(cpid) || isNaN(ppid)) continue
+            const list = children.get(ppid) ?? []
+            list.push(cpid)
+            children.set(ppid, list)
+          }
+          const pids: number[] = []
+          const queue = [pid]
+          for (let index = 0; index < queue.length; index++) {
+            const current = queue[index]
+            for (const cpid of children.get(current) ?? []) {
+              if (!pids.includes(cpid)) {
+                pids.push(cpid)
+                queue.push(cpid)
+              }
+            }
+          }
+          return pids
+        }
         const pids: number[] = []
         const queue = [pid]
         for (let index = 0; index < queue.length; index++) {

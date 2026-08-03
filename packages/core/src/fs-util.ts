@@ -6,6 +6,7 @@ import { lookup } from "mime-types"
 import { Context, Effect, FileSystem, Layer, Schema } from "effect"
 import type { PlatformError } from "effect/PlatformError"
 import { Glob } from "./util/glob"
+import { applyFileMode } from "./util/file-mode"
 import { serviceUse } from "./effect/service-use"
 import { makeGlobalNode } from "./effect/app-node"
 import { filesystem } from "./effect/app-node-platform"
@@ -107,10 +108,16 @@ export namespace FSUtil {
         })
       })
 
+      const applyMode = (path: string, mode: number, method: string) =>
+        Effect.tryPromise({
+          try: () => applyFileMode(path, mode),
+          catch: (cause) => new FileSystemError({ method, cause }),
+        })
+
       const writeJson = Effect.fn("FileSystem.writeJson")(function* (path: string, data: unknown, mode?: number) {
         const content = JSON.stringify(data, null, 2)
         yield* fs.writeFileString(path, content)
-        if (mode) yield* fs.chmod(path, mode)
+        if (mode) yield* applyMode(path, mode, "writeJson")
       })
 
       const ensureDir = Effect.fn("FileSystem.ensureDir")(function* (path: string) {
@@ -141,7 +148,7 @@ export namespace FSUtil {
               }),
           ),
         )
-        if (mode) yield* fs.chmod(path, mode)
+        if (mode) yield* applyMode(path, mode, "writeWithDirs")
       })
 
       const glob = Effect.fn("FileSystem.glob")(function* (pattern: string, options?: Glob.Options) {

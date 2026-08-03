@@ -34,6 +34,8 @@ export type ThemeSource = Readonly<{
   subscribeRefresh?(refresh: () => void): () => void
 }>
 
+let signalRefreshUnavailableWarned = false
+
 const themeSource: ThemeSource = {
   async discover() {
     const directories = [Global.Path.config]
@@ -44,6 +46,13 @@ const themeSource: ThemeSource = {
     return discoverThemes(directories)
   },
   subscribeRefresh(refresh) {
+    if (process.platform === "win32") {
+      if (!signalRefreshUnavailableWarned) {
+        signalRefreshUnavailableWarned = true
+        console.error("opencode: SIGUSR2 is unavailable on Windows; signal-based theme refresh is disabled")
+      }
+      return () => {}
+    }
     process.on("SIGUSR2", refresh)
     return () => process.off("SIGUSR2", refresh)
   },

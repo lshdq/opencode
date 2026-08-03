@@ -9,6 +9,7 @@ import { ProjectTable } from "@opencode-ai/core/project/sql"
 import type { ProjectV2 } from "@opencode-ai/core/project"
 import { Slug } from "@opencode-ai/core/util/slug"
 import { errorMessage } from "../util/error"
+import { Filesystem } from "@/util/filesystem"
 import { GlobalBus } from "@/bus/global"
 import { Git } from "@/git"
 import { Effect, Layer, Path, Schema, Scope, Context } from "effect"
@@ -369,16 +370,7 @@ const layer: Layer.Layer<
       return Effect.tryPromise({
         try: async () => {
           const fsp = await import("fs/promises")
-          const attempts = process.platform === "win32" ? 50 : 5
-          for (const attempt of Array.from({ length: attempts }, (_, i) => i)) {
-            try {
-              await fsp.rm(target, { recursive: true, force: true })
-              return
-            } catch (error) {
-              if (attempt === attempts - 1) throw error
-              await new Promise((resolve) => setTimeout(resolve, 100))
-            }
-          }
+          await Filesystem.withRetry(() => fsp.rm(target, { recursive: true, force: true }))
         },
         catch: (error) =>
           new RemoveFailedError({ message: errorMessage(error) || "Failed to remove git worktree directory" }),

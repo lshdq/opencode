@@ -83,7 +83,7 @@ import type { EventSource } from "./context/sdk"
 import { DialogVariant } from "./component/dialog-variant"
 import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
-import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
+import { win32DisableProcessedInput, win32FlushInputBuffer, win32InstallCloseHandler } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 
@@ -229,9 +229,23 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       yield* Effect.addFinalizer(() => Effect.sync(TuiAudio.dispose))
       const shutdown = yield* Deferred.make<unknown>()
       const onSighup = () => destroyRenderer(renderer)
+      // Windows has no SIGHUP; fall back to the exit event and a console
+      // control handler so closing the console window still tears down the
+      // renderer and runs cleanup.
+      let win32Unhook: (() => void) | undefined
       yield* Effect.acquireRelease(
-        Effect.sync(() => process.on("SIGHUP", onSighup)),
-        () => Effect.sync(() => process.off("SIGHUP", onSighup)),
+        Effect.sync(() => {
+          process.on("SIGHUP", onSighup)
+          if (process.platform !== "win32") return
+          process.on("exit", onSighup)
+          win32Unhook = win32InstallCloseHandler(onSighup)
+        }),
+        () =>
+          Effect.sync(() => {
+            process.off("SIGHUP", onSighup)
+            process.off("exit", onSighup)
+            win32Unhook?.()
+          }),
       )
       renderer.once("destroy", () => Deferred.doneUnsafe(shutdown, Effect.void))
       const pluginRuntime = createPluginRuntime()

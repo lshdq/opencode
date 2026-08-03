@@ -8,7 +8,10 @@ const exec = promisify(execFile)
 
 function command(command: string, args: string[] = [], input?: string) {
   return new Promise<Buffer>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: [input === undefined ? "ignore" : "pipe", "pipe", "ignore"] })
+    const child = spawn(command, args, {
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "ignore"],
+      windowsHide: true,
+    })
     const output: Buffer[] = []
     child.on("error", reject)
     child.stdout?.on("data", (chunk: Buffer) => output.push(chunk))
