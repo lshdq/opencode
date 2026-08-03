@@ -34,8 +34,10 @@ pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "packages\opencode\script\buil
 # typecheck（从包目录运行，不从仓库根）
 bun run typecheck   # 在 packages/core 或 packages/opencode 下
 
-# 部署：构建完成后复制到安装目录，exe 文件名追加版本号
-Copy-Item "dist\opencode-windows-x64\bin\opencode.exe" "D:\Program\opencode\opencode.exe.1.18.11.w3"
+# 部署：构建完成后复制到安装目录，文件名追加版本号
+# 仅复制版本化文件；不要覆盖现有 opencode.exe（可能被运行中的进程锁定），
+# 激活（替换 opencode.exe）由用户在退出所有 opencode 实例后自行执行
+Copy-Item "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe" "D:\Program\opencode\opencode.exe.1.18.11.w3"
 ```
 
 ## 已知 Windows 问题清单
