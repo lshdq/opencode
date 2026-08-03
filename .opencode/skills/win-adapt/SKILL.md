@@ -11,7 +11,7 @@ opencode 官方建议 Windows 用户使用 WSL，本 fork（`win-adapt` 分支�
 ## 分支与版本
 
 - 分支：`win-adapt`（基于 `upstream/dev` fork）
-- 版本号：`<fork基准版本>.w<适配号>`，如 `1.18.9.w2`
+- 版本号：`<fork基准版本>.w<适配号>`，如 `1.18.11.w3`
   - 基准版本 = `git merge-base HEAD upstream/dev` 处的 `packages/opencode/package.json` version，**不随上游推进而变**
   - 适配号每次构建递增
 - 构建脚本：`packages/opencode/script/build-win.ps1`（自动从 merge-base 取基准版本）
@@ -35,7 +35,7 @@ pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "packages\opencode\script\buil
 bun run typecheck   # 在 packages/core 或 packages/opencode 下
 
 # 部署：构建完成后复制到安装目录，exe 文件名追加版本号
-Copy-Item "dist\opencode-windows-x64\bin\opencode.exe" "D:\Program\opencode\opencode.exe.1.18.9.w2"
+Copy-Item "dist\opencode-windows-x64\bin\opencode.exe" "D:\Program\opencode\opencode.exe.1.18.11.w3"
 ```
 
 ## 已知 Windows 问题清单
@@ -45,22 +45,35 @@ Copy-Item "dist\opencode-windows-x64\bin\opencode.exe" "D:\Program\opencode\open
 | # | 问题 | 修复位置 | 提交 |
 |---|------|----------|------|
 | 1 | 进程 spawn/close 事件在 Bun+Windows 下偶发不触发，导致 shell tool 无限挂起（超时竞争根本不会启动） | `packages/core/src/cross-spawn-spawner.ts` | `ddcad28203` |
+| 2 | archive 解压用 powershell 5.1 且路径拼入单引号字符串（注入/断裂风险） | `packages/opencode/src/util/archive.ts` | `7d936fd5f3` |
+| 3 | V2 Core bash tool 缺少 PowerShell 调用处理 | `packages/core/src/tool/bash.ts` | `7d936fd5f3` |
+| 4 | `util/process.ts` spawn abort 不走 `taskkill /T /F`，进程树泄漏 | `packages/opencode/src/util/process.ts` | `7d936fd5f3` |
+| 5 | `/dev/null` 硬编码（git diff --no-index） | `packages/core/src/git.ts`、`packages/opencode/src/git/index.ts` | `7d936fd5f3` |
+| 6 | MCP 后代进程清理禁用（`pgrep` 不可用） | `packages/opencode/src/mcp/index.ts`（Get-CimInstance 枚举） | `7d936fd5f3` |
+| 7 | LSP 安装 rm/rename 无 Windows 重试（EBUSY/EPERM） | `packages/opencode/src/util/filesystem.ts`（withRetry）、`lsp/server.ts`、`worktree/index.ts` | `7d936fd5f3` |
+| 8 | chmod 0o600 等属主独占权限在 Windows 不生效 | `packages/core/src/util/file-mode.ts`（icacls ACL 加固） | `7d936fd5f3` |
+| 9 | SIGUSR2 信号不可用（主题/配置热重载静默失效） | footer.ts / tui.ts / theme.tsx（win32 一次性日志） | `7d936fd5f3` |
+| 10 | SIGHUP 不可用，关闭控制台渲染器不清理 | `packages/tui/src/terminal-win32.ts`（SetConsoleCtrlHandler FFI）+ exit 兜底 | `7d936fd5f3` |
+| 11 | clipboard 调用 powershell 闪现控制台窗口 | `packages/tui/src/clipboard.ts`（windowsHide） | `7d936fd5f3` |
+| 12 | 硬编码 `/tmp` 路径 | debug-workspace-plugin.ts、example-workspace.ts（os.tmpdir） | `7d936fd5f3` |
+| 13 | clangd symlink 需管理员/开发者模式 | `packages/opencode/src/lsp/server.ts`（win32 copyFile） | `7d936fd5f3` |
+| 14 | uninstall 在 win32 无意义探测 bash rc | `packages/opencode/src/cli/cmd/uninstall.ts`（SHELL 未设置提前返回） | `7d936fd5f3` |
 
-修复细节（三层防御，均 win32 守卫）：
-- **spawn 超时（30s）**：`spawn` 事件未触发 → `Effect.callback` 失败返回，不再永久挂起
-- **exit 宽限期（2s）**：`exit` 触发后 `close` 未到 → 强制完成 signal Deferred（管道句柄继承导致 close 不触发）
-- **kill 等待超时（5s）**：`handle.kill` 和 scope finalizer 中 `Deferred.await(signal)` 加兜底超时
+修复细节见 `windows适配文档/版本说明/`（w2、w3）。
 
 ### 待修复（按影响排序）
 
 | # | 问题 | 位置 | 影响 |
 |---|------|------|------|
-| 2 | V2 Core bash tool 缺少 PowerShell/cmd 处理（有明确 TODO） | `packages/core/src/tool/bash.ts:69` | V2 会话 shell 命令行为异常 |
-| 3 | `util/process.ts` spawn abort 用 `SIGTERM/SIGKILL` 不走 `taskkill /T /F` | `packages/opencode/src/util/process.ts:79,83` | 子进程泄漏 |
-| 4 | `/dev/null` 硬编码 | `packages/opencode/src/git/index.ts:293,302`、`project/vcs.ts:58` | untracked 文件 diff 可能失败 |
-| 5 | MCP 进程清理禁用（`pgrep` 不可用，`descendants()` 返回空） | `packages/opencode/src/mcp/index.ts:420` | MCP 服务器进程泄漏 |
-| 6 | symlink 需要管理员权限或开发者模式 | `packages/opencode/src/lsp/server.ts:1059`、`snapshot/index.ts` | clangd/snapshot 静默失败 |
-| 7 | `cross-spawn-spawner.ts` spawn finalizer 用 `proc.kill("SIGTERM")` 不走 `killGroup` | `packages/core/src/cross-spawn-spawner.ts:288` | 进程树未完整清理 |
+| 1 | `cross-spawn-spawner.ts` spawn 阶段超时/取消的 finalizer 用 `proc.kill("SIGTERM")` 不走 `killGroup` | `packages/core/src/cross-spawn-spawner.ts:283,320` | spawn 阶段中止时进程树可能未完整清理（边缘场景，进程树通常尚未形成） |
+
+### 评估后不修
+
+| # | 问题 | 原因 |
+|---|------|------|
+| 1 | XDG 路径在 Windows 非惯用（`~/.local/share`） | 功能正常；迁移到 %LOCALAPPDATA% 需数据迁移，风险大于收益 |
+| 2 | PTY 设置 LC_ALL=C.UTF-8 | 有意适配（ConPTY 下对 Unix 移植工具有益） |
+| 3 | desktop logging XDG_DATA_HOME 回退 | 回退路径恰为 Windows 实际日志位置 |
 
 ### 原版已有的 win32 适配（无需重复处理）
 
