@@ -77,6 +77,10 @@ Copy-Item "dist\opencode-windows-x64\bin\opencode.exe" "D:\Program\opencode\open
 
 ## 改造流程
 
+0. **同步上游**（修改代码前）
+   - 先将官方 dev 分支更新到最新，并合并到 win-adapt 分支，确保改动基于最新上游代码
+   - 按 `merge-upstream` skill 执行（含前置检查、差异评估、安全审查、冲突处理、typecheck 验证）
+
 1. **定位问题**
    - 复现：明确触发条件、频率、症状
    - 根因分析：追踪代码路径，区分"超时前卡住"还是"超时后卡住"
