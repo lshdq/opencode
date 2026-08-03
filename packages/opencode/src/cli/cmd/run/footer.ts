@@ -110,8 +110,6 @@ const VARIANT_ROWS = RUN_COMMAND_PANEL_ROWS
 const NOTICE_DURATION = 3000
 const THEME_REFRESH_DELAYS = [1000, 1000] as const
 
-let themeSignalUnavailableWarned = false
-
 function createEmptySubagentState(): FooterSubagentState {
   return {
     tabs: [],
@@ -297,12 +295,7 @@ export class RunFooter implements FooterApi {
     this.renderer.on(CliRenderEvents.PALETTE, this.handlePalette)
     this.renderer.on(CliRenderEvents.THEME_MODE, this.handleThemeRefresh)
     this.renderer.prependInputHandler(this.handleThemeNotification)
-    if (process.platform === "win32") {
-      if (!themeSignalUnavailableWarned) {
-        themeSignalUnavailableWarned = true
-        console.error("opencode: SIGUSR2 is unavailable on Windows; signal-based theme refresh is disabled")
-      }
-    } else {
+    if (process.platform !== "win32") {
       process.on("SIGUSR2", this.handleThemeSignal)
     }
 

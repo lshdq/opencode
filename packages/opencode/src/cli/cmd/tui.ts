@@ -216,9 +216,7 @@ export const TuiThreadCommand = cmd({
       const reload = () => {
         client.call("reload", undefined).catch(() => {})
       }
-      if (process.platform === "win32") {
-        console.error("opencode: SIGUSR2 is unavailable on Windows; signal-based config reload is disabled")
-      } else {
+      if (process.platform !== "win32") {
         process.on("SIGUSR2", reload)
       }
 
