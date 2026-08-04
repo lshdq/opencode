@@ -60,6 +60,7 @@ Copy-Item "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe" "D:\Pro
 | 12 | 硬编码 `/tmp` 路径 | debug-workspace-plugin.ts、example-workspace.ts（os.tmpdir） | `7d936fd5f3` |
 | 13 | clangd symlink 需管理员/开发者模式 | `packages/opencode/src/lsp/server.ts`（win32 copyFile） | `7d936fd5f3` |
 | 14 | uninstall 在 win32 无意义探测 bash rc | `packages/opencode/src/cli/cmd/uninstall.ts`（SHELL 未设置提前返回） | `7d936fd5f3` |
+| 15 | ripgrep zip 解压用 powershell 5.1，继承 pwsh7 的 PSModulePath 后 5.1 优先加载不兼容的 PS7 版 Microsoft.PowerShell.Archive，`Expand-Archive` 报 CouldNotAutoloadMatchingModule，导致 rg.exe 装不上、skill 加载/grep/glob 全部失败 | `packages/core/src/ripgrep/binary.ts`（zip 解压优先 tar.exe；兜底 pwsh→5.1 且剥离 PSModulePath、强制 UTF-8 输出；zip 复用+解压失败删除重下）、`packages/opencode/src/util/archive.ts`（同款 tar.exe 优先）、`packages/opencode/src/tool/skill.ts`（ripgrep 失败时文件列表降级为空，不阻断 skill 加载） | 1.18.11.w4 |
 
 修复细节见 `windows适配文档/版本说明/`（w2、w3）。
 
@@ -83,7 +84,7 @@ Copy-Item "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe" "D:\Pro
 - cross-spawn 进程启动（`overlapped` stdio、`windowsHide`、`detached: false`、`taskkill /T /F`）
 - PTY（`useConptyDll: true`、UTF-8 环境变量）
 - 文件路径规范化（`FSUtil.normalizePath`、`windowsPath`、驱动器号处理）
-- ripgrep 二进制下载（`.exe`、PowerShell `Expand-Archive`）
+- ripgrep 二进制下载（`.exe`；解压已改为 tar.exe 优先，见已修复 #15）
 - LSP 服务器安装（`.exe`/`.cmd` 扩展、平台特定下载 URL）
 - 剪贴板（PowerShell `Set-Clipboard`）
 - TUI Ctrl+C 守卫（`kernel32.dll` FFI）

@@ -35,8 +35,13 @@ export namespace RipgrepBinary {
       const http = HttpClient.filterStatusOk(yield* HttpClient.HttpClient)
       const spawner = yield* ChildProcessSpawner
 
-      const run = Effect.fnUntraced(function* (command: string, args: string[]) {
-        const handle = yield* spawner.spawn(ChildProcess.make(command, args, { extendEnv: true, stdin: "ignore" }))
+      const run = Effect.fnUntraced(function* (command: string, args: string[], opts?: { env?: Record<string, string> }) {
+        const handle = yield* spawner.spawn(
+          ChildProcess.make(command, args, {
+            stdin: "ignore",
+            ...(opts?.env ? { extendEnv: false, env: opts.env } : { extendEnv: true }),
+          }),
+        )
         const [stdout, stderr, code] = yield* Effect.all(
           [
             Stream.mkString(Stream.decodeText(handle.stdout)),
@@ -56,17 +61,42 @@ export namespace RipgrepBinary {
         const dir = yield* fs.makeTempDirectoryScoped({ directory: Global.Path.bin, prefix: "ripgrep-" })
 
         if (config.extension === "zip") {
-          const shell = (yield* Effect.sync(() => which("powershell.exe") ?? which("pwsh.exe"))) ?? "powershell.exe"
-          const result = yield* run(shell, [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            `$global:ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath '${archive.replaceAll("'", "''")}' -DestinationPath '${dir.replaceAll("'", "''")}' -Force`,
-          ])
-          if (result.code !== 0)
-            throw new Error(
-              result.stderr.trim() || result.stdout.trim() || `ripgrep extraction failed with code ${result.code}`,
+          const tar = yield* Effect.sync(() => which("tar") ?? which("tar.exe"))
+          if (tar) {
+            const result = yield* run(tar, ["-xf", archive, "-C", dir])
+            if (result.code !== 0)
+              throw new Error(
+                result.stderr.trim() || result.stdout.trim() || `ripgrep extraction failed with code ${result.code}`,
+              )
+          } else {
+            const shells = yield* Effect.sync(() => ({ pwsh: which("pwsh.exe"), powershell: which("powershell.exe") }))
+            const shell = shells.pwsh ?? shells.powershell ?? "powershell.exe"
+            // When spawning powershell.exe(5.1) from a pwsh7-launched process, the inherited
+            // PSModulePath contains pwsh7 module dirs; 5.1 then resolves the PS7-only
+            // Microsoft.PowerShell.Archive first and fails to load it. Strip it so 5.1 falls
+            // back to its own defaults. Also force UTF-8 output so stderr is readable.
+            const env: Record<string, string> | undefined = shells.pwsh
+              ? undefined
+              : Object.fromEntries(
+                  Object.entries(process.env).flatMap(([key, value]): Array<[string, string]> =>
+                    value !== undefined && key.toLowerCase() !== "psmodulepath" ? [[key, value]] : [],
+                  ),
+                )
+            const result = yield* run(
+              shell,
+              [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $global:ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath '${archive.replaceAll("'", "''")}' -DestinationPath '${dir.replaceAll("'", "''")}' -Force`,
+              ],
+              { env },
             )
+            if (result.code !== 0)
+              throw new Error(
+                result.stderr.trim() || result.stdout.trim() || `ripgrep extraction failed with code ${result.code}`,
+              )
+          }
         }
 
         if (config.extension === "tar.gz") {
@@ -105,17 +135,24 @@ export namespace RipgrepBinary {
             const url = `https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`
             const archive = path.join(Global.Path.bin, filename)
 
-            yield* Effect.logInfo("downloading ripgrep", { url })
             yield* fs.ensureDir(Global.Path.bin).pipe(Effect.orDie)
-            const bytes = yield* HttpClientRequest.get(url).pipe(
-              http.execute,
-              Effect.flatMap((response) => response.arrayBuffer),
-              Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
-            )
-            if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
+            if (!(yield* fs.exists(archive).pipe(Effect.orDie))) {
+              yield* Effect.logInfo("downloading ripgrep", { url })
+              const bytes = yield* HttpClientRequest.get(url).pipe(
+                http.execute,
+                Effect.flatMap((response) => response.arrayBuffer),
+                Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
+              )
+              if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
 
-            yield* fs.writeWithDirs(archive, new Uint8Array(bytes))
-            yield* extract(archive, config, target)
+              yield* fs.writeWithDirs(archive, new Uint8Array(bytes))
+            }
+            yield* extract(archive, config, target).pipe(
+              // a failed extraction usually means a corrupt archive; drop it so the next run re-downloads
+              Effect.catchCause((cause) =>
+                fs.remove(archive, { force: true }).pipe(Effect.ignore, Effect.flatMap(() => Effect.failCause(cause))),
+              ),
+            )
             yield* fs.remove(archive, { force: true }).pipe(Effect.ignore)
             return target
           }),

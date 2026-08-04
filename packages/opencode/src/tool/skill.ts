@@ -33,14 +33,19 @@ export const SkillTool = Tool.define(
 
           const dir = path.dirname(info.location)
           const base = dir
-          const files = yield* ripgrep.find({
-            cwd: dir,
-            pattern: "!**/SKILL.md",
-            hidden: true,
-            follow: false,
-            signal: ctx.abort,
-            limit: 10,
-          })
+          const files = yield* ripgrep
+            .find({
+              cwd: dir,
+              pattern: "!**/SKILL.md",
+              hidden: true,
+              follow: false,
+              signal: ctx.abort,
+              limit: 10,
+            })
+            .pipe(
+              // the file list is supplemental; a broken ripgrep must not block skill loading
+              Effect.catch((error) => (ctx.abort.aborted ? Effect.fail(error) : Effect.succeed([]))),
+            )
 
           return {
             title: `Loaded skill: ${info.name}`,

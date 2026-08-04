@@ -29,15 +29,28 @@ afterEach(async () => {
 
 const it = testEffect(LayerNode.compile(LayerNode.group([ToolRegistry.node, CrossSpawnSpawner.node, Ripgrep.node])))
 
+const itBrokenRipgrep = testEffect(
+  LayerNode.compile(LayerNode.group([ToolRegistry.node, CrossSpawnSpawner.node, Ripgrep.node]), [
+    [
+      Ripgrep.node,
+      Layer.mock(Ripgrep.Service)({
+        find: () => Effect.fail(new Ripgrep.Error({ message: "ripgrep execution failed" })),
+      }),
+    ],
+  ]),
+)
+
 describe("tool.skill", () => {
-  it.instance("execute returns skill content block with files", () =>
-    Effect.gen(function* () {
-      const dir = (yield* TestInstance).directory
-      const skill = path.join(dir, ".opencode", "skill", "tool-skill")
-      yield* Effect.promise(() =>
-        Bun.write(
-          path.join(skill, "SKILL.md"),
-          `---
+  it.instance(
+    "execute returns skill content block with files",
+    () =>
+      Effect.gen(function* () {
+        const dir = (yield* TestInstance).directory
+        const skill = path.join(dir, ".opencode", "skill", "tool-skill")
+        yield* Effect.promise(() =>
+          Bun.write(
+            path.join(skill, "SKILL.md"),
+            `---
 name: tool-skill
 description: Skill for tool tests.
 ---
@@ -46,89 +59,142 @@ description: Skill for tool tests.
 
 Use this skill.
 `,
-        ),
-      )
-      yield* Effect.promise(() => Bun.write(path.join(skill, "scripts", "demo.txt"), "demo"))
+          ),
+        )
+        yield* Effect.promise(() => Bun.write(path.join(skill, "scripts", "demo.txt"), "demo"))
 
-      const home = process.env.OPENCODE_TEST_HOME
-      process.env.OPENCODE_TEST_HOME = dir
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          process.env.OPENCODE_TEST_HOME = home
-        }),
-      )
-
-      const registry = yield* ToolRegistry.Service
-      const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
-      const tool = (yield* registry.tools({
-        providerID: "opencode" as any,
-        modelID: "gpt-5" as any,
-        agent,
-      })).find((tool) => tool.id === SkillTool.id)
-      if (!tool) throw new Error("Skill tool not found")
-
-      expect(tool.description).not.toContain("tool-skill")
-      expect(tool.description).not.toContain("Skill for tool tests.")
-
-      const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
-      const ctx: Tool.Context = {
-        ...baseCtx,
-        ask: (req) =>
+        const home = process.env.OPENCODE_TEST_HOME
+        process.env.OPENCODE_TEST_HOME = dir
+        yield* Effect.addFinalizer(() =>
           Effect.sync(() => {
-            requests.push(req)
+            process.env.OPENCODE_TEST_HOME = home
           }),
-      }
+        )
 
-      const result = yield* tool.execute({ name: "tool-skill" }, ctx)
-      const file = path.resolve(skill, "scripts", "demo.txt")
+        const registry = yield* ToolRegistry.Service
+        const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
+        const tool = (yield* registry.tools({
+          providerID: "opencode" as any,
+          modelID: "gpt-5" as any,
+          agent,
+        })).find((tool) => tool.id === SkillTool.id)
+        if (!tool) throw new Error("Skill tool not found")
 
-      expect(requests.length).toBe(1)
-      expect(requests[0].permission).toBe("skill")
-      expect(requests[0].patterns).toContain("tool-skill")
-      expect(requests[0].always).toContain("tool-skill")
-      expect(result.metadata.dir).toBe(skill)
-      expect(result.output).toContain(`<skill_content name="tool-skill">`)
-      expect(result.output).toContain(`Base directory for this skill: ${skill}`)
-      expect(result.output).toContain(`<file>${file}</file>`)
-    }),
+        expect(tool.description).not.toContain("tool-skill")
+        expect(tool.description).not.toContain("Skill for tool tests.")
+
+        const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+        const ctx: Tool.Context = {
+          ...baseCtx,
+          ask: (req) =>
+            Effect.sync(() => {
+              requests.push(req)
+            }),
+        }
+
+        const result = yield* tool.execute({ name: "tool-skill" }, ctx)
+        const file = path.resolve(skill, "scripts", "demo.txt")
+
+        expect(requests.length).toBe(1)
+        expect(requests[0].permission).toBe("skill")
+        expect(requests[0].patterns).toContain("tool-skill")
+        expect(requests[0].always).toContain("tool-skill")
+        expect(result.metadata.dir).toBe(skill)
+        expect(result.output).toContain(`<skill_content name="tool-skill">`)
+        expect(result.output).toContain(`Base directory for this skill: ${skill}`)
+        expect(result.output).toContain(`<file>${file}</file>`)
+      }),
+    60_000,
   )
 
-  it.instance("execute preserves not found message", () =>
-    Effect.gen(function* () {
-      const dir = (yield* TestInstance).directory
-      const home = process.env.OPENCODE_TEST_HOME
-      process.env.OPENCODE_TEST_HOME = dir
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          process.env.OPENCODE_TEST_HOME = home
-        }),
-      )
+  itBrokenRipgrep.instance(
+    "execute still returns skill content when ripgrep fails",
+    () =>
+      Effect.gen(function* () {
+        const dir = (yield* TestInstance).directory
+        const skill = path.join(dir, ".opencode", "skill", "tool-skill")
+        yield* Effect.promise(() =>
+          Bun.write(
+            path.join(skill, "SKILL.md"),
+            `---
+name: tool-skill
+description: Skill for tool tests.
+---
 
-      const registry = yield* ToolRegistry.Service
-      const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
-      const tool = (yield* registry.tools({
-        providerID: "opencode" as any,
-        modelID: "gpt-5" as any,
-        agent,
-      })).find((tool) => tool.id === SkillTool.id)
-      if (!tool) throw new Error("Skill tool not found")
+# Tool Skill
 
-      const exit = yield* tool
-        .execute(
-          { name: "missing-skill" },
-          {
-            ...baseCtx,
-            ask: () => Effect.void,
-          },
+Use this skill.
+`,
+          ),
         )
-        .pipe(Effect.exit)
+        yield* Effect.promise(() => Bun.write(path.join(skill, "scripts", "demo.txt"), "demo"))
 
-      expect(Exit.isFailure(exit)).toBe(true)
-      if (Exit.isFailure(exit)) {
-        const error = Cause.squash(exit.cause)
-        expect(error).toBeInstanceOf(Error)
-        if (error instanceof Error) expect(error.message).toContain('Skill "missing-skill" not found.')
-      }
-    }),
+        const home = process.env.OPENCODE_TEST_HOME
+        process.env.OPENCODE_TEST_HOME = dir
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            process.env.OPENCODE_TEST_HOME = home
+          }),
+        )
+
+        const registry = yield* ToolRegistry.Service
+        const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
+        const tool = (yield* registry.tools({
+          providerID: "opencode" as any,
+          modelID: "gpt-5" as any,
+          agent,
+        })).find((tool) => tool.id === SkillTool.id)
+        if (!tool) throw new Error("Skill tool not found")
+
+        const result = yield* tool.execute({ name: "tool-skill" }, { ...baseCtx, ask: () => Effect.void })
+
+        expect(result.output).toContain(`<skill_content name="tool-skill">`)
+        expect(result.output).toContain("Use this skill.")
+        expect(result.output).toContain(`Base directory for this skill: ${skill}`)
+        expect(result.output).not.toContain("<file>")
+      }),
+    60_000,
+  )
+
+  it.instance(
+    "execute preserves not found message",
+    () =>
+      Effect.gen(function* () {
+        const dir = (yield* TestInstance).directory
+        const home = process.env.OPENCODE_TEST_HOME
+        process.env.OPENCODE_TEST_HOME = dir
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            process.env.OPENCODE_TEST_HOME = home
+          }),
+        )
+
+        const registry = yield* ToolRegistry.Service
+        const agent = { name: "build", mode: "primary" as const, permission: [], options: {} }
+        const tool = (yield* registry.tools({
+          providerID: "opencode" as any,
+          modelID: "gpt-5" as any,
+          agent,
+        })).find((tool) => tool.id === SkillTool.id)
+        if (!tool) throw new Error("Skill tool not found")
+
+        const exit = yield* tool
+          .execute(
+            { name: "missing-skill" },
+            {
+              ...baseCtx,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          const error = Cause.squash(exit.cause)
+          expect(error).toBeInstanceOf(Error)
+          if (error instanceof Error) expect(error.message).toContain('Skill "missing-skill" not found.')
+        }
+      }),
+    60_000,
   )
 })
