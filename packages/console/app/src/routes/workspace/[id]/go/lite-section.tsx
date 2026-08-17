@@ -306,6 +306,7 @@ export function LiteSection(props: { lite: LiteSubscription | undefined }) {
           <ul data-slot="promo-models">
             <li>Grok 4.5</li>
             <li>GPT 5.6 Luna</li>
+            <li>GLM-5.3</li>
             <li>GLM-5.2</li>
             <li>GLM-5.1</li>
             <li>Kimi K3</li>
@@ -313,6 +314,7 @@ export function LiteSection(props: { lite: LiteSubscription | undefined }) {
             <li>Kimi K2.6</li>
             <li>MiniMax M3</li>
             <li>MiniMax M2.7</li>
+            <li>Qwen3.8 Max</li>
             <li>Qwen3.7 Max</li>
             <li>Qwen3.7 Plus</li>
             <li>Qwen3.6 Plus</li>
