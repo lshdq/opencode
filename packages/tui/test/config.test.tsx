@@ -101,6 +101,16 @@ test("resolves a session move keybind", () => {
   expect(config.keybinds.get("session.move")).toMatchObject([{ key: "ctrl+o" }])
 })
 
+test("resolves a permission mode keybind without assigning a default", () => {
+  const defaults = resolve({}, { terminalSuspend: true })
+  const config = resolve({ keybinds: { permission_mode: "ctrl+shift+a" } }, { terminalSuspend: true })
+
+  expect(defaults.keybinds.has("permission.mode")).toBe(false)
+  expect(config.keybinds.get("permission.mode")).toMatchObject([
+    { key: "ctrl+shift+a", desc: "Toggle auto-approve permissions" },
+  ])
+})
+
 test("disables suspend and assigns ctrl+z to undo when unsupported", () => {
   const config = resolve({}, { terminalSuspend: false })
 
