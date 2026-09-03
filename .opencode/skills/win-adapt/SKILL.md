@@ -1,6 +1,6 @@
 ---
 name: win-adapt
-description: opencode Windows 适配改造。触发关键词：windows适配、win-adapt、windows问题、win32修复、windows兼容、win32适配。包含：已知问题清单、已完成适配、设计原则、改造流程、构建验证、部署。
+description: opencode Windows 适配改造与构建部署。触发关键词：构建、windows适配、win-adapt、windows问题、win32修复、windows兼容、win32适配。包含：已知问题清单、已完成适配、设计原则、改造流程、构建验证、部署；构建默认同时执行安全的版本化部署。
 slash: true
 ---
 
@@ -26,19 +26,38 @@ opencode 官方建议 Windows 用户使用 WSL，本 fork（`win-adapt` 分支�
 
 ## 构建与部署
 
+用户说“构建”时，必须依次完成构建、冒烟验证、版本化部署和部署校验，不得在构建成功后停止。只有用户明确要求“只构建、不部署”时才跳过部署。
+
+- 构建失败时不得执行部署。
+- 版本号必须从本次构建产物的 `--version` 输出读取，不得根据参数或日志猜测。
+- 仅部署版本化文件；不要覆盖现有 `opencode.exe`（可能被运行中的进程锁定）。
+- 激活（替换 `opencode.exe`）仅在用户明确要求，且所有 opencode 实例均已退出后执行。
+
 ```powershell
-# 构建（适配号默认 2，可用 -WinVersion N 指定）
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "packages\opencode\script\build-win.ps1"
-pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "packages\opencode\script\build-win.ps1" -WinVersion 3
+$ErrorActionPreference = "Stop"
 
-# typecheck（从包目录运行，不从仓库根）
-bun run typecheck   # 在 packages/core 或 packages/opencode 下
+# 1. 在当前 pwsh 会话构建，以保留脚本末尾 bun 命令的真实退出码
+& "packages\opencode\script\build-win.ps1"
+# 指定适配号时将上一行替换为：& "packages\opencode\script\build-win.ps1" -WinVersion 3
+if ($LASTEXITCODE -ne 0) { throw "Windows build failed with exit code $LASTEXITCODE" }
 
-# 部署：构建完成后复制到安装目录，文件名追加版本号
-# 仅复制版本化文件；不要覆盖现有 opencode.exe（可能被运行中的进程锁定），
-# 激活（替换 opencode.exe）由用户在退出所有 opencode 实例后自行执行
-Copy-Item "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe" "D:\Program\opencode\opencode.exe.1.18.11.w3"
+# 2. 构建成功后自动部署，文件名使用产物的实际版本号
+$source = (Resolve-Path -LiteralPath "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe").Path
+$versionOutput = & $source --version
+if ($LASTEXITCODE -ne 0) { throw "Reading built opencode version failed with exit code $LASTEXITCODE" }
+$version = $versionOutput.Trim()
+if ($version -notmatch '^\d+\.\d+\.\d+\.w\d+$') { throw "Unexpected opencode version: $version" }
+
+$installDirectory = "D:\Program\opencode"
+if (-not (Test-Path -LiteralPath $installDirectory -PathType Container)) { throw "Install directory does not exist: $installDirectory" }
+$target = Join-Path $installDirectory "opencode.exe.$version"
+Copy-Item -LiteralPath $source -Destination $target -Force
+if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw "Deployment target was not created: $target" }
+if ((Get-FileHash -LiteralPath $source).Hash -ne (Get-FileHash -LiteralPath $target).Hash) { throw "Deployed file hash does not match the build artifact" }
+Write-Output "[deploy-win] deployed=$target"
 ```
+
+typecheck 从 `packages/core` 或 `packages/opencode` 目录运行：`bun run typecheck`，不要从仓库根目录运行。
 
 ## 已知 Windows 问题清单
 
@@ -115,6 +134,7 @@ Copy-Item "packages\opencode\dist\opencode-windows-x64\bin\opencode.exe" "D:\Pro
 4. **验证**
    - `bun run typecheck`（packages/core 和 packages/opencode）
    - `build-win.ps1` 构建 + smoke test
+   - 构建成功后按“构建与部署”流程自动部署版本化文件并校验文件哈希
    - 相关测试（注意已有 Windows 环境失败，见下方）
    - 手动测试实际场景
 
