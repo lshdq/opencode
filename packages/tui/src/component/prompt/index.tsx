@@ -1421,6 +1421,7 @@ export function Prompt(props: PromptProps) {
               ref={(r: TextareaRenderable) => {
                 input = r
                 Object.assign(r, {
+                  canCut: () => !props.disabled,
                   getClipboardText: (text: string) => expandPastedTextPlaceholders(text, store.prompt.parts),
                 })
                 setInputTarget(r)

@@ -1,8 +1,9 @@
 import { expect, mock, test } from "bun:test"
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { createTestRenderer } from "@opentui/core/testing"
-import { TextRenderable, type Renderable } from "@opentui/core"
+import { TextareaRenderable, TextRenderable, type Renderable } from "@opentui/core"
 import { Effect } from "effect"
+import { createSignal } from "solid-js"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Global } from "@opencode-ai/core/global"
 import { createTuiResolvedConfig } from "./fixture/tui-runtime"
@@ -225,6 +226,119 @@ test("permission_mode keybind toggles auto-approve permissions", async () => {
     ).toBe("Enable auto-approve permissions")
 
     keymap.dispatchCommand("app.exit")
+    await task
+  } finally {
+    if (!setup.renderer.isDestroyed) setup.renderer.destroy()
+    await task?.catch(() => {})
+    mock.restore()
+  }
+})
+
+test("plugin prompt respects dynamic cut disabled state", async () => {
+  const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
+  const core = await import("@opentui/core")
+  await mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
+  const events = createEventSource()
+  const calls = createFetch()
+  const writes: string[] = []
+  let api: TuiPluginApi | undefined
+  let disposePlugin: (() => void) | undefined
+  let disposeSlots: (() => void) | undefined
+  let setPromptDisabled: ((disabled: boolean) => void) | undefined
+  let task: Promise<unknown> | undefined
+  let started!: () => void
+  const ready = new Promise<void>((resolve) => {
+    started = resolve
+  })
+
+  try {
+    const { run } = await import("../src/app")
+    task = Effect.runPromise(
+      run({
+        url: "http://test",
+        directory,
+        config: createTuiResolvedConfig({ plugin_enabled: {} }),
+        fetch: calls.fetch,
+        events: events.source,
+        clipboard: {
+          write: async (text) => {
+            writes.push(text)
+          },
+        },
+        args: {},
+        pluginHost: {
+          async start(input) {
+            api = input.api
+            const slots = input.runtime.setupSlots(input.api)
+            disposeSlots = slots.dispose
+            disposePlugin = slots.register({
+              id: "disabled-prompt-test",
+              slots: {
+                home_prompt: (_, props) => {
+                  const [disabled, setDisabled] = createSignal(false)
+                  setPromptDisabled = setDisabled
+                  return input.api.ui.Prompt({
+                    get disabled() {
+                      return disabled()
+                    },
+                    ref: props.ref,
+                  })
+                },
+              },
+            })
+            setTimeout(started, 0)
+          },
+          async dispose() {
+            disposePlugin?.()
+            disposeSlots?.()
+          },
+        },
+      }).pipe(Effect.provide(AppNodeBuilder.build(Global.node))),
+    )
+
+    await ready
+    await setup.renderOnce()
+    const plugin = api
+    if (!plugin) throw new Error("expected plugin API")
+    await setup.waitFor(() => plugin.state.ready).catch(() => {
+      throw new Error("TUI state did not become ready")
+    })
+    plugin.ui.dialog.clear()
+    await setup
+      .waitFor(() => {
+        const editor = setup.renderer.currentFocusedEditor
+        return (
+          editor instanceof TextareaRenderable &&
+          (editor as TextareaRenderable & { canCut?: () => boolean }).canCut?.() === true
+        )
+      })
+      .catch(() => {
+        throw new Error("plugin prompt was not rendered")
+      })
+    const textarea = setup.renderer.currentFocusedEditor
+    if (!(textarea instanceof TextareaRenderable)) throw new Error("expected focused prompt textarea")
+
+    textarea.insertText("draft")
+    textarea.cursorOffset = textarea.plainText.length
+    textarea.moveCursorLeft({ select: true })
+    expect(textarea.getSelectedText()).toBe("t")
+
+    if (!setPromptDisabled) throw new Error("expected prompt disabled setter")
+    setPromptDisabled(true)
+    expect((textarea as TextareaRenderable & { canCut?: () => boolean }).canCut?.()).toBe(false)
+    setup.mockInput.pressKey("x", { ctrl: true })
+    expect(textarea.plainText).toBe("draft")
+    expect(textarea.getSelectedText()).toBe("t")
+    expect(writes).toEqual([])
+
+    plugin.keymap.clearPendingSequence()
+    setPromptDisabled(false)
+    expect((textarea as TextareaRenderable & { canCut?: () => boolean }).canCut?.()).toBe(true)
+    setup.mockInput.pressKey("x", { ctrl: true })
+    expect(textarea.plainText).toBe("draf")
+    expect(writes).toEqual(["t"])
+
+    plugin.keymap.dispatchCommand("app.exit")
     await task
   } finally {
     if (!setup.renderer.isDestroyed) setup.renderer.destroy()

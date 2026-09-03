@@ -5,7 +5,7 @@ import { Deferred, Effect } from "effect"
 import { Global } from "@opencode-ai/core/global"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
-import { ClipboardProvider, useClipboard } from "./context/clipboard"
+import { ClipboardProvider, useClipboard, type ClipboardService } from "./context/clipboard"
 import { ExitProvider, useExit } from "./context/exit"
 import { EpilogueProvider } from "./context/epilogue"
 import * as Selection from "./util/selection"
@@ -149,6 +149,7 @@ export type TuiInput = {
   fetch?: typeof fetch
   headers?: RequestInit["headers"]
   events?: EventSource
+  clipboard?: ClipboardService
   pluginHost: TuiPluginHost
 }
 
@@ -293,7 +294,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                           skipInitialLoading: Boolean(process.env.OPENCODE_FAST_BOOT),
                         }}
                       >
-                        <ClipboardProvider>
+                        <ClipboardProvider value={input.clipboard}>
                           <OpencodeKeymapProvider keymap={keymap}>
                             <ArgsProvider {...input.args}>
                               <KVProvider>
@@ -434,14 +435,13 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       setReady(true)
     })
 
-  // Let selection copy/dismiss win ahead of normal bindings when explicit copy is required.
-  const offSelectionKeys = keymap.intercept(
-    "key",
-    ({ event }) => {
-      if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
-      Selection.handleSelectionKey(renderer, toast, event, clipboard)
-    },
-    { priority: 1 },
+  // Let selection cut and explicit copy/dismiss win ahead of normal bindings.
+  const offSelectionKeys = Selection.registerKeyHandler(
+    keymap,
+    renderer,
+    toast,
+    clipboard,
+    Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT,
   )
   onCleanup(() => {
     offSelectionKeys()
