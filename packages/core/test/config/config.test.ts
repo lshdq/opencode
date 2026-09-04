@@ -76,6 +76,16 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("parses the optional auto_approve boolean field", () =>
+    Effect.sync(() => {
+      const decode = Schema.decodeUnknownSync(ConfigV1.Info)
+      expect(decode({ auto_approve: true }).auto_approve).toBe(true)
+      expect(decode({ auto_approve: false }).auto_approve).toBe(false)
+      expect(decode({}).auto_approve).toBeUndefined()
+      expect(() => decode({ auto_approve: "true" })).toThrow()
+    }),
+  )
+
   it.effect("migrates arbitrary v1 configuration into valid v2 configuration", () =>
     Effect.sync(() => {
       FastCheck.assert(

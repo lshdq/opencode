@@ -43,6 +43,7 @@ export type Theme = {
   readonly info: RGBA
   readonly text: RGBA
   readonly textMuted: RGBA
+  readonly permissionAuto: RGBA
   readonly selectedListItemText: RGBA
   readonly background: RGBA
   readonly backgroundPanel: RGBA
@@ -120,9 +121,10 @@ type ColorValue = HexColor | RefName | Variant | RGBA
 export type ThemeJson = {
   $schema?: string
   defs?: Record<string, HexColor | RefName>
-  theme: Omit<Record<ThemeColor, ColorValue>, "selectedListItemText" | "backgroundMenu"> & {
+  theme: Omit<Record<ThemeColor, ColorValue>, "selectedListItemText" | "backgroundMenu" | "permissionAuto"> & {
     selectedListItemText?: ColorValue
     backgroundMenu?: ColorValue
+    permissionAuto?: ColorValue
     thinkingOpacity?: number
   }
 }
@@ -265,7 +267,10 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
 
   const resolved = Object.fromEntries(
     Object.entries(theme.theme)
-      .filter(([key]) => key !== "selectedListItemText" && key !== "backgroundMenu" && key !== "thinkingOpacity")
+      .filter(
+        ([key]) =>
+          key !== "selectedListItemText" && key !== "backgroundMenu" && key !== "permissionAuto" && key !== "thinkingOpacity",
+      )
       .map(([key, value]) => {
         return [key, resolveColor(value as ColorValue)]
       }),
@@ -286,6 +291,13 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
     resolved.backgroundMenu = resolveColor(theme.theme.backgroundMenu)
   } else {
     resolved.backgroundMenu = resolved.backgroundElement
+  }
+
+  // Handle permissionAuto - optional with fallback to textMuted
+  if (theme.theme.permissionAuto !== undefined) {
+    resolved.permissionAuto = resolveColor(theme.theme.permissionAuto)
+  } else {
+    resolved.permissionAuto = resolved.textMuted
   }
 
   // Handle thinkingOpacity - optional with default of 0.6

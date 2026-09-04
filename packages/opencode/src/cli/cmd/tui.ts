@@ -250,6 +250,22 @@ export const TuiThreadCommand = cmd({
             events: createEventSource(client),
           }
 
+      const autoFlag = args.auto || args.yolo || args["dangerously-skip-permissions"]
+      const { createOpencodeClient } = await import("@opencode-ai/sdk/v2")
+      const cfg = autoFlag
+        ? undefined
+        : await createOpencodeClient({
+            baseUrl: transport.url,
+            directory: cwd,
+            fetch: transport.fetch,
+            headers: transport.headers,
+          })
+            .config.get()
+            .then(
+              (x) => x.data,
+              () => undefined,
+            )
+
       try {
         await validateSession({
           url: transport.url,
@@ -293,7 +309,7 @@ export const TuiThreadCommand = cmd({
               model: args.model,
               prompt,
               fork: args.fork,
-              auto: args.auto || args.yolo || args["dangerously-skip-permissions"],
+              auto: autoFlag || cfg?.auto_approve === true,
             },
           }),
         )

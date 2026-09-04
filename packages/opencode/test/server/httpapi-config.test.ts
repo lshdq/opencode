@@ -65,6 +65,28 @@ describe("config HttpApi", () => {
   )
 
   it.live(
+    "serves auto_approve through the config endpoint",
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirEffect({ config: { auto_approve: true, formatter: false, lsp: false } })
+
+      const response = yield* Effect.promise(() =>
+        Promise.resolve(
+          app().request("/config", {
+            headers: {
+              "x-opencode-directory": tmp.path,
+            },
+          }),
+        ),
+      )
+
+      expect(response.status).toBe(200)
+      expect(yield* Effect.promise(() => response.json())).toMatchObject({
+        auto_approve: true,
+      })
+    }),
+  )
+
+  it.live(
     "serves config with active provider model status",
     Effect.gen(function* () {
       const tmp = yield* tmpdirEffect({

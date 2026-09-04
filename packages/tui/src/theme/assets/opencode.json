@@ -77,6 +77,10 @@
       "dark": "darkStep11",
       "light": "lightStep11"
     },
+    "permissionAuto": {
+      "dark": "#8b0000",
+      "light": "#8b0000"
+    },
     "background": {
       "dark": "darkStep1",
       "light": "lightStep1"

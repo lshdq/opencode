@@ -271,7 +271,7 @@ export const RunCommand = effectCmd({
     yield* Effect.promise(async () => {
       const rawMessage = [...args.message, ...(args["--"] || [])].join(" ")
       const interactive = args.mini
-      const auto = args.auto || args.yolo || args["dangerously-skip-permissions"]
+      const autoFlag = args.auto || args.yolo || args["dangerously-skip-permissions"]
       const thinking = interactive ? (args.thinking ?? true) : (args.thinking ?? false)
       const die = (message: string): never => {
         UI.error(message)
@@ -695,6 +695,14 @@ export const RunCommand = effectCmd({
         // rebind the SDK to the session's directory after the subscription is
         // created, and replies issued from inside the loop must use that client.
         async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
+          const auto =
+            autoFlag ||
+            (
+              await client.config.get().then(
+                (x) => x.data,
+                () => undefined,
+              )
+            )?.auto_approve === true
           const toggles = new Map<string, boolean>()
           const sessions = new Set([sessionID])
           let error: string | undefined

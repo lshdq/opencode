@@ -83,6 +83,12 @@ typecheck 从 `packages/core` 或 `packages/opencode` 目录运行：`bun run ty
 
 修复细节见 `windows适配文档/版本说明/`（w2、w3）。
 
+### 本地功能扩展（非 Windows 修复，合并上游时需保留）
+
+| # | 功能 | 位置 |
+|---|------|------|
+| 1 | 新增顶层配置项 `auto_approve`（布尔）：设为 true 后不加 `--auto` 启动 TUI / `opencode run` 也默认进入 auto 权限模式（自动批准未显式 deny 的权限请求） | `packages/core/src/v1/config/config.ts`（schema 字段）、`packages/opencode/src/cli/cmd/tui.ts`、`packages/opencode/src/cli/cmd/run.ts`（auto 计算 OR 配置值）、`packages/sdk`（生成产物） |
+
 ### 待修复（按影响排序）
 
 | # | 问题 | 位置 | 影响 |

@@ -2000,6 +2000,7 @@ export type Config = {
   instructions?: Array<string>
   layout?: LayoutConfig
   permission?: PermissionConfig
+  auto_approve?: boolean
   tools?: {
     [key: string]: boolean
   }

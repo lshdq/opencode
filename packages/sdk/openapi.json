@@ -21463,6 +21463,9 @@
           "permission": {
             "$ref": "#/components/schemas/PermissionConfig"
           },
+          "auto_approve": {
+            "type": "boolean"
+          },
           "tools": {
             "type": "object",
             "additionalProperties": {
