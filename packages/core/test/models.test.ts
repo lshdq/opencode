@@ -4,11 +4,12 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNodePlatform } from "@opencode-ai/core/effect/app-node-platform"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { EventV2 } from "@opencode-ai/core/event"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { Global } from "@opencode-ai/core/global"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { it } from "./lib/effect"
-import { readFile, rm, writeFile, utimes, mkdir } from "fs/promises"
+import { rm, writeFile, utimes, mkdir, stat } from "fs/promises"
 import path from "path"
 
 // test/preload.ts pins OPENCODE_MODELS_PATH to a fixture so other tests can
@@ -87,13 +88,14 @@ const makeMockClient = (state: Ref.Ref<MockState>) =>
     }),
   )
 
-const buildLayer = (state: Ref.Ref<MockState>) =>
+const buildLayer = (state: Ref.Ref<MockState>, replacements: LayerNode.Replacements = []) =>
   // Layer.fresh is required because the ModelsDev implementation is a module-level Layer constant,
   // and Effect.provide uses a process-global MemoMap by default — without fresh,
   // every test would reuse the cachedInvalidateWithTTL state from the first run.
   Layer.fresh(
     AppNodeBuilder.build(ModelsDev.node, [
       [LayerNodePlatform.httpClient, Layer.succeed(HttpClient.HttpClient, makeMockClient(state))],
+      ...replacements,
     ]),
   )
 
@@ -154,7 +156,7 @@ describe("ModelsDev Service", () => {
     }),
   )
 
-  it.live("get() recovers from a corrupted cache file by fetching a fresh catalog", () =>
+  it.live("get() drops a corrupted cache file and returns an empty catalog without fetching", () =>
     Effect.gen(function* () {
       yield* writeCacheText("{")
       const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
@@ -169,10 +171,11 @@ describe("ModelsDev Service", () => {
             Flag.OPENCODE_DISABLE_MODELS_FETCH = true
           }),
       )
-      expect(result).toEqual(fixture2)
-      expect(yield* Effect.promise(() => readFile(cacheFile, "utf8"))).toBe(JSON.stringify(fixture2))
+      expect(result).toEqual({})
+      const exists = yield* Effect.promise(() => stat(cacheFile).then(() => true, () => false))
+      expect(exists).toBe(false)
       const final = yield* Ref.get(state)
-      expect(final.calls.length).toBe(1)
+      expect(final.calls).toEqual([])
     }),
   )
 
@@ -285,6 +288,41 @@ describe("ModelsDev Service", () => {
       // retryTransient retries 5xx, so calls may be > 1.
       const final = yield* Ref.get(state)
       expect(final.calls.length).toBeGreaterThanOrEqual(1)
+    }),
+  )
+
+  it.live("refresh(true) publishes the Refreshed event after updating the cache", () =>
+    Effect.gen(function* () {
+      yield* writeCache(fixture)
+      const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
+      const published: Array<string> = []
+      const result = yield* Effect.gen(function* () {
+        const svc = yield* ModelsDev.Service
+        const before = yield* svc.get()
+        yield* svc.refresh(true)
+        const after = yield* svc.get()
+        return { before, after }
+      }).pipe(
+        Effect.provide(
+          buildLayer(state, [
+            // Record publishes instead of building the full database-backed
+            // EventV2; anything beyond publish would fail the mock.
+            [
+              EventV2.node,
+              Layer.mock(EventV2.Service, {
+                publish: (definition, data) =>
+                  Effect.sync(() => {
+                    published.push(definition.type)
+                    return { id: EventV2.ID.create(), type: definition.type, data }
+                  }),
+              }),
+            ],
+          ]),
+        ),
+      )
+      expect(result.before).toEqual(fixture)
+      expect(result.after).toEqual(fixture2)
+      expect(published).toEqual(["models-dev.refreshed"])
     }),
   )
 })

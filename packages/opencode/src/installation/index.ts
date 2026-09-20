@@ -144,8 +144,9 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
 
     const upgradeCurl = Effect.fnUntraced(
       function* (target: string) {
-        const response = yield* httpOk.execute(HttpClientRequest.get("https://opencode.ai/install"))
-        const body = yield* response.text
+        const body = yield* httpOk
+          .execute(HttpClientRequest.get("https://opencode.ai/install"))
+          .pipe(Effect.flatMap((response) => response.text), Effect.timeout("10 seconds"))
         const bodyBytes = new TextEncoder().encode(body)
         const shell = yield* upgradeScriptShell()
         const result = yield* appProcess.run(
@@ -215,51 +216,57 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
             const info = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(BrewInfoV2))(infoJson)
             return info.formulae[0].versions.stable
           }
-          const response = yield* httpOk.execute(
+        const data = yield* httpOk
+          .execute(
             HttpClientRequest.get("https://formulae.brew.sh/api/formula/opencode.json").pipe(
               HttpClientRequest.acceptJson,
             ),
           )
-          const data = yield* HttpClientResponse.schemaBodyJson(BrewFormula)(response)
-          return data.versions.stable
+          .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(BrewFormula)), Effect.timeout("10 seconds"))
+        return data.versions.stable
         }
 
         if (detectedMethod === "npm" || detectedMethod === "bun" || detectedMethod === "pnpm") {
-          const response = yield* httpOk.execute(
-            HttpClientRequest.get(
-              `${yield* NpmConfig.registry(process.cwd())}/opencode-ai/${InstallationChannel}`,
-            ).pipe(HttpClientRequest.acceptJson),
-          )
-          const data = yield* HttpClientResponse.schemaBodyJson(NpmPackage)(response)
+          const registry = yield* NpmConfig.registry(process.cwd())
+          const data = yield* httpOk
+            .execute(
+              HttpClientRequest.get(`${registry}/opencode-ai/${InstallationChannel}`).pipe(
+                HttpClientRequest.acceptJson,
+              ),
+            )
+            .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(NpmPackage)), Effect.timeout("10 seconds"))
           return data.version
         }
 
         if (detectedMethod === "choco") {
-          const response = yield* httpOk.execute(
-            HttpClientRequest.get(
-              "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27opencode%27%20and%20IsLatestVersion&$select=Version",
-            ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json;odata=verbose" })),
-          )
-          const data = yield* HttpClientResponse.schemaBodyJson(ChocoPackage)(response)
+          const data = yield* httpOk
+            .execute(
+              HttpClientRequest.get(
+                "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27opencode%27%20and%20IsLatestVersion&$select=Version",
+              ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json;odata=verbose" })),
+            )
+            .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(ChocoPackage)), Effect.timeout("10 seconds"))
           return data.d.results[0].Version
         }
 
         if (detectedMethod === "scoop") {
-          const response = yield* httpOk.execute(
-            HttpClientRequest.get(
-              "https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/opencode.json",
-            ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json" })),
-          )
-          const data = yield* HttpClientResponse.schemaBodyJson(ScoopManifest)(response)
+          const data = yield* httpOk
+            .execute(
+              HttpClientRequest.get(
+                "https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/opencode.json",
+              ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json" })),
+            )
+            .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(ScoopManifest)), Effect.timeout("10 seconds"))
           return data.version
         }
 
-        const response = yield* httpOk.execute(
-          HttpClientRequest.get("https://api.github.com/repos/anomalyco/opencode/releases/latest").pipe(
-            HttpClientRequest.acceptJson,
-          ),
-        )
-        const data = yield* HttpClientResponse.schemaBodyJson(GitHubRelease)(response)
+        const data = yield* httpOk
+          .execute(
+            HttpClientRequest.get("https://api.github.com/repos/anomalyco/opencode/releases/latest").pipe(
+              HttpClientRequest.acceptJson,
+            ),
+          )
+          .pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(GitHubRelease)), Effect.timeout("10 seconds"))
         return data.tag_name.replace(/^v/, "")
       }, Effect.orDie),
       upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {

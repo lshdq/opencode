@@ -179,6 +179,62 @@ describe("installation", () => {
         expect(result).toBe("2.1.0")
       }),
     )
+    const hangingSpawnerNode = makeGlobalNode({
+      service: ChildProcessSpawner.ChildProcessSpawner,
+      layer: mockSpawner(),
+      deps: [],
+    })
+    testEffect(
+      LayerNode.compile(Installation.node, [
+        [httpClient, Layer.succeed(HttpClient.HttpClient, HttpClient.make(() => Effect.never))],
+        [CrossSpawnSpawner.node, hangingSpawnerNode],
+      ]),
+    ).live(
+      "times out hanging version fetches",
+      () =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(Installation.use.latest("curl"))
+          expect(exit._tag).toBe("Failure")
+        }),
+      20000,
+    )
+
+    const hangingBodySpawnerNode = makeGlobalNode({
+      service: ChildProcessSpawner.ChildProcessSpawner,
+      layer: mockSpawner(),
+      deps: [],
+    })
+    testEffect(
+      LayerNode.compile(Installation.node, [
+        [
+          httpClient,
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              // 200 response whose body never arrives: headers resolve, body read hangs
+              Effect.succeed(
+                HttpClientResponse.fromWeb(
+                  request,
+                  new Response(new ReadableStream({ start() {} }), {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ],
+        [CrossSpawnSpawner.node, hangingBodySpawnerNode],
+      ]),
+    ).live(
+      "times out hanging response bodies",
+      () =>
+        Effect.gen(function* () {
+          const exit = yield* Effect.exit(Installation.use.latest("curl"))
+          expect(exit._tag).toBe("Failure")
+        }),
+      20000,
+    )
   })
 
   describe("upgrade", () => {

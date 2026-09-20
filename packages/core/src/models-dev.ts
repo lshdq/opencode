@@ -219,16 +219,13 @@ const layer = Layer.effect(
       if (fromDisk) return fromDisk
       const snapshot = yield* loadSnapshot
       if (snapshot) return snapshot
-      if (Flag.OPENCODE_DISABLE_MODELS_FETCH) return {}
-      // Flock is cross-process: concurrent opencode CLIs can race on this cache file.
-      const text = yield* Effect.scoped(
-        Effect.gen(function* () {
-          yield* Flock.effect(lockKey)
-          return yield* fetchAndWrite()
-        }),
+      // Startup must never block on the network; the background refresh fills
+      // the catalog later and publishes Event.Refreshed when it lands.
+      yield* Effect.logWarning(
+        `No models.dev catalog available locally, serving an empty catalog until the background refresh fetches ${source}/api.json`,
       )
-      return JSON.parse(text) as Record<string, Provider>
-    }).pipe(Effect.withSpan("ModelsDev.populate"), Effect.orDie)
+      return {}
+    }).pipe(Effect.withSpan("ModelsDev.populate"))
 
     const [cachedGet, invalidate] = yield* Effect.cachedInvalidateWithTTL(populate, Duration.infinity)
 

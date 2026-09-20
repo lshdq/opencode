@@ -11,6 +11,7 @@ import { Plugin } from "../plugin"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { type LanguageModelV3 } from "@ai-sdk/provider"
 import { ModelsDev } from "@opencode-ai/core/models-dev"
+import { EventV2 } from "@opencode-ai/core/event"
 import { Auth } from "../auth"
 import { Env } from "../env"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -18,7 +19,7 @@ import { iife } from "@/util/iife"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { pathToFileURL } from "url"
-import { Effect, Layer, Context, Schema, Types } from "effect"
+import { Effect, Layer, Context, Schema, Stream, Types } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { EffectPromise } from "@/effect/promise"
@@ -1396,9 +1397,27 @@ const layer = Layer.effect(
     const plugin = yield* Plugin.Service
     const modelsDevSvc = yield* ModelsDev.Service
     const runtimeFlags = yield* RuntimeFlags.Service
+    const events = yield* EventV2.Service
 
+    // The entry init below must invalidate the very InstanceState that stores
+    // it when the models.dev catalog refreshes, but `state` only exists once
+    // `make` resolves. Entries are built lazily by the first `InstanceState.get`,
+    // which always runs after this layer finished building, so the deferred
+    // binding is populated before the in-entry subscription can observe an event.
+    let stateSelf: InstanceState.InstanceState<State> | undefined
     const state = yield* InstanceState.make<State>(() =>
       Effect.gen(function* () {
+        // Subscribe before reading the catalog: ModelsDev.refresh invalidates
+        // its own cache before publishing Refreshed, so every event observed
+        // here either delivered fresh data to the read below or invalidates this
+        // entry for a rebuild. The fiber lives in the entry scope, so releasing
+        // the entry (invalidate/dispose) releases the subscription with it.
+        yield* events
+          .subscribe(ModelsDev.Event.Refreshed)
+          .pipe(
+            Stream.runForEach(() => (stateSelf ? InstanceState.invalidate(stateSelf) : Effect.void)),
+            Effect.forkScoped({ startImmediately: true }),
+          )
         const bridge = yield* EffectBridge.make()
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()
@@ -1728,6 +1747,7 @@ const layer = Layer.effect(
         }
       }),
     )
+    stateSelf = state
 
     const list = Effect.fn("Provider.list")(() => InstanceState.use(state, (s) => s.providers))
 
@@ -2066,7 +2086,7 @@ export function parseModel(model: string) {
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [FSUtil.node, Config.node, Auth.node, Env.node, Plugin.node, ModelsDev.node, RuntimeFlags.node],
+  deps: [FSUtil.node, Config.node, Auth.node, Env.node, Plugin.node, ModelsDev.node, RuntimeFlags.node, EventV2.node],
 })
 
 export * as Provider from "./provider"

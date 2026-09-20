@@ -43,7 +43,12 @@ export const UpgradeCommand = {
       }
     }
     prompts.log.info("Using method: " + method)
-    const target = args.target ? args.target.replace(/^v/, "") : await Installation.latest()
+    const target = args.target ? args.target.replace(/^v/, "") : await Installation.latest().catch(() => undefined)
+    if (!target) {
+      prompts.log.error("Could not determine latest version")
+      prompts.outro("Done")
+      return
+    }
 
     if (InstallationVersion === target) {
       prompts.log.warn(`opencode upgrade skipped: ${target} is already installed`)
