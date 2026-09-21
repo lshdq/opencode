@@ -1,4 +1,3 @@
-import { LSP } from "@/lsp/lsp"
 import { Effect } from "effect"
 import { effectCmd } from "../../effect-cmd"
 import { cmd } from "../cmd"
@@ -17,6 +16,7 @@ const DiagnosticsCommand = effectCmd({
   describe: "get diagnostics for a file",
   builder: (yargs) => yargs.positional("file", { type: "string", demandOption: true }),
   handler: Effect.fn("Cli.debug.lsp.diagnostics")(function* (args) {
+    const { LSP } = yield* Effect.promise(() => import("@/lsp/lsp"))
     const out = yield* LSP.Service.use((lsp) =>
       Effect.gen(function* () {
         yield* lsp.touchFile(args.file, "full")
@@ -32,6 +32,7 @@ export const SymbolsCommand = effectCmd({
   describe: "search workspace symbols",
   builder: (yargs) => yargs.positional("query", { type: "string", demandOption: true }),
   handler: Effect.fn("Cli.debug.lsp.symbols")(function* (args) {
+    const { LSP } = yield* Effect.promise(() => import("@/lsp/lsp"))
     yield* Effect.logInfo("symbols")
     const results = yield* LSP.Service.use((lsp) => lsp.workspaceSymbol(args.query))
     process.stdout.write(JSON.stringify(results, null, 2) + EOL)
@@ -43,6 +44,7 @@ export const DocumentSymbolsCommand = effectCmd({
   describe: "get symbols from a document",
   builder: (yargs) => yargs.positional("uri", { type: "string", demandOption: true }),
   handler: Effect.fn("Cli.debug.lsp.documentSymbols")(function* (args) {
+    const { LSP } = yield* Effect.promise(() => import("@/lsp/lsp"))
     yield* Effect.logInfo("document-symbols")
     const results = yield* LSP.Service.use((lsp) => lsp.documentSymbol(args.uri))
     process.stdout.write(JSON.stringify(results, null, 2) + EOL)

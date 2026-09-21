@@ -24,6 +24,41 @@ export const Event = Reference.Event
 export const Info = Reference.Info
 export type Info = Reference.Info
 
+export interface Resolved {
+  readonly info: Info
+  readonly repository?: Repository.RemoteReference
+}
+
+export function resolve(sources: Iterable<readonly [string, Source]>, repos: string): Resolved[] {
+  const result: Resolved[] = []
+  for (const [name, source] of sources) {
+    const base = {
+      name,
+      ...(source.description === undefined ? {} : { description: source.description }),
+      ...(source.hidden === undefined ? {} : { hidden: source.hidden }),
+      source,
+    }
+    if (source.type === "local") {
+      result.push({ info: new Info({ ...base, path: source.path }) })
+      continue
+    }
+    const repository = Repository.parse(source.repository)
+    if (!repository || !Repository.isRemote(repository)) continue
+    if (source.branch) {
+      try {
+        Repository.validateBranch(source.branch)
+      } catch {
+        continue
+      }
+    }
+    result.push({
+      info: new Info({ ...base, path: AbsolutePath.make(Repository.cachePath(repos, repository, source.branch)) }),
+      repository,
+    })
+  }
+  return result
+}
+
 type Data = {
   sources: Map<string, Types.DeepMutable<Source>>
 }
@@ -58,43 +93,14 @@ const layer = Layer.effect(
       finalize: (draft) =>
         Effect.gen(function* () {
           materialized.clear()
-          for (const [name, source] of draft.list()) {
-            if (source.type === "local") {
-              materialized.set(
-                name,
-                new Info({
-                  name,
-                  path: source.path,
-                  ...(source.description === undefined ? {} : { description: source.description }),
-                  ...(source.hidden === undefined ? {} : { hidden: source.hidden }),
-                  source,
-                }),
-              )
-              continue
-            }
-            const repository = Repository.parse(source.repository)
-            if (!repository || !Repository.isRemote(repository)) continue
-            if (source.branch) {
-              try {
-                Repository.validateBranch(source.branch)
-              } catch {
-                continue
-              }
-            }
-            materialized.set(
-              name,
-              new Info({
-                name,
-                path: AbsolutePath.make(Repository.cachePath(global.repos, repository, source.branch)),
-                ...(source.description === undefined ? {} : { description: source.description }),
-                ...(source.hidden === undefined ? {} : { hidden: source.hidden }),
-                source,
-              }),
-            )
+          for (const { info, repository } of resolve(draft.list(), global.repos)) {
+            materialized.set(info.name, info)
+            const source = info.source
+            if (!repository || source.type !== "git") continue
             yield* cache.ensure({ reference: repository, branch: source.branch, refresh: true }).pipe(
               Effect.catchCause((cause) =>
                 Effect.logWarning("failed to materialize reference", {
-                  name,
+                  name: info.name,
                   repository: source.repository,
                   cause,
                 }),

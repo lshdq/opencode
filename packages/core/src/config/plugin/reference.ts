@@ -18,41 +18,49 @@ export const Plugin = define({
     const global = yield* Global.Service
     yield* ctx.reference.transform(
       Effect.fn(function* (draft) {
-        const entries = new Map<string, Reference.Source>()
-        for (const doc of (yield* config.entries()).filter(
-          (entry): entry is Config.Document => entry.type === "document",
-        )) {
-          const directory = doc.path ? path.dirname(doc.path) : location.directory
-          for (const [name, entry] of Object.entries(doc.info.references ?? {})) {
-            if (!validAlias(name)) continue
-            const description = typeof entry === "string" ? undefined : entry.description
-            const hidden = typeof entry === "string" ? undefined : entry.hidden
-            entries.set(
-              name,
-              local(entry)
-                ? Reference.LocalSource.make({
-                    type: "local",
-                    path: AbsolutePath.make(
-                      localPath(directory, global.home, typeof entry === "string" ? entry : entry.path),
-                    ),
-                    ...(description === undefined ? {} : { description }),
-                    ...(hidden === undefined ? {} : { hidden }),
-                  })
-                : Reference.GitSource.make({
-                    type: "git",
-                    repository: typeof entry === "string" ? entry : entry.repository,
-                    ...(entry.branch === undefined ? {} : { branch: entry.branch }),
-                    ...(description === undefined ? {} : { description }),
-                    ...(hidden === undefined ? {} : { hidden }),
-                  }),
-            )
-          }
+        for (const [name, source] of sourcesFromEntries(yield* config.entries(), {
+          home: global.home,
+          locationDirectory: location.directory,
+        })) {
+          draft.add(name, source)
         }
-        for (const [name, source] of entries) draft.add(name, source)
       }),
     )
   }),
 })
+
+export function sourcesFromEntries(
+  entries: readonly Config.Entry[],
+  options: { readonly home: string; readonly locationDirectory: string },
+) {
+  const sources = new Map<string, Reference.Source>()
+  for (const doc of entries.filter((entry): entry is Config.Document => entry.type === "document")) {
+    const directory = doc.path ? path.dirname(doc.path) : options.locationDirectory
+    for (const [name, entry] of Object.entries(doc.info.references ?? {})) {
+      if (!validAlias(name)) continue
+      const description = typeof entry === "string" ? undefined : entry.description
+      const hidden = typeof entry === "string" ? undefined : entry.hidden
+      sources.set(
+        name,
+        local(entry)
+          ? Reference.LocalSource.make({
+              type: "local",
+              path: AbsolutePath.make(localPath(directory, options.home, typeof entry === "string" ? entry : entry.path)),
+              ...(description === undefined ? {} : { description }),
+              ...(hidden === undefined ? {} : { hidden }),
+            })
+          : Reference.GitSource.make({
+              type: "git",
+              repository: typeof entry === "string" ? entry : entry.repository,
+              ...(entry.branch === undefined ? {} : { branch: entry.branch }),
+              ...(description === undefined ? {} : { description }),
+              ...(hidden === undefined ? {} : { hidden }),
+            }),
+      )
+    }
+  }
+  return sources
+}
 
 function validAlias(name: string) {
   return name.length > 0 && !/[\/\s`,]/.test(name)

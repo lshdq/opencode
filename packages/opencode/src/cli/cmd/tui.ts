@@ -12,7 +12,6 @@ import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import type { EventSource } from "@opencode-ai/tui/context/sdk"
 import { writeHeapSnapshot } from "v8"
 import { ServerAuth } from "@/server/auth"
-import { validateSession } from "../tui/validate-session"
 import { win32InstallCtrlCGuard } from "@opencode-ai/tui/terminal-win32"
 
 declare global {
@@ -213,6 +212,10 @@ export const TuiThreadCommand = cmd({
         ),
       })
       const client = Rpc.client<typeof rpc>(worker)
+      const sdkImport = import("@opencode-ai/sdk/v2")
+      const effectImport = import("effect")
+      const layerImport = import("../tui/layer")
+      const validateImport = import("../tui/validate-session")
       const reload = () => {
         client.call("reload", undefined).catch(() => {})
       }
@@ -229,8 +232,7 @@ export const TuiThreadCommand = cmd({
         worker.terminate()
       }
 
-      const prompt = await input(args.prompt)
-      const config = await TuiConfig.get()
+      const [prompt, config] = await Promise.all([input(args.prompt), TuiConfig.get()])
 
       const network = resolveNetworkOptionsNoConfig(args)
       const external = hasArg("--port") || hasArg("--hostname") || network.mdns === true
@@ -251,7 +253,7 @@ export const TuiThreadCommand = cmd({
           }
 
       const autoFlag = args.auto || args.yolo || args["dangerously-skip-permissions"]
-      const { createOpencodeClient } = await import("@opencode-ai/sdk/v2")
+      const { createOpencodeClient } = await sdkImport
       const cfg = autoFlag
         ? undefined
         : await createOpencodeClient({
@@ -266,6 +268,7 @@ export const TuiThreadCommand = cmd({
               () => undefined,
             )
 
+      const { validateSession } = await validateImport
       try {
         await validateSession({
           url: transport.url,
@@ -285,8 +288,8 @@ export const TuiThreadCommand = cmd({
       }, 1000).unref?.()
 
       try {
-        const { Effect } = await import("effect")
-        const { run } = await import("../tui/layer")
+        const { Effect } = await effectImport
+        const { run } = await layerImport
         const { createLegacyTuiPluginHost } = await import("@/plugin/tui/runtime")
         await Effect.runPromise(
           run({

@@ -37,7 +37,7 @@ export function fromRow(row: typeof SessionTable.$inferSelect): SessionSchema.In
     },
     location: Location.Ref.make({
       directory: AbsolutePath.make(row.directory),
-      workspaceID: row.workspace_id ? WorkspaceV2.ID.make(row.workspace_id) : undefined,
+      ...(row.workspace_id ? { workspaceID: WorkspaceV2.ID.make(row.workspace_id) } : {}),
     }),
     subpath: row.path ? RelativePath.make(row.path) : undefined,
     revert: row.revert ? { ...row.revert, messageID: SessionMessage.ID.make(row.revert.messageID) } : undefined,

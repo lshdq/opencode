@@ -20,7 +20,7 @@ import { Global } from "@opencode-ai/core/global"
 import path from "path"
 import { Plugin } from "@/plugin"
 import { Skill } from "../skill"
-import { Effect, Context, Layer, Schema } from "effect"
+import { Effect, Cause, Context, Layer, Schema, Scope } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
@@ -30,7 +30,9 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
 import { Reference } from "@opencode-ai/core/reference"
 import { Location } from "@opencode-ai/core/location"
-import { PluginV2 } from "@opencode-ai/core/plugin"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+import { discoverEntries } from "@opencode-ai/core/config"
+import { ConfigReferencePlugin } from "@opencode-ai/core/config/plugin/reference"
 
 export const Info = Schema.Struct({
   name: Schema.String,
@@ -94,17 +96,24 @@ const layer = Layer.effect(
     const skill = yield* Skill.Service
     const provider = yield* Provider.Service
     const locations = yield* LocationServiceMap.Service
+    const fs = yield* FSUtil.Service
+    const global = yield* Global.Service
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("Agent.state")(function* (ctx) {
         const cfg = yield* config.get()
         const skillDirs = yield* skill.dirs()
-        const referenceDirs = Object.keys(cfg.references ?? cfg.reference ?? {}).length
-          ? yield* Effect.gen(function* () {
-              yield* (yield* PluginV2.Service).wait(PluginV2.ID.make("core/config-reference"))
-              return (yield* (yield* Reference.Service).list()).map((reference) => reference.path)
-            }).pipe(Effect.provide(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))))
-          : []
+        // Derive reference dirs straight from config documents: resolving them through
+        // Reference.Service would boot the entire location service bundle here.
+        const entries = yield* discoverEntries(fs, {
+          globalConfig: global.config,
+          directory: ctx.directory,
+          projectDirectory: ctx.worktree,
+        })
+        const referenceDirs = Reference.resolve(
+          ConfigReferencePlugin.sourcesFromEntries(entries, { home: global.home, locationDirectory: ctx.directory }),
+          global.repos,
+        ).map((resolved) => resolved.info.path)
         const whitelistedDirs = [
           Truncate.GLOB,
           path.join(Global.Path.tmp, "*"),
@@ -115,6 +124,17 @@ const layer = Layer.effect(
           "*": "ask",
           ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
         } satisfies Record<string, "allow" | "ask" | "deny">
+
+        // Boot the main location bundle in the background so the first session
+        // does not block on compiling it.
+        yield* Layer.build(locations.get(Location.Ref.make({ directory: AbsolutePath.make(ctx.directory) }))).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.void
+              : Effect.logWarning("failed to prewarm location services", { cause }),
+          ),
+          Effect.forkIn(yield* Scope.Scope),
+        )
 
         const defaults = Permission.fromConfig({
           "*": "allow",
@@ -447,7 +467,7 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node, Auth.node, Plugin.node, Skill.node, Provider.node, locationServiceMapNode],
+  deps: [Config.node, Auth.node, Plugin.node, Skill.node, Provider.node, FSUtil.node, Global.node, locationServiceMapNode],
 })
 
 export * as Agent from "./agent"

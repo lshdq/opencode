@@ -4,14 +4,11 @@ import { cmd } from "./cmd"
 import { CliError, effectCmd, fail } from "../effect-cmd"
 import { UI } from "../ui"
 import * as Prompt from "../effect/prompt"
-import { ModelsDev } from "@opencode-ai/core/models-dev"
 
 import { map, pipe, sortBy, values } from "remeda"
 import path from "path"
 import os from "os"
-import { Config } from "@/config/config"
 import { Global } from "@opencode-ai/core/global"
-import { Plugin } from "../../plugin"
 import type { Hooks } from "@opencode-ai/plugin"
 import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
@@ -252,6 +249,7 @@ export const ProvidersListCommand = effectCmd({
   // Lists global credentials + provider env vars; no project instance needed.
   instance: false,
   handler: Effect.fn("Cli.providers.list")(function* (_args) {
+    const { ModelsDev } = yield* Effect.promise(() => import("@opencode-ai/core/models-dev"))
     const authSvc = yield* Auth.Service
     const modelsDev = yield* ModelsDev.Service
 
@@ -351,6 +349,9 @@ export const ProvidersLoginCommand = effectCmd({
       return
     }
 
+    const { Config } = yield* Effect.promise(() => import("@/config/config"))
+    const { Plugin } = yield* Effect.promise(() => import("../../plugin"))
+    const { ModelsDev } = yield* Effect.promise(() => import("@opencode-ai/core/models-dev"))
     const cfgSvc = yield* Config.Service
     const pluginSvc = yield* Plugin.Service
     const modelsDev = yield* ModelsDev.Service
@@ -499,6 +500,7 @@ export const ProvidersLogoutCommand = effectCmd({
   // Removes a global auth credential; no project instance needed.
   instance: false,
   handler: Effect.fn("Cli.providers.logout")(function* (args) {
+    const { ModelsDev } = yield* Effect.promise(() => import("@opencode-ai/core/models-dev"))
     const authSvc = yield* Auth.Service
     const modelsDev = yield* ModelsDev.Service
 

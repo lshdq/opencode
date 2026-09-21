@@ -1,6 +1,5 @@
 import { EOL } from "os"
 import { Effect } from "effect"
-import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { effectCmd } from "../../effect-cmd"
 import { cmd } from "../cmd"
 import { InstanceRef } from "@/effect/instance-ref"
@@ -32,6 +31,7 @@ const FilesCommand = effectCmd({
   handler: Effect.fn("Cli.debug.rg.files")(function* (args) {
     const ctx = yield* InstanceRef
     if (!ctx) return
+    const { Ripgrep } = yield* Effect.promise(() => import("@opencode-ai/core/ripgrep"))
     const ripgrep = yield* Ripgrep.Service
     const files = yield* ripgrep
       .glob({
@@ -65,6 +65,7 @@ const SearchCommand = effectCmd({
   handler: Effect.fn("Cli.debug.rg.search")(function* (args) {
     const ctx = yield* InstanceRef
     if (!ctx) return
+    const { Ripgrep } = yield* Effect.promise(() => import("@opencode-ai/core/ripgrep"))
     const ripgrep = yield* Ripgrep.Service
     const results = yield* ripgrep
       .grep({

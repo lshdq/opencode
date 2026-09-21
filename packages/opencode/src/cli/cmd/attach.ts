@@ -1,7 +1,6 @@
 import { cmd } from "./cmd"
 import { UI } from "@/cli/ui"
 import { errorMessage } from "@opencode-ai/tui/util/error"
-import { validateSession } from "../tui/validate-session"
 import { ServerAuth } from "@/server/auth"
 
 export const AttachCommand = cmd({
@@ -105,6 +104,7 @@ export const AttachCommand = cmd({
     }
 
     const { TuiConfig } = await import("@/config/tui")
+    const { validateSession } = await import("../tui/validate-session")
     if (args.fork && !args.continue && !args.session) {
       UI.error("--fork requires --continue or --session")
       process.exitCode = 1

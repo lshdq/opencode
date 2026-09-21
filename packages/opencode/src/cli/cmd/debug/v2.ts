@@ -1,9 +1,5 @@
 import { EOL } from "os"
 import { Effect } from "effect"
-import { Catalog } from "@opencode-ai/core/catalog"
-import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
-import { Location } from "@opencode-ai/core/location"
-import { AbsolutePath } from "@opencode-ai/core/schema"
 import { effectCmd } from "../../effect-cmd"
 
 export const V2Command = effectCmd({
@@ -11,32 +7,41 @@ export const V2Command = effectCmd({
   describe: "debug v2 catalog and built-in plugins",
   instance: false,
   handler: () =>
-    Effect.gen(function* () {
-      const catalog = yield* Catalog.Service
-      const providers = (yield* catalog.provider.available()).sort((a, b) => a.id.localeCompare(b.id))
-      const all = (yield* catalog.provider.all()).sort((a, b) => a.id.localeCompare(b.id))
-      const result = {
-        providers,
-        default: catalog.model.default().pipe(Effect.map((item) => item?.id)),
-        small: Object.fromEntries(
-          yield* Effect.all(
-            all.map((provider) =>
-              Effect.map(catalog.model.small(provider.id), (model) => [provider.id, model?.id] as const),
+    Effect.flatMap(
+      Effect.all({
+        catalog: Effect.promise(() => import("@opencode-ai/core/catalog")),
+        locationServices: Effect.promise(() => import("@opencode-ai/core/location-services")),
+        location: Effect.promise(() => import("@opencode-ai/core/location")),
+        schema: Effect.promise(() => import("@opencode-ai/core/schema")),
+      }),
+      ({ catalog, locationServices, location, schema }) =>
+        Effect.gen(function* () {
+          const svc = yield* catalog.Catalog.Service
+          const providers = (yield* svc.provider.available()).sort((a, b) => a.id.localeCompare(b.id))
+          const all = (yield* svc.provider.all()).sort((a, b) => a.id.localeCompare(b.id))
+          const result = {
+            providers,
+            default: svc.model.default().pipe(Effect.map((item) => item?.id)),
+            small: Object.fromEntries(
+              yield* Effect.all(
+                all.map((provider) =>
+                  Effect.map(svc.model.small(provider.id), (model) => [provider.id, model?.id] as const),
+                ),
+                { concurrency: "unbounded" },
+              ),
             ),
-            { concurrency: "unbounded" },
+          }
+          process.stdout.write(JSON.stringify(result, null, 2) + EOL)
+        }).pipe(
+          Effect.withSpan("Cli.debug.v2"),
+          Effect.provide(
+            locationServices.LocationServiceMap.Service.get(
+              location.Location.Ref.make({
+                directory: schema.AbsolutePath.make(process.cwd()),
+              }),
+            ),
           ),
+          Effect.provide(locationServices.locationServiceMapLayer),
         ),
-      }
-      process.stdout.write(JSON.stringify(result, null, 2) + EOL)
-    }).pipe(
-      Effect.withSpan("Cli.debug.v2"),
-      Effect.provide(
-        LocationServiceMap.Service.get(
-          Location.Ref.make({
-            directory: AbsolutePath.make(process.cwd()),
-          }),
-        ),
-      ),
-      Effect.provide(locationServiceMapLayer),
     ),
 })

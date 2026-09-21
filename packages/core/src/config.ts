@@ -125,6 +125,76 @@ export function latest<K extends keyof Info>(entries: readonly Entry[], key: K):
     .findLast((entry) => entry.info[key] !== undefined)?.info[key]
 }
 
+export const discoverEntries = Effect.fn("Config.discoverEntries")(function* (
+  fs: FSUtil.Interface,
+  options: {
+    readonly globalConfig: string
+    readonly directory: string
+    readonly projectDirectory: string
+  },
+) {
+  const names = ["opencode.json", "opencode.jsonc"]
+  const decodeOptions = { errors: "all", onExcessProperty: "ignore", propertyOrder: "original" } as const
+  const decodeInfo = Schema.decodeUnknownOption(Info, decodeOptions)
+  const decodeV1Info = Schema.decodeUnknownOption(ConfigV1.Info, decodeOptions)
+
+  const loadFile = Effect.fnUntraced(function* (filepath: string) {
+    const text = yield* fs.readFileStringSafe(filepath)
+    if (!text) return
+
+    const errors: ParseError[] = []
+    const input: unknown = parse(text, errors, { allowTrailingComma: true })
+    if (errors.length) return
+
+    const info = Option.getOrUndefined(
+      ConfigMigrateV1.isV1(input)
+        ? decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate), Option.flatMap(decodeInfo))
+        : decodeInfo(input),
+    )
+    if (!info) return
+    return new Document({ type: "document", path: filepath, info })
+  })
+
+  const loadDirectory = Effect.fnUntraced(function* (directory: AbsolutePath) {
+    return [
+      ...(yield* Effect.forEach(names, (file) => loadFile(path.join(directory, file))).pipe(
+        Effect.map((configs) => configs.filter((config): config is Document => config !== undefined)),
+      )),
+      new Directory({ type: "directory", path: directory }),
+    ]
+  })
+
+  const globalDirectory = AbsolutePath.make(options.globalConfig)
+  const locationIsGlobal = path.resolve(options.directory) === path.resolve(options.globalConfig)
+  const discovered = locationIsGlobal
+    ? []
+    : yield* fs
+        .up({
+          targets: [".opencode", ...names.toReversed()],
+          start: options.directory,
+          stop: options.projectDirectory,
+        })
+        .pipe(Effect.orDie)
+  const directories = [
+    globalDirectory,
+    ...discovered
+      .filter((item) => path.basename(item) === ".opencode")
+      .toReversed()
+      .map((directory) => AbsolutePath.make(directory)),
+  ]
+  // A config closer to the opened directory should win over one higher up.
+  // Search starts nearby, so reverse the results before applying them.
+  const directPaths = discovered.filter((item) => path.basename(item) !== ".opencode").toReversed()
+  const direct = yield* Effect.forEach(directPaths, loadFile).pipe(
+    Effect.orDie,
+    Effect.map((configs) => configs.filter((config): config is Document => config !== undefined)),
+  )
+  const supplementary = yield* Effect.forEach(directories, loadDirectory).pipe(Effect.orDie)
+  // Apply general settings first and more specific settings last:
+  // global config, project files, then `.opencode` files.
+  return [...(supplementary[0] ?? []), ...direct, ...supplementary.slice(1).flat()]
+})
+
 export interface Interface {
   /** Returns location config documents and supplemental directories from lowest to highest priority. */
   readonly entries: () => Effect.Effect<Entry[]>
@@ -139,68 +209,14 @@ const layer = Layer.effect(
     const global = yield* Global.Service
     const location = yield* Location.Service
     const policy = yield* Policy.Service
-    const names = ["opencode.json", "opencode.jsonc"]
-    const decodeOptions = { errors: "all", onExcessProperty: "ignore", propertyOrder: "original" } as const
-    const decodeInfo = Schema.decodeUnknownOption(Info, decodeOptions)
-    const decodeV1Info = Schema.decodeUnknownOption(ConfigV1.Info, decodeOptions)
 
-    const loadFile = Effect.fnUntraced(function* (filepath: string) {
-      const text = yield* fs.readFileStringSafe(filepath)
-      if (!text) return
-
-      const errors: ParseError[] = []
-      const input: unknown = parse(text, errors, { allowTrailingComma: true })
-      if (errors.length) return
-
-      const info = Option.getOrUndefined(
-        ConfigMigrateV1.isV1(input)
-          ? decodeV1Info(input).pipe(Option.map(ConfigMigrateV1.migrate), Option.flatMap(decodeInfo))
-          : decodeInfo(input),
-      )
-      if (!info) return
-      return new Document({ type: "document", path: filepath, info })
-    })
-
-    const loadDirectory = Effect.fnUntraced(function* (directory: AbsolutePath) {
-      return [
-        ...(yield* Effect.forEach(names, (file) => loadFile(path.join(directory, file))).pipe(
-          Effect.map((configs) => configs.filter((config): config is Document => config !== undefined)),
-        )),
-        new Directory({ type: "directory", path: directory }),
-      ]
-    })
-
-    const globalDirectory = AbsolutePath.make(global.config)
-    const locationIsGlobal = path.resolve(location.directory) === path.resolve(global.config)
     // Read configuration once when this location opens. Later calls reuse these
     // values until the location is reopened.
-    const discovered = locationIsGlobal
-      ? []
-      : yield* fs
-          .up({
-            targets: [".opencode", ...names.toReversed()],
-            start: location.directory,
-            stop: location.project.directory,
-          })
-          .pipe(Effect.orDie)
-    const directories = [
-      globalDirectory,
-      ...discovered
-        .filter((item) => path.basename(item) === ".opencode")
-        .toReversed()
-        .map((directory) => AbsolutePath.make(directory)),
-    ]
-    // A config closer to the opened directory should win over one higher up.
-    // Search starts nearby, so reverse the results before applying them.
-    const directPaths = discovered.filter((item) => path.basename(item) !== ".opencode").toReversed()
-    const direct = yield* Effect.forEach(directPaths, loadFile).pipe(
-      Effect.orDie,
-      Effect.map((configs) => configs.filter((config): config is Document => config !== undefined)),
-    )
-    const supplementary = yield* Effect.forEach(directories, loadDirectory).pipe(Effect.orDie)
-    // Apply general settings first and more specific settings last:
-    // global config, project files, then `.opencode` files.
-    const configs = [...(supplementary[0] ?? []), ...direct, ...supplementary.slice(1).flat()]
+    const configs = yield* discoverEntries(fs, {
+      globalConfig: global.config,
+      directory: location.directory,
+      projectDirectory: location.project.directory,
+    })
     // Rules use the opposite order so a user-global rule can override a
     // repository rule. Statement order inside each file stays unchanged.
     yield* policy.load(

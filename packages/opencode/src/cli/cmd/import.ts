@@ -1,12 +1,7 @@
 import type { Session as SDKSession, Message, Part } from "@opencode-ai/sdk/v2"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Session } from "@/session/session"
-import { MessageV2 } from "../../session/message-v2"
 import { CliError, effectCmd } from "../effect-cmd"
-import { Database } from "@opencode-ai/core/database/database"
-import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
 import { InstanceRef } from "@/effect/instance-ref"
-import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
 import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -108,6 +103,12 @@ export const ImportCommand = effectCmd({
 })
 
 const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: InstanceContext) {
+  const { Session } = yield* Effect.promise(() => import("@/session/session"))
+  const { Database } = yield* Effect.promise(() => import("@opencode-ai/core/database/database"))
+  const { SessionTable, MessageTable, PartTable } = yield* Effect.promise(
+    () => import("@opencode-ai/core/session/sql"),
+  )
+  const { ShareNext } = yield* Effect.promise(() => import("@/share/share-next"))
   const share = yield* ShareNext.Service
   const fs = yield* FSUtil.Service
   const { db } = yield* Database.Service
@@ -181,7 +182,7 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
     projectID: ctx.project.id,
     directory: ctx.directory,
     path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
-  }) as Session.Info
+  }) as Parameters<typeof Session.toRow>[0]
   const row = Session.toRow(info)
   yield* db
     .insert(SessionTable)
