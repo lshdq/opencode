@@ -11,9 +11,9 @@ opencode 官方建议 Windows 用户使用 WSL，本 fork（`win-adapt` 分支�
 ## 分支与版本
 
 - 分支：`win-adapt`（基于 `upstream/dev` fork）
-- 版本号：`<fork基准版本>.w<适配号>`，如 `1.18.11.w3`
+- 版本号：直接使用已合入上游的原版本号（`X.Y.Z`），如 `1.18.11`，不添加本地后缀
   - 基准版本 = `git merge-base HEAD upstream/dev` 处的 `packages/opencode/package.json` version，**不随上游推进而变**
-  - 适配号每次构建递增
+  - 同一基准版本重复构建保持相同版本号，不递增
 - 构建脚本：`packages/opencode/script/build-win.ps1`（自动从 merge-base 取基准版本）
 
 ## 设计原则
@@ -38,7 +38,6 @@ $ErrorActionPreference = "Stop"
 
 # 1. 在当前 pwsh 会话构建，以保留脚本末尾 bun 命令的真实退出码
 & "packages\opencode\script\build-win.ps1"
-# 指定适配号时将上一行替换为：& "packages\opencode\script\build-win.ps1" -WinVersion 3
 if ($LASTEXITCODE -ne 0) { throw "Windows build failed with exit code $LASTEXITCODE" }
 
 # 2. 构建成功后自动部署，文件名使用产物的实际版本号
@@ -46,7 +45,7 @@ $source = (Resolve-Path -LiteralPath "packages\opencode\dist\opencode-windows-x6
 $versionOutput = & $source --version
 if ($LASTEXITCODE -ne 0) { throw "Reading built opencode version failed with exit code $LASTEXITCODE" }
 $version = $versionOutput.Trim()
-if ($version -notmatch '^\d+\.\d+\.\d+\.w\d+$') { throw "Unexpected opencode version: $version" }
+if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Unexpected opencode version: $version" }
 
 $installDirectory = "D:\Program\opencode"
 if (-not (Test-Path -LiteralPath $installDirectory -PathType Container)) { throw "Install directory does not exist: $installDirectory" }

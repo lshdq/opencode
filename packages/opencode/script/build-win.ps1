@@ -1,11 +1,9 @@
-# opencode-win 构建包装：版本号 = <fork 基准版本>.w<适配号>（如 1.18.9.w2）
+# opencode-win 构建包装：直接使用已合入上游的原版本号（如 1.18.11）
 # 基准版本 = win-adapt 与 upstream/dev 的 merge-base 处的版本，不随上游推进而变
 # 用法:
-#   .\packages\opencode\script\build-win.ps1                  # 适配号默认 2
-#   .\packages\opencode\script\build-win.ps1 -WinVersion 3    # 适配号 3
+#   .\packages\opencode\script\build-win.ps1
 #   .\packages\opencode\script\build-win.ps1 -SkipWebUi:$false  # 嵌入 Web UI
 param(
-  [int]$WinVersion = 2,
   [switch]$SkipWebUi = $true
 )
 
@@ -25,9 +23,12 @@ git fetch upstream
 
 # base = fork 点（merge-base）处的版本，保持与 fork 时原版版本一致
 $mergeBase = git merge-base HEAD upstream/dev
-$base = (git show "${mergeBase}:packages/opencode/package.json" | ConvertFrom-Json).version
-$version = "$base.w$WinVersion"
-Write-Output "[build-win] base=$base  winVersion=$WinVersion  =>  version=$version"
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($mergeBase)) { throw "Reading upstream merge-base failed" }
+$packageJson = git show "${mergeBase}:packages/opencode/package.json"
+if ($LASTEXITCODE -ne 0) { throw "Reading upstream package.json failed" }
+$version = ($packageJson | ConvertFrom-Json).version
+if ([string]::IsNullOrWhiteSpace($version)) { throw "Upstream package.json version is missing or empty" }
+Write-Output "[build-win] version=$version"
 
 $env:OPENCODE_VERSION = $version
 if (-not $env:MODELS_DEV_API_JSON) {
