@@ -3,6 +3,7 @@ import { useDialog } from "../../ui/dialog"
 import { useSDK } from "../../context/sdk"
 import { useProject } from "../../context/project"
 import { useSync } from "../../context/sync"
+import { useRoute } from "../../context/route"
 import { useToast } from "../../ui/toast"
 import { errorMessage } from "../../util/error"
 import {
@@ -18,66 +19,66 @@ export function usePromptWorkspace(sessionID?: string) {
   const sdk = useSDK()
   const project = useProject()
   const sync = useSync()
+  const route = useRoute()
   const toast = useToast()
   const [selection, setSelection] = createSignal<WorkspaceSelection>()
   const [creating, setCreating] = createSignal(false)
   const [creatingDots, setCreatingDots] = createSignal(3)
   const [notice, setNotice] = createSignal<string>()
 
-  async function create(selection: Extract<WorkspaceSelection, { type: "new" }>) {
+  async function create(selection: Extract<WorkspaceSelection, { type: "new" }>, signal: AbortSignal) {
+    if (signal.aborted) return
     setCreating(true)
-    let result
+    const cancel = () => {
+      setCreating(false)
+      setSelection(undefined)
+    }
+    signal.addEventListener("abort", cancel, { once: true })
     try {
-      result = await sdk.client.experimental.workspace.create({ type: selection.workspaceType, branch: null })
-    } catch (err) {
-      setSelection(undefined)
-      setCreating(false)
-      toast.show({ title: "Creating workspace failed", message: errorMessage(err), variant: "error" })
-      return
-    }
-    if (result.error || !result.data) {
-      setSelection(undefined)
-      setCreating(false)
-      toast.show({
-        title: "Creating workspace failed",
-        message: errorMessage(result.error ?? "no response"),
-        variant: "error",
+      const result = await sdk.client.experimental.workspace.create({ type: selection.workspaceType, branch: null })
+      if (signal.aborted) return
+      if (result.error || !result.data) throw result.error ?? new Error("No response")
+      await project.workspace.sync(signal)
+      if (signal.aborted) return
+      const workspace = result.data
+      setSelection({
+        type: "existing",
+        workspaceID: workspace.id,
+        workspaceType: workspace.type,
+        workspaceName: workspace.name,
       })
-      return
+      return workspace
+    } catch (err) {
+      if (signal.aborted) return
+      setSelection(undefined)
+      toast.show({ title: "Creating workspace failed", message: errorMessage(err), variant: "error" })
+    } finally {
+      signal.removeEventListener("abort", cancel)
+      if (!signal.aborted) setCreating(false)
     }
-
-    await project.workspace.sync()
-    const workspace = result.data
-    setSelection({
-      type: "existing",
-      workspaceID: workspace.id,
-      workspaceType: workspace.type,
-      workspaceName: workspace.name,
-    })
-    setCreating(false)
-    return workspace
   }
 
   async function warp(selection: WorkspaceSelection) {
+    const owner = route.signal
     if (!sessionID) {
       setSelection(selection)
       dialog.clear()
-      if (selection.type === "new") void create(selection)
+      if (selection.type === "new") void create(selection, owner)
       return
     }
     const sourceWorkspaceID = project.workspace.current()
-    const copyChanges = await confirmWorkspaceFileChanges({ dialog, sdk, sourceWorkspaceID })
-    if (copyChanges === undefined) return
+    const copyChanges = await confirmWorkspaceFileChanges({ dialog, sdk, sourceWorkspaceID, signal: owner })
+    if (copyChanges === undefined || owner.aborted) return
+    const signal = AbortSignal.any([owner, dialog.signal])
     setSelection(selection)
-    dialog.clear()
 
     const workspace =
       selection.type === "none"
         ? { id: null, name: "local project" }
         : selection.type === "existing"
           ? { id: selection.workspaceID, name: selection.workspaceName }
-          : await create(selection)
-    if (!workspace) return
+          : await create(selection, signal)
+    if (!workspace || signal.aborted) return
 
     const warped = await warpWorkspaceSession({
       dialog,
@@ -89,6 +90,7 @@ export function usePromptWorkspace(sessionID?: string) {
       workspaceID: workspace.id,
       sessionID,
       copyChanges,
+      signal,
     })
     if (warped) showNotice(workspace.name)
   }
@@ -103,7 +105,7 @@ export function usePromptWorkspace(sessionID?: string) {
   }
 
   function open() {
-    void openWorkspaceSelect({ dialog, sdk, sync, project, toast, onSelect: warp })
+    void openWorkspaceSelect({ dialog, sdk, sync, project, toast, signal: route.signal, onSelect: warp })
   }
 
   createEffect(() => {

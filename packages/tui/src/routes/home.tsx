@@ -1,19 +1,17 @@
 import { Prompt, type PromptRef } from "../component/prompt"
-import { createEffect, createMemo, createSignal, onMount } from "solid-js"
+import { createEffect, createMemo, onMount, untrack } from "solid-js"
 import { Logo } from "../component/logo"
-import { useSync } from "../context/sync"
 import { Toast } from "../ui/toast"
-import { useArgs } from "../context/args"
-import { useRouteData } from "../context/route"
+import { useRoute, useRouteData } from "../context/route"
+import { useProject } from "../context/project"
+import { useSync } from "../context/sync"
 import { usePromptRef } from "../context/prompt"
-import { useLocal } from "../context/local"
 import { usePluginRuntime } from "../plugin/runtime"
 import { useEditorContext } from "../context/editor"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTuiConfig } from "../config"
 import { HomeSessionDestinationProvider } from "./home/session-destination"
 
-let once = false
 const placeholder = {
   normal: ["Fix a TODO in the codebase", "What is the tech stack of this project?", "Fix broken tests"],
   shell: ["ls -la", "git status", "pwd"],
@@ -21,12 +19,18 @@ const placeholder = {
 
 export function Home() {
   const pluginRuntime = usePluginRuntime()
-  const sync = useSync()
   const route = useRouteData("home")
+  const navigation = useRoute()
+  const project = useProject()
+  const sync = useSync()
+  createEffect(() => {
+    navigation.revision
+    if (navigation.data.type !== "home" || !project.workspace.removed(project.workspace.current())) return
+    // Repeated Home navigation cancels the old candidate, not the deletion fact.
+    // recover deduplicates with both deletion dialogs and retains owner failures.
+    untrack(() => void sync.recover(navigation.signal).catch(() => {}))
+  })
   const promptRef = usePromptRef()
-  const [ref, setRef] = createSignal<PromptRef | undefined>()
-  const args = useArgs()
-  const local = useLocal()
   const editor = useEditorContext()
   const dimensions = useTerminalDimensions()
   const tuiConfig = useTuiConfig()
@@ -35,37 +39,19 @@ export function Home() {
     if (configured === "auto") return Math.max(75, Math.floor(dimensions().width * 0.7))
     return configured ?? 75
   })
-  let sent = false
+  let seeded = false
 
   onMount(() => {
     editor.clearSelection()
   })
 
   const bind = (r: PromptRef | undefined) => {
-    setRef(r)
-    promptRef.set(r)
-    if (once || !r) return
-    if (route.prompt) {
+    if (!seeded && r && route.prompt) {
       r.set(route.prompt)
-      once = true
-      return
+      seeded = true
     }
-    if (!args.prompt) return
-    r.set({ input: args.prompt, parts: [] })
-    once = true
+    promptRef.set(r)
   }
-
-  // Wait for sync and model store to be ready before auto-submitting --prompt
-  createEffect(() => {
-    const r = ref()
-    if (sent) return
-    if (!r) return
-    if (!sync.ready || !local.model.ready) return
-    if (!args.prompt) return
-    if (r.current.input !== args.prompt) return
-    sent = true
-    r.submit()
-  })
 
   return (
     <HomeSessionDestinationProvider>

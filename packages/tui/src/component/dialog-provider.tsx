@@ -15,6 +15,7 @@ import { isConsoleManagedProvider } from "../util/provider-origin"
 import { useConnected } from "./use-connected"
 import { useBindings } from "../keymap"
 import { useClipboard } from "../context/clipboard"
+import { useRoute } from "../context/route"
 
 const PROVIDER_PRIORITY: Record<string, number> = {
   opencode: 0,
@@ -90,9 +91,11 @@ export function createDialogProviderOptions() {
   const toast = useToast()
   const { theme } = useTheme()
   const onboarded = useConnected()
+  const route = useRoute()
 
   async function promptCustomProviderID(): Promise<string | undefined> {
-    const value = await DialogPrompt.show(dialog, "Other", {
+    const owner = route.signal
+    const task = DialogPrompt.show(dialog, "Other", {
       placeholder: "Provider id",
       description: () => (
         <text fg={theme.textMuted}>
@@ -100,7 +103,9 @@ export function createDialogProviderOptions() {
         </text>
       ),
     })
-    if (value === null) return
+    const signal = dialog.signal
+    const value = await task
+    if (value === null || signal.aborted || owner.aborted) return
 
     const providerID = normalizeCustomProviderID(value)
     if (providerID) return providerID
@@ -134,6 +139,7 @@ export function createDialogProviderOptions() {
         const providerID = provider.providerID
         const consoleManaged = isConsoleManagedProvider(sync.data.console_state.consoleManagedProviders, providerID)
         const connected = sync.data.provider_next.connected.includes(providerID)
+        let authorizing = false
 
         return {
           title: provider.title,
@@ -143,7 +149,8 @@ export function createDialogProviderOptions() {
           category: provider.category,
           gutter: connected && onboarded() ? () => <text fg={theme.success}>✓</text> : undefined,
           async onSelect() {
-            if (consoleManaged) return
+            if (consoleManaged || authorizing) return
+            const owner = route.signal
 
             const methods = sync.data.provider_auth[providerID] ?? [
               {
@@ -153,7 +160,7 @@ export function createDialogProviderOptions() {
             ]
             let index: number | null = 0
             if (methods.length > 1) {
-              index = await new Promise<number | null>((resolve) => {
+              const task = new Promise<number | null>((resolve) => {
                 dialog.replace(
                   () => (
                     <DialogSelect
@@ -168,8 +175,11 @@ export function createDialogProviderOptions() {
                   () => resolve(null),
                 )
               })
+              const signal = dialog.signal
+              index = await task
+              if (signal.aborted) return
             }
-            if (index == null) return
+            if (index == null || owner.aborted) return
             const method = methods[index]
             if (method.type === "oauth") {
               let inputs: Record<string, string> | undefined
@@ -177,16 +187,23 @@ export function createDialogProviderOptions() {
                 const value = await PromptsMethod({
                   dialog,
                   prompts: method.prompts,
+                  signal: owner,
                 })
-                if (!value) return
+                if (!value || owner.aborted) return
                 inputs = value
               }
 
-              const result = await sdk.client.provider.oauth.authorize({
-                providerID,
-                method: index,
-                inputs,
-              })
+              const signal = AbortSignal.any([owner, dialog.signal])
+              authorizing = true
+              const result = await sdk.client.provider.oauth
+                .authorize({ providerID, method: index, inputs })
+                .catch((error) => {
+                  if (!signal.aborted) toast.error(error)
+                })
+                .finally(() => {
+                  authorizing = false
+                })
+              if (signal.aborted || !result) return
               if (result.error) {
                 toast.show({
                   variant: "error",
@@ -209,8 +226,8 @@ export function createDialogProviderOptions() {
             if (method.type === "api") {
               let metadata: Record<string, string> | undefined
               if (method.prompts?.length) {
-                const value = await PromptsMethod({ dialog, prompts: method.prompts })
-                if (!value) return
+                const value = await PromptsMethod({ dialog, prompts: method.prompts, signal: owner })
+                if (!value || owner.aborted) return
                 metadata = value
               }
               return dialog.replace(() => (
@@ -230,6 +247,37 @@ export function DialogProvider() {
   return <DialogSelect title="Connect a provider" options={options()} />
 }
 
+// Authentication already accepted remotely may finish and refresh shared state,
+// but only the original window and route may display its result.
+function useProviderOperation() {
+  const dialog = useDialog()
+  const route = useRoute()
+  const sdk = useSDK()
+  const sync = useSync()
+  const toast = useToast()
+  const signal = AbortSignal.any([route.signal, dialog.signal])
+  const [pending, setPending] = createSignal(false)
+  return {
+    pending,
+    active: () => !signal.aborted,
+    async run(job: () => Promise<void>) {
+      if (signal.aborted || pending()) return
+      setPending(true)
+      await job()
+        .catch((error) => {
+          if (!signal.aborted) toast.error(error)
+        })
+        .finally(() => {
+          if (!signal.aborted) setPending(false)
+        })
+    },
+    async refresh() {
+      await sdk.client.instance.dispose(undefined, { throwOnError: true })
+      await sync.bootstrap({ fatal: false })
+    },
+  }
+}
+
 interface AutoMethodProps {
   index: number
   providerID: string
@@ -240,7 +288,7 @@ function AutoMethod(props: AutoMethodProps) {
   const { theme } = useTheme()
   const sdk = useSDK()
   const dialog = useDialog()
-  const sync = useSync()
+  const operation = useProviderOperation()
   const toast = useToast()
   const clipboard = useClipboard()
 
@@ -255,19 +303,24 @@ function AutoMethod(props: AutoMethodProps) {
             props.authorization.instructions.match(/[A-Z0-9]{4}-[A-Z0-9]{4,5}/)?.[0] ?? props.authorization.url
           clipboard
             .write?.(code)
-            .then(() => toast.show({ message: "Copied to clipboard", variant: "info" }))
-            .catch(toast.error)
+            .then(() => {
+              if (operation.active()) toast.show({ message: "Copied to clipboard", variant: "info" })
+            })
+            .catch((error) => {
+              if (operation.active()) toast.error(error)
+            })
         },
       },
     ],
   }))
 
-  onMount(async () => {
+  onMount(() => void operation.run(async () => {
     const result = await sdk.client.provider.oauth.callback({
       providerID: props.providerID,
       method: props.index,
     })
     if (result.error) {
+      if (!operation.active()) return
       toast.show({
         variant: "error",
         message:
@@ -278,10 +331,10 @@ function AutoMethod(props: AutoMethodProps) {
       dialog.clear()
       return
     }
-    await sdk.client.instance.dispose()
-    await sync.bootstrap()
+    await operation.refresh()
+    if (!operation.active()) return
     dialog.replace(() => <DialogModel providerID={props.providerID} />)
-  })
+  }))
 
   return (
     <box paddingLeft={2} paddingRight={2} gap={1} paddingBottom={1}>
@@ -314,7 +367,7 @@ interface CodeMethodProps {
 function CodeMethod(props: CodeMethodProps) {
   const { theme } = useTheme()
   const sdk = useSDK()
-  const sync = useSync()
+  const operation = useProviderOperation()
   const dialog = useDialog()
   const [error, setError] = createSignal(false)
 
@@ -322,20 +375,21 @@ function CodeMethod(props: CodeMethodProps) {
     <DialogPrompt
       title={props.title}
       placeholder="Authorization code"
-      onConfirm={async (value) => {
+      busy={operation.pending()}
+      onConfirm={(value) => operation.run(async () => {
         const { error } = await sdk.client.provider.oauth.callback({
           providerID: props.providerID,
           method: props.index,
           code: value,
         })
         if (!error) {
-          await sdk.client.instance.dispose()
-          await sync.bootstrap()
+          await operation.refresh()
+          if (!operation.active()) return
           dialog.replace(() => <DialogModel providerID={props.providerID} />)
           return
         }
-        setError(true)
-      }}
+        if (operation.active()) setError(true)
+      })}
       description={() => (
         <box gap={1}>
           <text fg={theme.textMuted}>{props.authorization.instructions}</text>
@@ -361,11 +415,13 @@ function ApiMethod(props: ApiMethodProps) {
   const sync = useSync()
   const toast = useToast()
   const { theme } = useTheme()
+  const operation = useProviderOperation()
 
   return (
     <DialogPrompt
       title={props.title}
       placeholder="API key"
+      busy={operation.pending()}
       description={() =>
         ({
           opencode: (
@@ -392,7 +448,7 @@ function ApiMethod(props: ApiMethodProps) {
           ),
         })[props.providerID] ?? undefined
       }
-      onConfirm={async (value) => {
+      onConfirm={(value) => operation.run(async () => {
         if (!value) return
         await sdk.client.auth.set({
           providerID: props.providerID,
@@ -401,9 +457,9 @@ function ApiMethod(props: ApiMethodProps) {
             key: value,
             ...(props.metadata ? { metadata: props.metadata } : {}),
           },
-        })
-        await sdk.client.instance.dispose()
-        await sync.bootstrap()
+        }, { throwOnError: true })
+        await operation.refresh()
+        if (!operation.active()) return
         if (props.custom && !sync.data.provider_next.all.some((provider) => provider.id === props.providerID)) {
           toast.show({
             variant: "info",
@@ -413,7 +469,7 @@ function ApiMethod(props: ApiMethodProps) {
           return
         }
         dialog.replace(() => <DialogModel providerID={props.providerID} />)
-      }}
+      })}
     />
   )
 }
@@ -421,10 +477,12 @@ function ApiMethod(props: ApiMethodProps) {
 interface PromptsMethodProps {
   dialog: ReturnType<typeof useDialog>
   prompts: NonNullable<ProviderAuthMethod["prompts"]>[number][]
+  signal: AbortSignal
 }
 async function PromptsMethod(props: PromptsMethodProps) {
   const inputs: Record<string, string> = {}
   for (const prompt of props.prompts) {
+    if (props.signal.aborted) return null
     if (prompt.when) {
       const value = inputs[prompt.when.key]
       if (value === undefined) continue
@@ -433,7 +491,7 @@ async function PromptsMethod(props: PromptsMethodProps) {
     }
 
     if (prompt.type === "select") {
-      const value = await new Promise<string | null>((resolve) => {
+      const task = new Promise<string | null>((resolve) => {
         props.dialog.replace(
           () => (
             <DialogSelect
@@ -449,12 +507,14 @@ async function PromptsMethod(props: PromptsMethodProps) {
           () => resolve(null),
         )
       })
-      if (value === null) return null
+      const signal = props.dialog.signal
+      const value = await task
+      if (value === null || signal.aborted || props.signal.aborted) return null
       inputs[prompt.key] = value
       continue
     }
 
-    const value = await new Promise<string | null>((resolve) => {
+    const task = new Promise<string | null>((resolve) => {
       props.dialog.replace(
         () => (
           <DialogPrompt title={prompt.message} placeholder={prompt.placeholder} onConfirm={(value) => resolve(value)} />
@@ -462,7 +522,9 @@ async function PromptsMethod(props: PromptsMethodProps) {
         () => resolve(null),
       )
     })
-    if (value === null) return null
+    const signal = props.dialog.signal
+    const value = await task
+    if (value === null || signal.aborted || props.signal.aborted) return null
     inputs[prompt.key] = value
   }
   return inputs

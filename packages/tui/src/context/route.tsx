@@ -2,6 +2,7 @@ import { createStore, reconcile } from "solid-js/store"
 import { createSimpleContext } from "./helper"
 import type { PromptInfo } from "../prompt/history"
 import { useTuiStartup } from "./runtime"
+import { batch, createSignal, onCleanup } from "solid-js"
 
 export type HomeRoute = {
   type: "home"
@@ -26,16 +27,30 @@ export const { use: useRoute, provider: RouteProvider } = createSimpleContext({
   name: "Route",
   init: (props: { initialRoute?: Route }) => {
     const startup = useTuiStartup()
+    const [revision, setRevision] = createSignal(0)
+    let owner = new AbortController()
+    onCleanup(() => owner.abort())
     const [store, setStore] = createStore<Route>(
       props.initialRoute ?? initialRoute(startup.initialRoute) ?? { type: "home" },
     )
 
     return {
+      get revision() {
+        return revision()
+      },
+      get signal() {
+        return owner.signal
+      },
       get data() {
         return store
       },
       navigate(route: Route) {
-        setStore(reconcile(route))
+        owner.abort()
+        owner = new AbortController()
+        batch(() => {
+          setRevision((value) => value + 1)
+          setStore(reconcile(route))
+        })
       },
     }
   },

@@ -67,6 +67,12 @@ export function Dialog(
 }
 
 function init() {
+  let owner = new AbortController()
+  const advance = () => {
+    owner.abort()
+    owner = new AbortController()
+  }
+  onCleanup(() => owner.abort())
   const [store, setStore] = createStore({
     stack: [] as {
       element: JSX.Element
@@ -114,6 +120,7 @@ function init() {
             renderer.clearSelection()
           }
           const current = store.stack.at(-1)
+          advance()
           current?.onClose?.()
           setStore("stack", store.stack.slice(0, -1))
           refocus()
@@ -128,6 +135,7 @@ function init() {
             renderer.clearSelection()
           }
           const current = store.stack.at(-1)
+          advance()
           current?.onClose?.()
           setStore("stack", store.stack.slice(0, -1))
           refocus()
@@ -137,7 +145,13 @@ function init() {
   }))
 
   return {
+    // Async dialog operations capture this generation after intentional
+    // transitions; closing or replacing the window revokes local side effects.
+    get signal() {
+      return owner.signal
+    },
     clear() {
+      advance()
       for (const item of store.stack) {
         if (item.onClose) item.onClose()
       }
@@ -148,6 +162,7 @@ function init() {
       refocus()
     },
     replace(input: any, onClose?: () => void) {
+      advance()
       if (store.stack.length === 0) {
         focus = renderer.currentFocusedRenderable
         focus?.blur()

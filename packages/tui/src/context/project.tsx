@@ -32,38 +32,57 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
         current: undefined as string | undefined,
         list: [] as Workspace[],
         status: {} as Record<string, WorkspaceStatus>,
+        removed: {} as Record<string, boolean>,
       },
     })
 
-    async function sync() {
-      const workspace = store.workspace.current
+    // Loading a candidate must not publish a partial execution context. Sync
+    // commits this snapshot together with config, agents, providers and commands.
+    async function load(workspace: string | undefined) {
       const [instancePath, project] = await Promise.all([
-        sdk.client.path.get({ workspace }),
-        sdk.client.project.current({ workspace }),
+        sdk.client.path.get({ workspace }, { throwOnError: true }),
+        sdk.client.project.current({ workspace }, { throwOnError: true }),
       ])
       const directories = project.data?.id
         ? await sdk.client.project.directories({ projectID: project.data.id, workspace })
         : undefined
+      return {
+        workspace,
+        path: instancePath.data || defaultPath,
+        id: project.data?.id,
+        worktree: project.data?.worktree,
+        mainDir: directories?.data?.findLast((item) => item.strategy === undefined)?.directory,
+      }
+    }
+
+    function apply(snapshot: Awaited<ReturnType<typeof load>>) {
       batch(() => {
-        setStore("instance", "path", reconcile(instancePath.data || defaultPath))
-        setStore("project", "id", project.data?.id)
-        setStore("project", "worktree", project.data?.worktree)
-        setStore("project", "mainDir", directories?.data?.findLast((item) => item.strategy === undefined)?.directory)
+        setStore("workspace", "current", snapshot.workspace)
+        setStore("instance", "path", reconcile(snapshot.path))
+        setStore("project", "id", snapshot.id)
+        setStore("project", "worktree", snapshot.worktree)
+        setStore("project", "mainDir", snapshot.mainDir)
       })
     }
 
-    async function syncWorkspace() {
+    async function sync(signal?: AbortSignal) {
+      const snapshot = await load(store.workspace.current)
+      if (!signal?.aborted) apply(snapshot)
+    }
+
+    async function syncWorkspace(signal?: AbortSignal) {
+      if (signal?.aborted) return
       const listed = await sdk.client.experimental.workspace.list().catch(() => undefined)
-      if (!listed?.data) return
+      if (!listed?.data || signal?.aborted) return
       const status = await sdk.client.experimental.workspace.status().catch(() => undefined)
+      if (signal?.aborted) return
       const next = Object.fromEntries((status?.data ?? []).map((item) => [item.workspaceID, item.status]))
 
       batch(() => {
         setStore("workspace", "list", reconcile(listed.data))
         setStore("workspace", "status", reconcile(next))
-        if (!listed.data.some((item) => item.id === store.workspace.current)) {
-          setStore("workspace", "current", undefined)
-        }
+        // Discovery cannot change the committed execution context. A removed
+        // workspace stays unavailable until an explicit, fully prepared switch.
       })
     }
 
@@ -87,6 +106,14 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
         },
       },
       workspace: {
+        // Deletion is a fact, not a cancellable route task. Discovery and late
+        // session reads must never make this execution target usable again.
+        invalidate(workspaceID: string) {
+          setStore("workspace", "removed", workspaceID, true)
+        },
+        removed(workspaceID: string | undefined) {
+          return workspaceID !== undefined && store.workspace.removed[workspaceID] === true
+        },
         current() {
           return store.workspace.current
         },
@@ -102,6 +129,7 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
           return store.workspace.list.find((item) => item.id === workspaceID)
         },
         status(workspaceID: string) {
+          if (store.workspace.removed[workspaceID]) return "error"
           return store.workspace.status[workspaceID]
         },
         statuses() {
@@ -110,6 +138,8 @@ export const { use: useProject, provider: ProjectProvider } = createSimpleContex
         sync: syncWorkspace,
       },
       sync,
+      load,
+      apply,
     }
   },
 })

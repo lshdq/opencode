@@ -8,6 +8,7 @@ export const { use: usePermission, provider: PermissionProvider } = createSimple
   name: "Permission",
   init: () => {
     const args = useArgs()
+    let selected = false
     const [store, setStore] = createStore<{ mode: PermissionMode }>({
       mode: args.auto ? "auto" : "normal",
     })
@@ -16,10 +17,16 @@ export const { use: usePermission, provider: PermissionProvider } = createSimple
         return store.mode
       },
       set(mode: PermissionMode) {
+        selected = true
         setStore("mode", mode)
       },
       toggle() {
+        selected = true
         setStore("mode", (mode) => (mode === "auto" ? "normal" : "auto"))
+      },
+      configure(auto: boolean) {
+        if (selected || args.auto !== undefined) return
+        setStore("mode", auto ? "auto" : "normal")
       },
     }
   },

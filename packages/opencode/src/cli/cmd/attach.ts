@@ -1,6 +1,5 @@
 import { cmd } from "./cmd"
 import { UI } from "@/cli/ui"
-import { errorMessage } from "@opencode-ai/tui/util/error"
 import { ServerAuth } from "@/server/auth"
 
 export const AttachCommand = cmd({
@@ -114,19 +113,6 @@ export const AttachCommand = cmd({
     const headers = ServerAuth.headers({ password: args.password, username: args.username })
     const config = await TuiConfig.get()
 
-    try {
-      await validateSession({
-        url: args.url,
-        sessionID: args.session,
-        directory,
-        headers,
-      })
-    } catch (error) {
-      UI.error(errorMessage(error))
-      process.exitCode = 1
-      return
-    }
-
     const { Effect } = await import("effect")
     const { run } = await import("../tui/layer")
     const { createLegacyTuiPluginHost } = await import("@/plugin/tui/runtime")
@@ -134,6 +120,7 @@ export const AttachCommand = cmd({
       run({
         url: args.url,
         config,
+        prepare: () => validateSession({ url: args.url, sessionID: args.session, directory, headers }),
         pluginHost: createLegacyTuiPluginHost(),
         args: {
           continue: args.continue,

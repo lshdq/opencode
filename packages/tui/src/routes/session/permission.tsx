@@ -110,8 +110,8 @@ function TextBody(props: { title: string; description?: string; icon?: string })
 
 export function PermissionPrompt(props: { request: PermissionRequest; directory?: string }) {
   const sdk = useSDK()
-  const project = useProject()
   const sync = useSync()
+  const project = useProject()
   const [store, setStore] = createStore({
     stage: "permission" as PermissionStage,
   })
@@ -165,11 +165,12 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
           onSelect={(option) => {
             setStore("stage", "permission")
             if (option === "cancel") return
+            if (!session() || project.workspace.removed(session()?.workspaceID)) return
             void sdk.client.permission.reply({
               reply: "always",
               requestID: props.request.id,
               directory: props.directory,
-              workspace: project.workspace.current(),
+              workspace: session()?.workspaceID,
             })
           }}
         />
@@ -177,12 +178,13 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
       <Match when={store.stage === "reject"}>
         <RejectPrompt
           onConfirm={(message) => {
+            if (!session() || project.workspace.removed(session()?.workspaceID)) return
             void sdk.client.permission.reply({
               reply: "reject",
               requestID: props.request.id,
               directory: props.directory,
               message: message || undefined,
-              workspace: project.workspace.current(),
+              workspace: session()?.workspaceID,
             })
           }}
           onCancel={() => {
@@ -406,6 +408,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
               escapeKey="reject"
               fullscreen
               onSelect={(option) => {
+                if (!session() || project.workspace.removed(session()?.workspaceID)) return
                 if (option === "always") {
                   setStore("stage", "always")
                   return
@@ -419,7 +422,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                     reply: "reject",
                     requestID: props.request.id,
                     directory: props.directory,
-                    workspace: project.workspace.current(),
+                    workspace: session()?.workspaceID,
                   })
                   return
                 }
@@ -427,7 +430,7 @@ export function PermissionPrompt(props: { request: PermissionRequest; directory?
                   reply: "once",
                   requestID: props.request.id,
                   directory: props.directory,
-                  workspace: project.workspace.current(),
+                  workspace: session()?.workspaceID,
                 })
               }}
             />

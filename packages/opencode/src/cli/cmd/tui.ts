@@ -4,7 +4,6 @@ import { type rpc } from "../tui/worker"
 import path from "path"
 import { fileURLToPath } from "url"
 import { UI } from "@/cli/ui"
-import { errorMessage } from "@opencode-ai/tui/util/error"
 import { withTimeout } from "@/util/timeout"
 import { withNetworkOptions, resolveNetworkOptionsNoConfig, hasArg } from "@/cli/network"
 import { Filesystem } from "@/util/filesystem"
@@ -212,7 +211,6 @@ export const TuiThreadCommand = cmd({
         ),
       })
       const client = Rpc.client<typeof rpc>(worker)
-      const sdkImport = import("@opencode-ai/sdk/v2")
       const effectImport = import("effect")
       const layerImport = import("../tui/layer")
       const validateImport = import("../tui/validate-session")
@@ -253,35 +251,7 @@ export const TuiThreadCommand = cmd({
           }
 
       const autoFlag = args.auto || args.yolo || args["dangerously-skip-permissions"]
-      const { createOpencodeClient } = await sdkImport
-      const cfg = autoFlag
-        ? undefined
-        : await createOpencodeClient({
-            baseUrl: transport.url,
-            directory: cwd,
-            fetch: transport.fetch,
-            headers: transport.headers,
-          })
-            .config.get()
-            .then(
-              (x) => x.data,
-              () => undefined,
-            )
-
       const { validateSession } = await validateImport
-      try {
-        await validateSession({
-          url: transport.url,
-          sessionID: args.session,
-          directory: cwd,
-          fetch: transport.fetch,
-          headers,
-        })
-      } catch (error) {
-        UI.error(errorMessage(error))
-        process.exitCode = 1
-        return
-      }
 
       setTimeout(() => {
         client.call("checkUpgrade", { directory: cwd }).catch(() => {})
@@ -300,6 +270,13 @@ export const TuiThreadCommand = cmd({
               return [tui, server]
             },
             config,
+            prepare: () => validateSession({
+              url: transport.url,
+              sessionID: args.session,
+              directory: cwd,
+              fetch: transport.fetch,
+              headers: transport.headers,
+            }),
             pluginHost: createLegacyTuiPluginHost(),
             directory: cwd,
             fetch: transport.fetch,
@@ -312,7 +289,7 @@ export const TuiThreadCommand = cmd({
               model: args.model,
               prompt,
               fork: args.fork,
-              auto: autoFlag || cfg?.auto_approve === true,
+              auto: autoFlag ? true : hasArg("--auto") || hasArg("--no-auto") ? false : undefined,
             },
           }),
         )

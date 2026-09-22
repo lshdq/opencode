@@ -13,6 +13,7 @@ export function createPluginRuntime() {
   const [commands, setCommands] = createSignal<PluginRuntimeCommands>(emptyCommands)
   const [status, setStatus] = createSignal<ReadonlyArray<TuiPluginStatus>>([])
   const slots = createSlots()
+  let host: HostSlots | undefined
 
   return {
     Slot: slots.Slot,
@@ -29,7 +30,7 @@ export function createPluginRuntime() {
       slots.clear()
     },
     setupSlots(api: TuiPluginApi): HostSlots {
-      return slots.setup(api)
+      return (host ??= slots.setup(api))
     },
   }
 }

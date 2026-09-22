@@ -2,7 +2,7 @@ import { useDialog } from "../ui/dialog"
 import { DialogSelect } from "../ui/dialog-select"
 import { useRoute } from "../context/route"
 import { useSync } from "../context/sync"
-import { createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js"
+import { batch, createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js"
 import path from "path"
 import { Locale } from "../util/locale"
 import { useProject } from "../context/project"
@@ -52,6 +52,10 @@ export function DialogSessionList() {
   const event = useEvent()
   const local = useLocal()
   const toast = useToast()
+  let disposed = false
+  onCleanup(() => {
+    disposed = true
+  })
   const [toDelete, setToDelete] = createSignal<string>()
   const [deleted, setDeleted] = createSignal(new Set<string>())
   const [search, setSearch] = createDebouncedSignal("", 150)
@@ -102,6 +106,7 @@ export function DialogSessionList() {
     const workspace = project.workspace.get(session.workspaceID!)
     const list = () => dialog.replace(() => <DialogSessionList />)
     const warp = async (selection: WorkspaceSelection) => {
+      const signal = AbortSignal.any([route.signal, dialog.signal])
       const workspaceID = await (async () => {
         if (selection.type === "none") return null
         if (selection.type === "existing") return selection.workspaceID
@@ -109,6 +114,7 @@ export function DialogSessionList() {
         try {
           result = await sdk.client.experimental.workspace.create({ type: selection.workspaceType, branch: null })
         } catch (err) {
+          if (signal.aborted) return
           toast.show({
             title: "Failed to create workspace",
             message: errorMessage(err),
@@ -116,6 +122,7 @@ export function DialogSessionList() {
           })
           return
         }
+        if (signal.aborted) return
         const workspace = result?.data
         if (!workspace) {
           toast.show({
@@ -125,10 +132,10 @@ export function DialogSessionList() {
           })
           return
         }
-        await project.workspace.sync()
+        await project.workspace.sync(signal)
         return workspace.id
       })()
-      if (workspaceID === undefined) return
+      if (workspaceID === undefined || signal.aborted) return
       await warpWorkspaceSession({
         dialog,
         sdk,
@@ -139,6 +146,7 @@ export function DialogSessionList() {
         workspaceID,
         sessionID: session.id,
         copyChanges: false,
+        signal,
         done: list,
       })
     }
@@ -148,10 +156,15 @@ export function DialogSessionList() {
         workspace={workspace?.name ?? session.workspaceID!}
         onDone={list}
         onDelete={async () => {
-          const current = currentSessionID()
-          const info = current ? sync.data.session.find((item) => item.id === current) : undefined
-          const result = await sdk.client.experimental.workspace.remove({ id: session.workspaceID! })
+          const owner = route.signal
+          const current = () =>
+            route.data.type === "session" ? sync.session.get(route.data.sessionID)?.workspaceID : sync.workspace
+          const target = current()
+          const result = await sdk.client.experimental.workspace
+            .remove({ id: session.workspaceID! })
+            .catch((error) => ({ error }))
           if (result.error) {
+            if (owner.aborted) return false
             toast.show({
               variant: "error",
               title: "Failed to delete workspace",
@@ -159,14 +172,26 @@ export function DialogSessionList() {
             })
             return false
           }
-          await project.workspace.sync()
-          await sync.session.refresh()
-          await refetchBrowse()
-          if (search()) await refetch()
-          if (info?.workspaceID === session.workspaceID) {
-            route.navigate({ type: "home" })
-          }
-          return true
+          const removedCurrent = !owner.aborted && target === session.workspaceID && current() === target
+          batch(() => {
+            project.workspace.invalidate(session.workspaceID!)
+            if (removedCurrent) route.navigate({ type: "home" })
+          })
+          const signal = removedCurrent ? route.signal : owner
+          // Establish local preparation before yielding, never with a late unrelated owner.
+          const prepared = removedCurrent
+            ? sync.recover(signal).then(
+                () => true,
+                (error) => {
+                  if (!signal.aborted) {
+                    toast.show({ title: "Workspace preparation failed", message: errorMessage(error), variant: "error" })
+                  }
+                  return false
+                },
+              )
+            : Promise.resolve(true)
+          await project.workspace.sync().catch(() => undefined)
+          return (await prepared) && !signal.aborted
         }}
         onRestore={() => {
           void openWorkspaceSelect({
@@ -175,9 +200,8 @@ export function DialogSessionList() {
             sync,
             project,
             toast,
-            onSelect: (selection) => {
-              void warp(selection)
-            },
+            signal: route.signal,
+            onSelect: warp,
           })
           return false
         }}
@@ -302,11 +326,13 @@ export function DialogSessionList() {
             if (toDelete() === option.value) {
               const session = sessions().find((item) => item.id === option.value)
               const status = session?.workspaceID ? project.workspace.status(session.workspaceID) : undefined
+              const signal = route.signal
 
               try {
                 const result = await sdk.client.session.delete({
                   sessionID: option.value,
                 })
+                if (signal.aborted || disposed) return
                 if (result.error) {
                   if (session?.workspaceID) {
                     recover(session)
@@ -321,6 +347,7 @@ export function DialogSessionList() {
                   return
                 }
               } catch (err) {
+                if (signal.aborted || disposed) return
                 if (session?.workspaceID) {
                   recover(session)
                 } else {

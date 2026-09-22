@@ -5,7 +5,7 @@ import { useProject } from "../context/project"
 import { useRoute } from "../context/route"
 import { useSync } from "../context/sync"
 import { useTheme } from "../context/theme"
-import { createMemo, createSignal, onMount } from "solid-js"
+import { batch, createMemo, createSignal, onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { errorMessage } from "../util/error"
 import { useSDK } from "../context/sdk"
@@ -64,11 +64,14 @@ export function DialogWorkspaceList() {
 
     setDeleting(undefined)
     setRemoving(workspace.id)
+    const owner = route.signal
+    const target = current()
     const result = await sdk.client.experimental.workspace.remove({ id: workspace.id }).catch((err) => ({
       error: err,
     }))
     if (result?.error) {
       setRemoving(undefined)
+      if (owner.aborted) return
       toast.show({
         variant: "error",
         title: "Failed to delete workspace",
@@ -77,12 +80,22 @@ export function DialogWorkspaceList() {
       return
     }
 
-    if (current() === workspace.id) {
-      project.workspace.set(undefined)
-      route.navigate({ type: "home" })
-    }
-    await project.workspace.sync()
-    await sync.bootstrap({ fatal: false }).catch(() => undefined)
+    const removedCurrent = !owner.aborted && target === workspace.id && current() === target
+    batch(() => {
+      project.workspace.invalidate(workspace.id)
+      if (removedCurrent) route.navigate({ type: "home" })
+    })
+    // Establish the replacement barrier before yielding to discovery or input.
+    const signal = removedCurrent ? route.signal : owner
+    const prepared = removedCurrent
+      ? sync.recover(signal).catch((error) => {
+          if (signal.aborted) return
+          toast.show({ title: "Workspace preparation failed", message: errorMessage(error), variant: "error" })
+        })
+      : undefined
+    // Discovery is safe after navigation; it must not replace another route's candidate.
+    await project.workspace.sync().catch(() => undefined)
+    await prepared
     setRemoving(undefined)
   }
 

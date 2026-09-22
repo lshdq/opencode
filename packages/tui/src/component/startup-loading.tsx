@@ -1,11 +1,12 @@
 import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js"
 import { useTheme } from "../context/theme"
 import { Spinner } from "./spinner"
+import { cliErrorMessage, errorMessage } from "../util/error"
 
-export function StartupLoading(props: { ready: () => boolean }) {
+export function StartupLoading(props: { ready: () => boolean; error?: () => unknown }) {
   const theme = useTheme().theme
   const [show, setShow] = createSignal(false)
-  const text = createMemo(() => (props.ready() ? "Finishing startup…" : "Loading plugins…"))
+  const text = createMemo(() => (props.ready() ? "Ready" : "Preparing dependencies and plugins… You can type now"))
   let wait: NodeJS.Timeout | undefined
   let hold: NodeJS.Timeout | undefined
   let stamp = 0
@@ -52,10 +53,19 @@ export function StartupLoading(props: { ready: () => boolean }) {
   })
 
   return (
-    <Show when={show()}>
-      <box position="absolute" zIndex={5000} left={0} right={0} bottom={1} justifyContent="center" alignItems="center">
+    <Show when={show() || props.error?.() !== undefined}>
+      <box flexShrink={0} justifyContent="center" alignItems="center">
         <box backgroundColor={theme.backgroundPanel} paddingLeft={1} paddingRight={1}>
-          <Spinner color={theme.textMuted}>{text()}</Spinner>
+          <Show
+            when={props.error?.() === undefined}
+            fallback={
+              <text fg={theme.error}>
+                Startup failed: {cliErrorMessage(props.error?.()) ?? errorMessage(props.error?.())}
+              </text>
+            }
+          >
+            <Spinner color={theme.textMuted}>{text()}</Spinner>
+          </Show>
         </box>
       </box>
     </Show>

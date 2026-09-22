@@ -8,6 +8,48 @@ import { mockTuiRuntime } from "../../fixture/tui-runtime"
 
 const { TuiPluginRuntime } = await import("../../../src/plugin/tui/runtime")
 
+test("dispose aborts an initializing plugin without awaiting it and cleans late registrations", async () => {
+  await using tmp = await tmpdir({
+    init: async (dir) => {
+      const file = path.join(dir, "slow.ts")
+      await Bun.write(file, `
+export const started = Promise.withResolvers()
+export const release = Promise.withResolvers()
+export const state = { aborted: false, cleaned: 0 }
+export default {
+  id: "demo.slow",
+  tui: async (api) => {
+    api.lifecycle.onDispose(() => { state.aborted = api.lifecycle.signal.aborted; state.cleaned++ })
+    started.resolve()
+    await release.promise
+    api.event.on("late", () => {})
+  },
+}
+`)
+      return pathToFileURL(file).href
+    },
+  })
+  const plugin = await import(tmp.extra)
+  const count = { event_add: 0, event_drop: 0, route_add: 0, route_drop: 0, command_add: 0, command_drop: 0 }
+  const { config, restore } = mockTuiRuntime(tmp.path, [tmp.extra])
+  const loading = TuiPluginRuntime.init({ api: createTuiPluginApi({ count }), config })
+  try {
+    await plugin.started.promise
+    await TuiPluginRuntime.dispose()
+    expect(plugin.state).toEqual({ aborted: true, cleaned: 1 })
+    plugin.release.resolve()
+    await loading
+    expect(TuiPluginRuntime.list()).toEqual([])
+    expect(count.event_drop).toBe(count.event_add)
+    expect(plugin.state.cleaned).toBe(1)
+  } finally {
+    plugin.release.resolve()
+    await loading
+    await TuiPluginRuntime.dispose()
+    restore()
+  }
+})
+
 test("runs onDispose callbacks with aborted signal and is idempotent", async () => {
   await using tmp = await tmpdir({
     init: async (dir) => {

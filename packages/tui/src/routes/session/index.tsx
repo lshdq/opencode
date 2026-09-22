@@ -26,6 +26,7 @@ import { Spinner } from "../../component/spinner"
 import { createSyntaxStyleMemo, generateSubtleSyntax, selectedForeground, useTheme } from "../../context/theme"
 import { BoxRenderable, ScrollBoxRenderable, addDefaultParsers, TextAttributes, RGBA } from "@opentui/core"
 import { Prompt, type PromptRef } from "../../component/prompt"
+import { usePreparation } from "../../context/preparation"
 import type {
   AssistantMessage,
   Part,
@@ -282,12 +283,19 @@ export function Session() {
   const toast = useToast()
   const sdk = useSDK()
   const editor = useEditorContext()
-
+  const preparation = usePreparation()
   createEffect(() => {
     const sessionID = route.sessionID
-    void (async () => {
+    const hydration = new AbortController()
+    onCleanup(() => hydration.abort())
+    preparation.track((async () => {
+      // The shell and prompt are already mounted. Serialize workspace hydration
+      // behind initial sync so late default-workspace config cannot overwrite it.
+      await sync.initialized
+      if (hydration.signal.aborted) return
       const previousWorkspace = untrack(() => project.workspace.current())
-      const result = await sdk.client.session.get({ sessionID }, { throwOnError: true })
+      const result = await sdk.client.session.get({ sessionID }, { throwOnError: true, signal: hydration.signal })
+      if (hydration.signal.aborted) return
       if (!result.data) {
         toast.show({
           message: `Session not found: ${sessionID}`,
@@ -298,29 +306,29 @@ export function Session() {
         return
       }
 
-      if (result.data.workspaceID !== previousWorkspace) {
-        project.workspace.set(result.data.workspaceID)
-
-        // Sync all the data for this workspace. Note that this
-        // workspace may not exist anymore which is why this is not
-        // fatal. If it doesn't we still want to show the session
-        // (which will be non-interactive)
-        try {
-          await sync.bootstrap({ fatal: false })
-        } catch {}
+      if (project.workspace.removed(result.data.workspaceID) || result.data.workspaceID !== previousWorkspace || result.data.workspaceID !== sync.workspace) {
+        await sync
+          .bootstrap({ fatal: false, signal: hydration.signal, workspace: result.data.workspaceID ?? null })
+          .catch((error) => {
+            // Failed workspaces remain readable, but never become executable.
+            if (!hydration.signal.aborted) void sync.session.sync(sessionID).catch(() => {})
+            throw error
+          })
       }
+      if (hydration.signal.aborted) return
       editor.reconnect(result.data.directory)
       await sync.session.sync(sessionID)
+      if (hydration.signal.aborted) return
       if (route.sessionID === sessionID && scroll) scroll.scrollBy(100_000)
     })().catch((error) => {
-      if (route.sessionID !== sessionID) return
+      if (hydration.signal.aborted) return
       toast.show({
         message: errorMessage(error),
         variant: "error",
         duration: 5000,
       })
-      navigate({ type: "home" })
-    })
+      throw error
+    }), { signal: hydration.signal })
   })
 
   let lastSwitch: string | undefined = undefined
@@ -345,10 +353,11 @@ export function Session() {
   let prompt: PromptRef | undefined
   const bind = (r: PromptRef | undefined) => {
     prompt = r
+    if (!seeded && route.prompt && r) {
+      seeded = true
+      r.set(route.prompt)
+    }
     promptRef.set(r)
-    if (seeded || !route.prompt || !r) return
-    seeded = true
-    r.set(route.prompt)
   }
   const keymap = useOpencodeKeymap()
   const dialog = useDialog()
@@ -1176,7 +1185,6 @@ export function Session() {
       >
         <box flexDirection="row" flexGrow={1} minHeight={0}>
           <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
-            <Show when={session()}>
               <scrollbox
                 ref={(r) => (scroll = r)}
                 viewportOptions={{
@@ -1332,7 +1340,6 @@ export function Session() {
                   </pluginRuntime.Slot>
                 </Show>
               </box>
-            </Show>
             <Toast />
           </box>
           <Show when={sidebarVisible()}>

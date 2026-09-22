@@ -108,6 +108,7 @@ const ScopedKeymapMethods = new Set<PropertyKey>([
 ])
 
 type RuntimeState = {
+  disposed: boolean
   directory: string
   api: Api
   view: PluginRuntime
@@ -391,7 +392,10 @@ function createPluginScope(load: PluginLoad, id: string, disposeTimeoutMs: numbe
   let done = false
 
   const onDispose = (fn: TuiDispose) => {
-    if (done) return () => {}
+    if (done) {
+      void runCleanup(fn, disposeTimeoutMs)
+      return () => {}
+    }
     const key = Symbol()
     list.push({ key, fn })
     let drop = false
@@ -514,6 +518,7 @@ async function deactivatePluginEntry(state: RuntimeState, plugin: PluginEntry, p
 }
 
 async function activatePluginEntry(state: RuntimeState, plugin: PluginEntry, persist: boolean) {
+  if (state.disposed) return false
   plugin.enabled = true
   if (persist) writePluginEnabledState(state.api, plugin.id, true)
   if (plugin.scope) {
@@ -522,10 +527,14 @@ async function activatePluginEntry(state: RuntimeState, plugin: PluginEntry, per
   }
 
   const scope = createPluginScope(plugin.load, plugin.id, state.dispose_timeout_ms)
+  // Publish the scope before awaiting plugin code so exit can abort an in-flight
+  // initializer, rather than waiting indefinitely for npm or user plugin code.
+  plugin.scope = scope
   const api = pluginApi(state, plugin, scope, plugin.id)
   const ok = await Promise.resolve()
     .then(async () => {
       await syncPluginThemes(plugin)
+      if (state.disposed || scope.lifecycle.signal.aborted) return false
       await plugin.plugin(api, plugin.load.options, plugin.meta)
       return true
     })
@@ -539,14 +548,16 @@ async function activatePluginEntry(state: RuntimeState, plugin: PluginEntry, per
     })
 
   if (!ok) {
+    if (plugin.scope === scope) plugin.scope = undefined
     await scope.dispose()
-    state.view.update({ status: listPluginStatus(state) })
+    if (!state.disposed) state.view.update({ status: listPluginStatus(state) })
     return false
   }
 
-  if (!plugin.enabled) {
+  if (state.disposed || !plugin.enabled || scope.lifecycle.signal.aborted) {
+    if (plugin.scope === scope) plugin.scope = undefined
     await scope.dispose()
-    state.view.update({ status: listPluginStatus(state) })
+    if (!state.disposed) state.view.update({ status: listPluginStatus(state) })
     return true
   }
 
@@ -774,6 +785,7 @@ async function resolveExternalPlugins(list: ConfigPlugin.Origin[], wait: () => P
 }
 
 async function addExternalPluginEntries(state: RuntimeState, ready: PluginLoad[]) {
+  if (state.disposed) return { plugins: [], ok: false }
   if (!ready.length) return { plugins: [] as PluginEntry[], ok: true }
 
   const meta = await PluginMeta.touchMany(
@@ -783,6 +795,7 @@ async function addExternalPluginEntries(state: RuntimeState, ready: PluginLoad[]
       id: item.id,
     })),
   ).catch(() => undefined)
+  if (state.disposed) return { plugins: [], ok: false }
 
   const plugins: PluginEntry[] = []
   let ok = true
@@ -1030,10 +1043,11 @@ export async function dispose() {
   const task = loaded
   loaded = undefined
   dir = ""
-  if (task) await task.catch((error) => fail("failed to finish loading tui plugins during disposal", { error }))
+  if (task) void task.catch((error) => fail("failed to finish loading tui plugins during disposal", { error }))
   const state = runtime
   runtime = undefined
   if (!state) return
+  state.disposed = true
   const queue = [...state.plugins].reverse()
   for (const plugin of queue) {
     await deactivatePluginEntry(state, plugin, false).catch((error) =>
@@ -1059,6 +1073,7 @@ async function load(input: {
   const cwd = process.cwd()
   const slots = input.runtime.setupSlots(api)
   const next: RuntimeState = {
+    disposed: false,
     directory: cwd,
     api,
     view: input.runtime,
@@ -1085,7 +1100,9 @@ async function load(input: {
         return yield* RuntimeFlags.Service
       }).pipe(Effect.provide(AppNodeBuilder.build(RuntimeFlags.node))),
     )
+    if (next.disposed) return
     const pluginOrigins = config.plugin_origins ?? (await TuiConfig.pluginOrigins())
+    if (next.disposed) return
     const records = Flag.OPENCODE_PURE ? [] : pluginOrigins
     if (Flag.OPENCODE_PURE && pluginOrigins.length) {
     }
@@ -1104,10 +1121,13 @@ async function load(input: {
     }
 
     const ready = await resolveExternalPlugins(records, () => TuiConfig.waitForDependencies())
+    if (next.disposed) return
     await addExternalPluginEntries(next, ready)
+    if (next.disposed) return
 
     applyInitialPluginEnabledState(next, config)
     for (const plugin of next.plugins) {
+      if (next.disposed) return
       if (!plugin.enabled) continue
       // Keep plugin execution sequential for deterministic side effects:
       // command registration order affects keybind/command precedence,
@@ -1115,6 +1135,7 @@ async function load(input: {
       // and hook chains rely on stable plugin ordering.
       await activatePluginEntry(next, plugin, false)
     }
+    if (next.disposed) return
     next.view.update({ status: listPluginStatus(next) })
   } catch (error) {
     fail("failed to load tui plugins", { directory: cwd, error })

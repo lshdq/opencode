@@ -68,6 +68,11 @@ test("app.exit prints the session epilogue after scoped cleanup", async () => {
   mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
   const events = createEventSource()
   const calls = createFetch((url) => {
+    if (url.pathname === "/session/dummy") return json({
+      id: "dummy", title: "Demo session", slug: "dummy", projectID: "project", directory,
+      version: "0.0.0-test", time: { created: 0, updated: 0 },
+    })
+    if (["/session/dummy/message", "/session/dummy/todo", "/session/dummy/diff"].includes(url.pathname)) return json([])
     if (url.pathname === "/session")
       return json([
         {
@@ -117,6 +122,8 @@ test("app.exit prints the session epilogue after scoped cleanup", async () => {
     await ready
     await setup.renderOnce()
     await setup.renderOnce()
+    await setup.waitFor(() => api?.route.current.name === "session")
+    await setup.waitFor(() => api?.state.session.get("dummy")?.title === "Demo session")
     api?.keymap.dispatchCommand("app.exit")
     await task
 
@@ -352,14 +359,15 @@ function hasText(root: Renderable, text: string): boolean {
   return root.getChildren().some((child) => hasText(child, text))
 }
 
-test("fatal startup errors set a nonzero exit after scoped cleanup", async () => {
+test("server preparation errors preserve the editable draft until the user exits", async () => {
   const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
   const core = await import("@opentui/core")
   await mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
   const events = createEventSource()
+  const failed = Promise.withResolvers<void>()
   const calls = createFetch((url) => {
     if (url.pathname === "/config")
-      return json(
+      return failed.promise.then(() => json(
         {
           name: "ConfigRemoteAuthError",
           data: {
@@ -368,7 +376,7 @@ test("fatal startup errors set a nonzero exit after scoped cleanup", async () =>
           },
         },
         { status: 400 },
-      )
+      ))
     return undefined
   })
   let disposes = 0
@@ -400,10 +408,20 @@ test("fatal startup errors set a nonzero exit after scoped cleanup", async () =>
       }).pipe(Effect.provide(AppNodeBuilder.build(Global.node))),
     )
 
+    const until = Date.now() + 5000
+    while (!(setup.renderer.currentFocusedEditor instanceof TextareaRenderable)) {
+      if (Date.now() > until) throw new Error("prompt did not mount during slow startup")
+      await Bun.sleep(10)
+    }
+    const input = setup.renderer.currentFocusedEditor
+    if (!(input instanceof TextareaRenderable)) throw new Error("expected prompt")
+    input.setText("retain on startup failure")
+    failed.resolve()
+    await setup.waitFor(() => hasText(setup.renderer.root, "Startup failed"))
+    expect(input.plainText).toBe("retain on startup failure")
+    expect(setup.renderer.isDestroyed).toBe(false)
+    setup.renderer.destroy()
     await task
-    expect(stderr).toContain("Run `opencode auth login https://example.com` to re-authenticate.")
-    expect(stderr).not.toContain("Unexpected server error")
-    expect(process.exitCode).toBe(1)
     expect(setup.renderer.isDestroyed).toBe(true)
     expect(disposes).toBe(1)
   } finally {

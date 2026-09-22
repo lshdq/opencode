@@ -57,6 +57,7 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { useLocation } from "../../context/location"
+import { usePreparation } from "../../context/preparation"
 
 registerOpencodeSpinner()
 
@@ -87,6 +88,7 @@ function pastedFilepath(value: string, platform: string) {
 }
 
 export type PromptRef = {
+  readonly pending?: boolean
   focused: boolean
   current: PromptInfo
   set(prompt: PromptInfo): void
@@ -157,6 +159,16 @@ export function Prompt(props: PromptProps) {
   const route = useRoute()
   const project = useProject()
   const sync = useSync()
+  const preparation = usePreparation()
+  const [waiting, setWaiting] = createSignal(false)
+  let submission: AbortController | undefined
+  let disposed = false
+  function cancelSubmission() {
+    submission?.abort()
+    submission = undefined
+    setWaiting(false)
+  }
+  createEffect(on(() => route.revision, cancelSubmission, { defer: true }))
   const tuiConfig = useTuiConfig()
   const dialog = useDialog()
   const toast = useToast()
@@ -166,6 +178,7 @@ export function Prompt(props: PromptProps) {
   const keymap = useOpencodeKeymap()
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
+  const interruptShortcut = useCommandShortcut("session.interrupt")
   const renderer = useRenderer()
   const exit = useExit()
   const dimensions = useTerminalDimensions()
@@ -394,8 +407,12 @@ export function Prompt(props: PromptProps) {
         name: "session.interrupt",
         category: "Session",
         hidden: true,
-        enabled: status().type !== "idle",
+        enabled: waiting() || status().type !== "idle",
         run: () => {
+          if (waiting()) {
+            cancelSubmission()
+            return
+          }
           if (auto()?.visible) return
           if (!input.focused) return
           // TODO: this should be its own command
@@ -583,8 +600,11 @@ export function Prompt(props: PromptProps) {
     get focused() {
       return input.focused
     },
+    get pending() {
+      return waiting()
+    },
     get current() {
-      return store.prompt
+      return { ...store.prompt, mode: store.mode }
     },
     focus() {
       input.focus()
@@ -593,8 +613,10 @@ export function Prompt(props: PromptProps) {
       input.blur()
     },
     set(prompt) {
+      cancelSubmission()
       input.setText(prompt.input)
       setStore("prompt", prompt)
+      setStore("mode", prompt.mode ?? "normal")
       restoreExtmarksFromParts(prompt.parts)
       input.gotoBufferEnd()
     },
@@ -617,19 +639,21 @@ export function Prompt(props: PromptProps) {
     stashed = undefined
     if (store.prompt.input) return
     if (saved && saved.prompt.input) {
-      input.setText(saved.prompt.input)
-      setStore("prompt", saved.prompt)
-      restoreExtmarksFromParts(saved.prompt.parts)
+      ref.set(saved.prompt)
       input.cursorOffset = saved.cursor
     }
   })
 
   onCleanup(() => {
+    // Let a replacement plugin prompt inherit an explicit pending submission;
+    // the scoped ref provider only transfers it within the same route revision.
+    props.ref?.(undefined)
+    disposed = true
+    cancelSubmission()
     if (store.prompt.input) {
-      stashed = { prompt: unwrap(store.prompt), cursor: input.cursorOffset }
+      stashed = { prompt: unwrap(ref.current), cursor: input.cursorOffset }
     }
     setInputTarget(undefined)
-    props.ref?.(undefined)
   })
 
   createEffect(() => {
@@ -832,6 +856,7 @@ export function Prompt(props: PromptProps) {
           desc: "Shell mode",
           group: "Prompt",
           cmd: () => {
+            cancelSubmission()
             setStore("placeholder", randomIndex(shell().length))
             setStore("mode", "shell")
           },
@@ -844,7 +869,13 @@ export function Prompt(props: PromptProps) {
     return {
       target: inputTarget,
       enabled: inputTarget() !== undefined && store.mode === "shell",
-      bindings: [{ key: "escape", desc: "Exit shell mode", group: "Prompt", cmd: () => setStore("mode", "normal") }],
+      bindings: [{
+        key: "escape", desc: "Exit shell mode", group: "Prompt", cmd: () => {
+          if (waiting()) return cancelSubmission()
+          cancelSubmission()
+          setStore("mode", "normal")
+        },
+      }],
     }
   })
 
@@ -855,7 +886,12 @@ export function Prompt(props: PromptProps) {
         cursorVersion()
         return inputTarget() !== undefined && store.mode === "shell" && input?.visualCursor.offset === 0
       })(),
-      bindings: [{ key: "backspace", desc: "Exit shell mode", group: "Prompt", cmd: () => setStore("mode", "normal") }],
+      bindings: [{
+        key: "backspace", desc: "Exit shell mode", group: "Prompt", cmd: () => {
+          cancelSubmission()
+          setStore("mode", "normal")
+        },
+      }],
     }
   })
 
@@ -879,6 +915,7 @@ export function Prompt(props: PromptProps) {
 
             const item = history.move(-1, input.plainText)
             if (!item) return false
+            cancelSubmission()
             input.setText(item.input)
             setStore("prompt", item)
             setStore("mode", item.mode ?? "normal")
@@ -915,6 +952,7 @@ export function Prompt(props: PromptProps) {
 
             const item = history.move(1, input.plainText)
             if (!item) return false
+            cancelSubmission()
             input.setText(item.input)
             setStore("prompt", item)
             setStore("mode", item.mode ?? "normal")
@@ -927,7 +965,6 @@ export function Prompt(props: PromptProps) {
     }
   })
 
-  let submitting = false
   async function submit() {
     // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
     // input's native onSubmit racing another dispatch). Without this guard,
@@ -935,16 +972,26 @@ export function Prompt(props: PromptProps) {
     // clears `store.prompt.input`, then awaits its own `session.create` and
     // ultimately reads the now-empty store — sending a phantom empty prompt
     // to a freshly created session.
-    if (submitting) return false
-    submitting = true
+    if (submission || disposed || input?.isDestroyed) return false
+    const controller = new AbortController()
+    submission = controller
     try {
-      return await submitInner()
+      return await submitInner(controller.signal)
+    } catch (error) {
+      if (!controller.signal.aborted && !disposed) toast.error(error)
+      return false
     } finally {
-      submitting = false
+      if (submission === controller) {
+        submission = undefined
+        setWaiting(false)
+      }
     }
   }
 
-  async function submitInner() {
+  async function submitInner(signal: AbortSignal) {
+    const revision = route.revision
+    const owner = AbortSignal.any([signal, route.signal])
+    const currentMode = store.mode
     workspace.clearNotice()
 
     // IME: double-defer may fire before onContentChange flushes the last
@@ -958,12 +1005,30 @@ export function Prompt(props: PromptProps) {
     if (workspace.creating() || move.creating()) return false
     if (auto()?.visible) return false
     if (!store.prompt.input) return false
-    const agent = local.agent.current()
-    if (!agent) return false
     const trimmed = store.prompt.input.trim()
     if (trimmed === "exit" || trimmed === "quit" || trimmed === ":q") {
       void exit()
       return true
+    }
+    setWaiting(true)
+    await preparation.wait(signal)
+    signal.throwIfAborted()
+    if (disposed || props.disabled || props.visible === false || !store.prompt.input) return false
+    const selection = workspace.selection()
+    if (!props.sessionID && selection && selection.type !== "new") {
+      const target = selection.type === "existing" ? selection.workspaceID : undefined
+      if (target !== sync.workspace || project.workspace.removed(target)) {
+        // Keep a failed candidate scoped to this route even after submission is released.
+        await sync.bootstrap({ fatal: false, workspace: target ?? null, signal: owner })
+        await preparation.wait(signal)
+        signal.throwIfAborted()
+      }
+    }
+    setWaiting(false)
+    const agent = local.agent.current()
+    if (!agent) {
+      toast.show({ message: "No agent available to send prompts", variant: "error" })
+      return false
     }
     const selectedModel = local.model.current()
     if (!selectedModel) {
@@ -973,6 +1038,14 @@ export function Prompt(props: PromptProps) {
 
     const workspaceSession = props.sessionID ? sync.session.get(props.sessionID) : undefined
     const workspaceID = workspaceSession?.workspaceID
+    if (project.workspace.removed(sync.workspace) || project.workspace.removed(workspaceID)) {
+      toast.show({ message: "Workspace has been deleted. Choose another workspace.", variant: "error" })
+      return false
+    }
+    if (props.sessionID && (!workspaceSession || workspaceID !== sync.workspace)) {
+      toast.show({ message: "Session workspace is not prepared. Reopen the session to retry.", variant: "error" })
+      return false
+    }
     const workspaceStatus = workspaceID ? (project.workspace.status(workspaceID) ?? "error") : undefined
     if (props.sessionID && workspaceID && workspaceStatus !== "connected") {
       dialog.replace(() => (
@@ -991,9 +1064,11 @@ export function Prompt(props: PromptProps) {
     let finishMoveProgress = false
     if (sessionID == null) {
       const selectedWorkspace = workspace.selection()
-      const workspaceID = selectedWorkspace?.type === "existing" ? selectedWorkspace.workspaceID : undefined
+      const workspaceID = selectedWorkspace?.type === "existing" ? selectedWorkspace.workspaceID : sync.workspace
 
       const directory = await move.getDirectory(store.prompt.input)
+      signal.throwIfAborted()
+      if (project.workspace.removed(workspaceID)) return false
       if (move.pending() && !directory) return false
       finishMoveProgress = Boolean(move.progress())
 
@@ -1007,6 +1082,9 @@ export function Prompt(props: PromptProps) {
           variant,
         },
       })
+      signal.throwIfAborted()
+
+      if (project.workspace.removed(workspaceID)) return false
 
       if (res.error) {
         if (finishMoveProgress) move.finishSubmit()
@@ -1036,8 +1114,6 @@ export function Prompt(props: PromptProps) {
     // Filter out text parts (pasted content) since they're now expanded inline
     const nonTextParts = store.prompt.parts.filter((part) => part.type !== "text")
 
-    // Capture mode before it gets reset
-    const currentMode = store.mode
     const editorSelection = editorContext()
     const editorParts =
       editorSelection && editor.labelState() === "pending"
@@ -1056,7 +1132,7 @@ export function Prompt(props: PromptProps) {
           ]
         : []
 
-    if (store.mode === "shell") {
+    if (currentMode === "shell") {
       move.startSubmit()
       void sdk.client.session.shell({
         sessionID,
@@ -1135,6 +1211,7 @@ export function Prompt(props: PromptProps) {
     if (!props.sessionID) {
       if (editorParts.length > 0) editor.preserveSelectionFromNewSession()
       setTimeout(() => {
+        if (disposed || signal.aborted || route.revision !== revision) return
         route.navigate({
           type: "session",
           sessionID,
@@ -1270,6 +1347,7 @@ export function Prompt(props: PromptProps) {
   }
 
   function clearPrompt() {
+    cancelSubmission()
     if (store.prompt.input.trim().length >= DRAFT_RETENTION_MIN_CHARS || store.prompt.parts.length > 0) {
       history.append({
         ...store.prompt,
@@ -1376,6 +1454,7 @@ export function Prompt(props: PromptProps) {
               maxHeight={maxHeight()}
               onContentChange={() => {
                 const value = input.plainText
+                if (waiting() && value !== store.prompt.input) cancelSubmission()
                 setStore("prompt", "input", value)
                 auto()?.onInput(value)
                 syncExtmarksWithPromptParts()
@@ -1442,6 +1521,9 @@ export function Prompt(props: PromptProps) {
               cursorStyle={tuiConfig.cursor}
               syntaxStyle={syntax()}
             />
+            <Show when={waiting()}>
+              <text fg={theme.textMuted}>Waiting for startup… {interruptShortcut()} to cancel (editing also cancels)</text>
+            </Show>
             <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
               <box flexDirection="row" gap={1}>
                 <Show when={local.agent.current()} fallback={<box height={1} />}>

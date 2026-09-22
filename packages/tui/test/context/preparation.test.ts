@@ -1,0 +1,213 @@
+import { expect, test } from "bun:test"
+import { createPreparation } from "../../src/context/preparation"
+
+test("cancelling one waiter does not cancel shared preparation or another waiter", async () => {
+  const preparation = createPreparation()
+  const work = Promise.withResolvers<void>()
+  const cancelled = new AbortController()
+  preparation.track(work.promise)
+  const first = preparation.wait(cancelled.signal).catch((error) => error)
+  const second = preparation.wait(new AbortController().signal)
+  const reason = new Error("cancel this submission only")
+  cancelled.abort(reason)
+  expect(await first).toBe(reason)
+  expect(preparation.ready).toBe(false)
+  work.resolve()
+  await second
+  expect(preparation.ready).toBe(true)
+  preparation.dispose()
+})
+
+test("wait includes work registered by a completing startup task", async () => {
+  const preparation = createPreparation()
+  const server = Promise.withResolvers<void>()
+  const plugin = Promise.withResolvers<void>()
+  preparation.track(server.promise.then(() => {
+    preparation.track(plugin.promise)
+  }))
+  let complete = false
+  const waiting = preparation.wait(new AbortController().signal).then(() => { complete = true })
+  server.resolve()
+  await server.promise
+  expect(complete).toBe(false)
+  expect(preparation.ready).toBe(false)
+  plugin.resolve()
+  await waiting
+  expect(complete).toBe(true)
+  expect(preparation.ready).toBe(true)
+  preparation.dispose()
+})
+
+test("fatal failure releases current and future waiters despite other unfinished work", async () => {
+  const preparation = createPreparation()
+  const failed = Promise.withResolvers<void>()
+  const blocked = Promise.withResolvers<void>()
+  preparation.track(failed.promise)
+  preparation.track(blocked.promise)
+  const waiting = preparation.wait(new AbortController().signal).catch((error) => error)
+  const error = new Error("configuration failed")
+  failed.reject(error)
+  expect(await waiting).toBe(error)
+  await expect(preparation.wait(new AbortController().signal)).rejects.toBe(error)
+  expect(preparation.error).toBe(error)
+  blocked.resolve()
+  await blocked.promise
+  expect(preparation.ready).toBe(false)
+  preparation.dispose()
+})
+
+test("nonfatal task failure does not poison subsequent preparation", async () => {
+  const preparation = createPreparation()
+  const task = Promise.withResolvers<void>()
+  preparation.track(task.promise, { fatal: false })
+  const waiting = preparation.wait(new AbortController().signal).catch((error) => error)
+  const error = new Error("session hydration failed")
+  task.reject(error)
+  expect(await waiting).toBe(error)
+  expect(preparation.error).toBeUndefined()
+  expect(preparation.ready).toBe(true)
+  await preparation.wait(new AbortController().signal)
+  preparation.dispose()
+})
+
+test("dispose aborts all waiters and ignores late task rejection", async () => {
+  const preparation = createPreparation()
+  const task = Promise.withResolvers<void>()
+  preparation.track(task.promise)
+  const waiting = [1, 2].map(() => preparation.wait(new AbortController().signal).catch((error) => error))
+  preparation.dispose()
+  preparation.dispose()
+  for (const result of await Promise.all(waiting)) expect(result.name).toBe("AbortError")
+  task.reject(new Error("late plugin failure"))
+  await task.promise.catch(() => {})
+  expect(preparation.error).toBeUndefined()
+  await expect(preparation.wait(new AbortController().signal)).rejects.toMatchObject({ name: "AbortError" })
+})
+
+test("already-aborted submissions cannot pass an empty ready barrier", async () => {
+  const preparation = createPreparation()
+  const cancelled = new AbortController()
+  cancelled.abort()
+  expect(preparation.ready).toBe(true)
+  await expect(preparation.wait(cancelled.signal)).rejects.toMatchObject({ name: "AbortError" })
+  preparation.dispose()
+})
+
+test("invalidating route work releases existing and future waiters without settling its IO", async () => {
+  const preparation = createPreparation()
+  const route = new AbortController()
+  const work = Promise.withResolvers<void>()
+  preparation.track(work.promise, { signal: route.signal })
+  const waiting = preparation.wait(new AbortController().signal)
+  route.abort()
+  await waiting
+  expect(preparation.ready).toBe(true)
+  await preparation.wait(new AbortController().signal)
+  work.reject(new Error("abandoned route failed late"))
+  await work.promise.catch(() => {})
+  expect(preparation.error).toBeUndefined()
+  preparation.dispose()
+})
+
+test("route cancellation cannot release the shared plugin barrier", async () => {
+  const preparation = createPreparation()
+  const route = new AbortController()
+  const work = Promise.withResolvers<void>()
+  const plugin = Promise.withResolvers<void>()
+  preparation.track(work.promise, { signal: route.signal })
+  preparation.track(plugin.promise)
+  let completed = false
+  const waiting = preparation.wait(new AbortController().signal).then(() => { completed = true })
+  route.abort()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  expect(completed).toBe(false)
+  expect(preparation.ready).toBe(false)
+  plugin.resolve()
+  await waiting
+  expect(completed).toBe(true)
+  expect(preparation.ready).toBe(true)
+  work.resolve()
+  preparation.dispose()
+})
+
+test("already-invalidated work is observed but cannot block or poison preparation", async () => {
+  const preparation = createPreparation()
+  const route = new AbortController()
+  route.abort()
+  const work = Promise.withResolvers<void>()
+  preparation.track(work.promise, { signal: route.signal })
+  await preparation.wait(new AbortController().signal)
+  work.reject(new Error("not active"))
+  await work.promise.catch(() => {})
+  expect(preparation.ready).toBe(true)
+  expect(preparation.error).toBeUndefined()
+  preparation.dispose()
+})
+
+test("an active route failure is fatal only until the route is abandoned", async () => {
+  const preparation = createPreparation()
+  const route = new AbortController()
+  const error = new Error("fork failed")
+  preparation.track(Promise.reject(error), { signal: route.signal })
+  await expect(preparation.wait(new AbortController().signal)).rejects.toBe(error)
+  expect(preparation.error).toBe(error)
+  route.abort()
+  expect(preparation.error).toBeUndefined()
+  await preparation.wait(new AbortController().signal)
+  preparation.dispose()
+})
+
+test("clearing a scoped failure never erases a global configuration failure", async () => {
+  const preparation = createPreparation()
+  const route = new AbortController()
+  const error = new Error("configuration failed")
+  preparation.track(Promise.reject(new Error("fork failed")), { signal: route.signal })
+  preparation.track(Promise.reject(error))
+  await preparation.wait(new AbortController().signal).catch(() => {})
+  route.abort()
+  expect(preparation.error).toBe(error)
+  await expect(preparation.wait(new AbortController().signal)).rejects.toBe(error)
+  preparation.dispose()
+})
+
+// TC-014: the same waiter must recheck work added while its old owner leaves.
+test("an existing waiter follows a replacement owner instead of escaping the new barrier", async () => {
+  const preparation = createPreparation()
+  const route = new AbortController()
+  const old = Promise.withResolvers<void>()
+  const current = Promise.withResolvers<void>()
+  preparation.track(old.promise, { signal: route.signal })
+  let complete = false
+  const waiting = preparation.wait(new AbortController().signal).then(() => { complete = true })
+  route.abort()
+  preparation.track(current.promise)
+  await new Promise<void>((resolve) => setImmediate(resolve))
+  expect(complete).toBe(false)
+  expect(preparation.ready).toBe(false)
+  old.reject(new Error("obsolete owner failed"))
+  await old.promise.catch(() => {})
+  expect(preparation.error).toBeUndefined()
+  expect(complete).toBe(false)
+  current.resolve()
+  await waiting
+  expect(preparation.ready).toBe(true)
+  preparation.dispose()
+})
+
+test("clearing one scoped failure retains another active owner's failure", async () => {
+  const preparation = createPreparation()
+  const first = new AbortController()
+  const second = new AbortController()
+  const errors = [new Error("first owner failed"), new Error("second owner failed")]
+  preparation.track(Promise.reject(errors[0]), { signal: first.signal })
+  preparation.track(Promise.reject(errors[1]), { signal: second.signal })
+  await expect(preparation.wait(new AbortController().signal)).rejects.toBe(errors[0])
+  first.abort()
+  expect(preparation.error).toBe(errors[1])
+  await expect(preparation.wait(new AbortController().signal)).rejects.toBe(errors[1])
+  second.abort()
+  expect(preparation.error).toBeUndefined()
+  await preparation.wait(new AbortController().signal)
+  expect(preparation.ready).toBe(true)
+  preparation.dispose()
+})

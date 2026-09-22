@@ -28,10 +28,11 @@ import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, onCleanup } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
+import { usePreparation } from "./preparation"
 
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
@@ -63,7 +64,14 @@ export const {
   provider: SyncProvider,
 } = createSimpleContext({
   name: "Sync",
+  deferRender: false,
   init: () => {
+    const preparation = usePreparation()
+    let disposed = false
+    onCleanup(() => {
+      disposed = true
+      preparing?.owner.abort()
+    })
     const startup = useTuiStartup()
     const kv = useKV()
     const permission = usePermission()
@@ -157,26 +165,30 @@ export const {
       hydratingSessions.get(sessionID)?.parts.add(partID)
     }
 
-    function sessionListQuery(): { scope?: "project"; path?: string } {
+    function sessionListQuery(instancePath = project.data.instance.path): { scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
-      if (!project.data.instance.path.worktree || !project.data.instance.path.directory) return { scope: "project" }
+      if (!instancePath.worktree || !instancePath.directory) return { scope: "project" }
       return {
         path: path
-          .relative(path.resolve(project.data.instance.path.worktree), project.data.instance.path.directory)
+          .relative(path.resolve(instancePath.worktree), instancePath.directory)
           .replaceAll("\\", "/"),
       }
     }
 
-    function listSessions() {
+    function listSessions(context = { workspace: project.workspace.current(), path: project.data.instance.path }) {
       return sdk.client.session
-        .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() })
+        .list({
+          workspace: context.workspace,
+          start: Date.now() - 30 * 24 * 60 * 60 * 1000,
+          ...sessionListQuery(context.path),
+        })
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
     }
 
     event.subscribe((event, { directory, workspace }) => {
       switch (event.type) {
         case "server.instance.disposed":
-          void bootstrap()
+          refreshInstance({ id: event.id, directory, workspace })
           break
         case "permission.replied": {
           const requests = store.permission[event.properties.sessionID]
@@ -195,7 +207,8 @@ export const {
 
         case "permission.asked": {
           const request = event.properties
-          if (permission.mode === "auto") {
+          if (project.workspace.removed(workspace)) break
+          if (permission.mode === "auto" && store.status !== "loading" && workspace === hydratedWorkspace) {
             void sdk.client.permission.reply({
               requestID: request.id,
               reply: "once",
@@ -447,12 +460,120 @@ export const {
 
     const exit = useExit()
     const args = useArgs()
+    let hydratedWorkspace: string | undefined
+    let preparing: {
+      owner: AbortController
+      signal: AbortSignal
+      workspace: string | undefined
+      directory: string | undefined
+      pending: boolean
+      events: Set<string>
+      refresh: (id: string) => void
+      task: Promise<void>
+    } | undefined
+    let stale: { id: string; directory: string; workspace: string | undefined } | undefined
+    let recovery: { signal: AbortSignal; workspace: string | undefined; task: Promise<void> } | undefined
 
-    async function bootstrap(input: { fatal?: boolean } = {}) {
-      const fatal = input.fatal ?? true
+    function matches(instance: { directory: string; workspace: string | undefined }, target: { directory?: string; workspace: string | undefined }) {
+      return instance.workspace === target.workspace &&
+        (target.directory === undefined || path.normalize(instance.directory) === path.normalize(target.directory))
+    }
+
+    function refreshInstance(instance: { id: string; directory: string; workspace: string | undefined }) {
+      if (disposed || project.workspace.removed(instance.workspace)) return
+      const current = { directory: project.instance.directory(), workspace: project.workspace.current() }
+      if (preparing && !preparing.signal.aborted && matches(instance, preparing) && preparing.events.has(instance.id)) return
+      if (preparing && !preparing.signal.aborted && preparing.pending && matches(instance, preparing)) {
+        preparing.refresh(instance.id)
+        return
+      }
+      if (!matches(instance, current)) return
+      // A refresh is not a new navigation intent. Keep it for fallback, without
+      // cancelling a different candidate or clearing that candidate's failure.
+      stale = instance
+      if (preparing && !preparing.signal.aborted && (preparing.pending || !matches(instance, preparing))) return
+      stale = undefined
+      void bootstrap({ fatal: false, workspace: current.workspace ?? null, refresh: instance.id }).catch(() => {})
+    }
+
+    function recover(signal: AbortSignal) {
       const workspace = project.workspace.current()
-      const projectPromise = project.sync()
-      const sessionListPromise = projectPromise.then(() => listSessions())
+      if (recovery?.signal === signal && recovery.workspace === workspace) return recovery.task
+      if (!project.workspace.removed(workspace)) return Promise.resolve()
+      const task = bootstrap({ fatal: false, workspace: null, signal })
+      recovery = { signal, workspace, task }
+      return task
+    }
+
+    function bootstrap(input: { fatal?: boolean; signal?: AbortSignal; workspace?: string | null; refresh?: string } = {}) {
+      // Provider setup calls bootstrap after dispose; the event may already have
+      // started the same refresh. Never replace an explicit in-flight candidate.
+      if (!("workspace" in input) && !input.signal && preparing?.pending && !preparing.signal.aborted) return preparing.task
+      if (input.signal?.aborted) return Promise.reject(input.signal.reason)
+      preparing?.owner.abort()
+      const owner = new AbortController()
+      const signal = AbortSignal.any([owner.signal, ...(input.signal ? [input.signal] : [])])
+      const workspace = "workspace" in input ? input.workspace ?? undefined : project.workspace.current()
+      const candidate = {
+        owner, signal, workspace,
+        directory: workspace === undefined ? sdk.directory : project.workspace.get(workspace)?.directory ?? undefined,
+        pending: true,
+        events: new Set(input.refresh ? [input.refresh] : []),
+        refresh: (_id: string) => {},
+        task: Promise.resolve(),
+      }
+      preparing = candidate
+      signal.addEventListener("abort", () => {
+        // Let a synchronous explicit switch install its new candidate first.
+        // Otherwise restore a dirty retained context before released waiters run.
+        queueMicrotask(() => {
+          if (disposed || preparing !== candidate || !stale) return
+          refreshInstance(stale)
+        })
+      }, { once: true })
+      candidate.task = preparation.track((async () => {
+        while (true) {
+          signal.throwIfAborted()
+          const pass = new AbortController()
+          const refresh = Promise.withResolvers<"refresh">()
+          candidate.refresh = (id) => {
+            candidate.events.add(id)
+            if (pass.signal.aborted) return
+            pass.abort()
+            refresh.resolve("refresh")
+          }
+          const outcome = await Promise.race([
+            loadContext({ ...input, workspace: workspace ?? null, signal: AbortSignal.any([signal, pass.signal]),
+              directory: (directory) => { candidate.directory = directory },
+            }).then(() => "complete" as const, (error: unknown) => ({ error })),
+            refresh.promise,
+          ])
+          // An event can invalidate the pass after its promise won the race but
+          // before this continuation runs. That result still cannot finish us.
+          if (outcome === "refresh" || pass.signal.aborted) {
+            continue
+          }
+          signal.throwIfAborted()
+          if (outcome !== "complete") throw outcome.error
+          if (preparing === candidate) stale = undefined
+          candidate.pending = false
+          return
+        }
+      })().finally(() => { candidate.pending = false }), { signal })
+      return candidate.task
+    }
+
+    async function loadContext(input: { fatal?: boolean; signal: AbortSignal; workspace?: string | null; directory: (directory: string) => void }) {
+      const fatal = input.fatal ?? true
+      const workspace = "workspace" in input ? input.workspace ?? undefined : project.workspace.current()
+      const active = () => !disposed && !input.signal.aborted
+      const available = () => active() && !project.workspace.removed(workspace)
+      if (project.workspace.removed(workspace)) throw new Error("Workspace has been deleted. Choose another workspace.")
+      const projectPromise = project.load(workspace).then((snapshot) => {
+        if (active()) input.directory(snapshot.path.directory)
+        return snapshot
+      })
+      const sessionListPromise = projectPromise.then((snapshot) => listSessions(snapshot))
 
       // blocking - include session.list when continuing a session
       const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
@@ -467,14 +588,18 @@ export const {
         .catch(() => emptyConsoleState)
       const agentsPromise = sdk.client.app.agents({ workspace }, { throwOnError: true })
       const configPromise = sdk.client.config.get({ workspace }, { throwOnError: true })
+      const commandsPromise = sdk.client.command.list({ workspace }, { throwOnError: true })
+      // Observe the optional list immediately even when mandatory bootstrap fails.
+      void sessionListPromise.catch(() => {})
       await Promise.all([
         providersPromise,
         providerListPromise,
         capabilitiesPromise,
         agentsPromise,
         configPromise,
+        commandsPromise,
         projectPromise,
-        ...(args.continue ? [sessionListPromise] : []),
+        ...(args.continue || args.fork ? [sessionListPromise] : []),
       ])
         .then(async () => {
           const providersResponse = providersPromise.then((x) => x.data!)
@@ -483,7 +608,7 @@ export const {
           const consoleStateResponse = consoleStatePromise
           const agentsResponse = agentsPromise.then((x) => x.data ?? [])
           const configResponse = configPromise.then((x) => x.data!)
-          const sessionListResponse = args.continue ? sessionListPromise : undefined
+          const sessionListResponse = args.continue || args.fork ? sessionListPromise : undefined
 
           return Promise.all([
             providersResponse,
@@ -492,17 +617,25 @@ export const {
             consoleStateResponse,
             agentsResponse,
             configResponse,
+            projectPromise,
+            commandsPromise,
             ...(sessionListResponse ? [sessionListResponse] : []),
           ]).then((responses) => {
+            if (!active()) return
+            if (project.workspace.removed(workspace)) throw new Error("Workspace has been deleted. Choose another workspace.")
             const providers = responses[0]
             const providerList = responses[1]
             const capabilities = responses[2]
             const consoleState = responses[3]
             const agents = responses[4]
             const config = responses[5]
-            const sessions = responses[6]
+            const snapshot = responses[6]
+            const commands = responses[7]
+            const sessions = responses[8]
 
             batch(() => {
+              hydratedWorkspace = workspace
+              project.apply(snapshot)
               setStore("provider", reconcile(providers.providers))
               setStore("provider_default", reconcile(providers.default))
               setStore("provider_next", reconcile(providerList))
@@ -510,53 +643,59 @@ export const {
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))
               setStore("config", reconcile(config))
+              permission.configure(config.auto_approve === true)
+              setStore("command", reconcile(commands.data ?? []))
+              if (store.status !== "complete") setStore("status", "partial")
               if (sessions !== undefined) setStore("session", reconcile(sessions))
             })
           })
         })
-        .then(() => {
-          if (store.status !== "complete") setStore("status", "partial")
+        .then(async () => {
+          if (!available()) return
           // non-blocking
           void Promise.all([
-            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
-            consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
-            sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
-            sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
-            sdk.client.mcp.status({ workspace }).then((x) => setStore("mcp", reconcile(x.data ?? {}))),
+            ...(args.continue || args.fork ? [] : [sessionListPromise.then((sessions) => available() && setStore("session", reconcile(sessions)))]),
+            consoleStatePromise.then((consoleState) => available() && setStore("console_state", reconcile(consoleState))),
+            sdk.client.lsp.status({ workspace }).then((x) => available() && setStore("lsp", reconcile(x.data ?? []))),
+            sdk.client.mcp.status({ workspace }).then((x) => available() && setStore("mcp", reconcile(x.data ?? {}))),
             sdk.client.experimental.resource
               .list({ workspace })
-              .then((x) => setStore("mcp_resource", reconcile(x.data ?? {}))),
-            sdk.client.formatter.status({ workspace }).then((x) => setStore("formatter", reconcile(x.data ?? []))),
+              .then((x) => available() && setStore("mcp_resource", reconcile(x.data ?? {}))),
+            sdk.client.formatter.status({ workspace }).then((x) => available() && setStore("formatter", reconcile(x.data ?? []))),
             sdk.client.session.status({ workspace }).then((x) => {
-              setStore("session_status", reconcile(x.data ?? {}))
+              if (available()) setStore("session_status", reconcile(x.data ?? {}))
             }),
-            sdk.client.provider.auth({ workspace }).then((x) => setStore("provider_auth", reconcile(x.data ?? {}))),
-            sdk.client.vcs.get({ workspace }).then((x) => setStore("vcs", reconcile(x.data))),
-            project.workspace.sync(),
+            sdk.client.provider.auth({ workspace }).then((x) => available() && setStore("provider_auth", reconcile(x.data ?? {}))),
+            sdk.client.vcs.get({ workspace }).then((x) => available() && setStore("vcs", reconcile(x.data))),
+            project.workspace.sync(input.signal),
           ]).then(() => {
-            setStore("status", "complete")
-          })
+            if (available()) setStore("status", "complete")
+          }).catch((error) => console.error("tui background sync failed", error))
         })
         .catch(async (e) => {
+          if (!active()) return
           console.error("tui bootstrap failed", {
             error: e instanceof Error ? e.message : String(e),
             name: e instanceof Error ? e.name : undefined,
             stack: e instanceof Error ? e.stack : undefined,
           })
-          if (fatal) {
-            exit(e)
-          } else {
-            throw e
-          }
+          if (fatal) exit(e)
+          throw e
         })
+      // Supersession is not successful preparation for callers such as warp.
+      input.signal.throwIfAborted()
     }
 
-    onMount(() => {
-      void bootstrap()
-    })
+    const initialized = preparation.track(bootstrap({ fatal: false }))
 
     const result = {
       data: store,
+      initialized,
+      // Only complete contexts are published. Candidate workspace selection
+      // lives in bootstrap inputs, never in the SDK or the committed project.
+      get workspace() {
+        return hydratedWorkspace
+      },
       set: setStore,
       get status() {
         return store.status
@@ -577,9 +716,19 @@ export const {
         query() {
           return sessionListQuery()
         },
-        async refresh() {
+        async refresh(signal?: AbortSignal, sessionID?: string) {
+          if (signal?.aborted) return
           const list = await listSessions()
-          setStore("session", reconcile(list))
+          if (signal?.aborted) return
+          // The moved session may fall outside the list filter. Refresh it too,
+          // but publish neither response after this operation loses its owner.
+          const session = sessionID ? await sdk.client.session.get({ sessionID }, { throwOnError: true }) : undefined
+          if (signal?.aborted) return
+          setStore("session", reconcile(
+            session?.data
+              ? [...list.filter((item) => item.id !== sessionID), session.data].toSorted((a, b) => a.id.localeCompare(b.id))
+              : list,
+          ))
         },
         status(sessionID: string) {
           const session = result.session.get(sessionID)
@@ -592,7 +741,8 @@ export const {
           return last.time.completed ? "idle" : "working"
         },
         async sync(sessionID: string) {
-          if (fullSyncedSessions.has(sessionID)) return
+          // A workspace list refresh may have removed this cached session.
+          if (fullSyncedSessions.has(sessionID) && result.session.get(sessionID)) return
           const syncing = syncingSessions.get(sessionID)
           if (syncing) return syncing
           const tracker = { messages: new Set<string>(), parts: new Set<string>() }
@@ -667,6 +817,7 @@ export const {
         },
       },
       bootstrap,
+      recover,
     }
     return result
   },

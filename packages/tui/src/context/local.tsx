@@ -13,6 +13,7 @@ import { useTheme } from "./theme"
 import { useToast } from "../ui/toast"
 import { useRoute } from "./route"
 import { usePermission } from "./permission"
+import { usePreparation } from "./preparation"
 
 export type LocalTheme = {
   secondary: RGBA
@@ -60,6 +61,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const args = useArgs()
     const event = useEvent()
     const permission = usePermission()
+    const preparation = usePreparation()
 
     function isModelValid(model: { providerID: string; modelID: string }) {
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
@@ -179,20 +181,22 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         })
       }
 
-      readJson<unknown>(filePath)
-        .then((x) => {
-          if (!x || typeof x !== "object") return
-          const value = x as Record<string, unknown>
-          if (Array.isArray(value.recent)) setModelStore("recent", value.recent)
-          if (Array.isArray(value.favorite)) setModelStore("favorite", value.favorite)
-          if (typeof value.variant === "object" && value.variant !== null)
-            setModelStore("variant", value.variant as Record<string, string | undefined>)
-        })
-        .catch(() => {})
-        .finally(() => {
-          setModelStore("ready", true)
-          if (state.pending) save()
-        })
+      preparation.track(
+        readJson<unknown>(filePath)
+          .then((x) => {
+            if (!x || typeof x !== "object") return
+            const value = x as Record<string, unknown>
+            if (Array.isArray(value.recent)) setModelStore("recent", value.recent)
+            if (Array.isArray(value.favorite)) setModelStore("favorite", value.favorite)
+            if (typeof value.variant === "object" && value.variant !== null)
+              setModelStore("variant", value.variant as Record<string, string | undefined>)
+          })
+          .catch(() => {})
+          .finally(() => {
+            setModelStore("ready", true)
+            if (state.pending) save()
+          }),
+      )
 
       const fallbackModel = createMemo(() => {
         if (args.model) {

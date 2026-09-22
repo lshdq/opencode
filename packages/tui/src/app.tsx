@@ -18,7 +18,6 @@ import {
   createMemo,
   ErrorBoundary,
   createSignal,
-  onMount,
   onCleanup,
   batch,
   Show,
@@ -85,6 +84,7 @@ import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer, win32InstallCloseHandler } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
+import { PreparationProvider, usePreparation } from "./context/preparation"
 import { cliErrorMessage, errorFormat } from "./util/error"
 
 registerOpencodeSpinner()
@@ -151,6 +151,7 @@ export type TuiInput = {
   events?: EventSource
   clipboard?: ClipboardService
   pluginHost: TuiPluginHost
+  prepare?: () => Promise<void>
 }
 
 function errorMessage(error: unknown) {
@@ -301,10 +302,10 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                 <ToastProvider>
                                   <RouteProvider
                                     initialRoute={
-                                      input.args.continue
+                                       input.args.sessionID && !input.args.fork
                                         ? {
                                             type: "session",
-                                            sessionID: "dummy",
+                                             sessionID: input.args.sessionID,
                                           }
                                         : undefined
                                     }
@@ -319,34 +320,37 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                           events={input.events}
                                         >
                                           <PermissionProvider>
-                                            <ProjectProvider>
-                                              <SyncProvider>
-                                                <DataProvider>
-                                                  <ThemeProvider mode={mode}>
-                                                    <LocalProvider>
-                                                      <PromptStashProvider>
-                                                        <DialogProvider>
-                                                          <FrecencyProvider>
-                                                            <PromptHistoryProvider>
-                                                              <PromptRefProvider>
-                                                                <EditorContextProvider>
-                                                                  <LocationProvider>
-                                                                    <App
-                                                                      onSnapshot={input.onSnapshot}
-                                                                      pluginHost={input.pluginHost}
-                                                                    />
-                                                                  </LocationProvider>
-                                                                </EditorContextProvider>
-                                                              </PromptRefProvider>
-                                                            </PromptHistoryProvider>
-                                                          </FrecencyProvider>
-                                                        </DialogProvider>
-                                                      </PromptStashProvider>
-                                                    </LocalProvider>
-                                                  </ThemeProvider>
-                                                </DataProvider>
-                                              </SyncProvider>
-                                            </ProjectProvider>
+                                            <PreparationProvider>
+                                              <ProjectProvider>
+                                                <SyncProvider>
+                                                  <DataProvider>
+                                                    <ThemeProvider mode={mode}>
+                                                      <LocalProvider>
+                                                        <PromptStashProvider>
+                                                          <DialogProvider>
+                                                            <FrecencyProvider>
+                                                              <PromptHistoryProvider>
+                                                                <PromptRefProvider>
+                                                                  <EditorContextProvider>
+                                                                    <LocationProvider>
+                                                                      <App
+                                                                        onSnapshot={input.onSnapshot}
+                                                                        pluginHost={input.pluginHost}
+                                                                        prepare={input.prepare}
+                                                                      />
+                                                                    </LocationProvider>
+                                                                  </EditorContextProvider>
+                                                                </PromptRefProvider>
+                                                              </PromptHistoryProvider>
+                                                            </FrecencyProvider>
+                                                          </DialogProvider>
+                                                        </PromptStashProvider>
+                                                      </LocalProvider>
+                                                    </ThemeProvider>
+                                                  </DataProvider>
+                                                </SyncProvider>
+                                              </ProjectProvider>
+                                            </PreparationProvider>
                                           </PermissionProvider>
                                         </SDKProvider>
                                       </PluginRuntimeProvider>
@@ -380,7 +384,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   })
 })
 
-function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPluginHost }) {
+function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPluginHost; prepare?: () => Promise<void> }) {
   const startup = useTuiStartup()
   const tuiConfig = useTuiConfig()
   const route = useRoute()
@@ -402,6 +406,15 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const pluginRuntime = usePluginRuntime()
   const attention = createTuiAttention({ renderer, config: tuiConfig, kv })
   const clipboard = useClipboard()
+  const preparation = usePreparation()
+  createEffect(() => {
+    const error = preparation.error
+    if (error !== undefined) toast.error(error)
+  })
+  let disposed = false
+  onCleanup(() => {
+    disposed = true
+  })
 
   const api = createTuiApi(
     createTuiApiAdapters({
@@ -423,19 +436,23 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     }),
   )
   const [ready, setReady] = createSignal(false)
-  props.pluginHost
-    .start({
-      api,
-      config: tuiConfig,
-      runtime: pluginRuntime,
-      dispose: () => attention.dispose(),
-    })
-    .catch((error) => {
-      console.error("Failed to load TUI plugins", error)
-    })
-    .finally(() => {
-      setReady(true)
-    })
+  const slots = pluginRuntime.setupSlots(api)
+  onCleanup(slots.dispose)
+  preparation.track(
+    Promise.resolve().then(async () => {
+        // Plugins historically see hydrated server state. Only rendering moves
+        // ahead of this boundary, not the plugin initialization contract.
+        await sync.initialized
+        if (disposed) return
+        await props.pluginHost.start({
+          api,
+          config: tuiConfig,
+          runtime: pluginRuntime,
+          dispose: () => attention.dispose(),
+        })
+        if (!disposed) setReady(true)
+    }),
+  )
 
   // Let selection cut and explicit copy/dismiss win ahead of normal bindings.
   const offSelectionKeys = Selection.registerKeyHandler(
@@ -462,9 +479,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     renderer.clearSelection()
   }
   const [terminalTitleEnabled, setTerminalTitleEnabled] = createSignal(kv.get("terminal_title_enabled", true))
-  const [pasteSummaryEnabled, setPasteSummaryEnabled] = createSignal(
-    kv.get("paste_summary_enabled", !sync.data.config.experimental?.disable_paste_summary),
-  )
+  const pasteSummaryEnabled = () => kv.get("paste_summary_enabled", !sync.data.config.experimental?.disable_paste_summary)
 
   // Update terminal window title based on current route and session
   createEffect(() => {
@@ -493,7 +508,37 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   })
 
   const args = useArgs()
-  onMount(() => {
+  const initialRevision = route.revision
+  const [restoring, setRestoring] = createSignal(Boolean(args.continue || args.fork || args.sessionID))
+  let seeded = false
+  let sent = false
+  let resumeSubmission = false
+  const restoration = new AbortController()
+  onCleanup(() => restoration.abort())
+  createEffect(on(() => route.revision, () => {
+    if (route.revision === initialRevision) return
+    restoration.abort()
+    sent = true
+  }))
+  createEffect(() => {
+    const ref = promptRef.current
+    if (!ref) return
+    if (!seeded) {
+      seeded = true
+      if (args.prompt) {
+        sent = true
+        ref.set({ input: args.prompt, parts: [] })
+        ref.submit()
+      }
+    }
+    if (restoring() || sent) return
+    if (!resumeSubmission && (!args.prompt || ref.current.input !== args.prompt)) return
+    sent = true
+    ref.submit()
+  })
+  const configured = preparation.track((async () => {
+    await sync.initialized
+    if (disposed) return
     batch(() => {
       if (args.agent) local.agent.set(args.agent)
       if (args.model) {
@@ -506,53 +551,39 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           })
         local.model.set({ providerID, modelID }, { recent: true })
       }
-      if (args.sessionID && !args.fork) {
-        route.navigate({
-          type: "session",
-          sessionID: args.sessionID,
-        })
-      }
     })
-  })
-
-  let continued = false
-  createEffect(() => {
-    // When using -c, session list is loaded in blocking phase, so we can navigate at "partial"
-    if (continued || sync.status === "loading" || !args.continue) return
-    const match = sync.data.session
-      .toSorted((a, b) => b.time.updated - a.time.updated)
-      .find((x) => x.parentID === undefined)?.id
-    if (match) {
-      continued = true
-      if (args.fork) {
-        void sdk.client.session.fork({ sessionID: match }).then((result) => {
-          if (result.data?.id) {
-            route.navigate({ type: "session", sessionID: result.data.id })
-          } else {
-            toast.show({ message: "Failed to fork session", variant: "error" })
-          }
-        })
-      } else {
-        route.navigate({ type: "session", sessionID: match })
-      }
+  })())
+  preparation.track((async () => {
+    // CLI/attach session validation and restoration belong to the initial
+    // route; configuration and plugins remain application-wide barriers.
+    await props.prepare?.()
+    await configured
+    if (disposed || restoration.signal.aborted) return
+    if (route.revision !== initialRevision) {
+      sent = true
+      return
     }
-  })
-
-  // Handle --session with --fork: wait for sync to be fully complete before forking
-  // (session list loads in non-blocking phase for --session, so we must wait for "complete"
-  // to avoid a race where reconcile overwrites the newly forked session)
-  let forked = false
-  createEffect(() => {
-    if (forked || sync.status !== "complete" || !args.sessionID || !args.fork) return
-    forked = true
-    void sdk.client.session.fork({ sessionID: args.sessionID }).then((result) => {
-      if (result.data?.id) {
-        route.navigate({ type: "session", sessionID: result.data.id })
-      } else {
-        toast.show({ message: "Failed to fork session", variant: "error" })
+    const target = args.sessionID ?? (args.continue
+      ? sync.data.session.toSorted((a, b) => b.time.updated - a.time.updated)
+        .find((x) => x.parentID === undefined)?.id
+      : undefined)
+    if (target && (args.continue || args.fork)) {
+      // Sync's startup phase includes the initial list when restoring/forking.
+      const id = args.fork
+        ? (await sdk.client.session.fork({ sessionID: target }, { throwOnError: true })).data?.id
+        : target
+      if (disposed || route.revision !== initialRevision) {
+        sent = true
+        return
       }
-    })
-  })
+      if (!id) throw new Error("Failed to fork session")
+      const ref = promptRef.current
+      resumeSubmission = ref?.pending === true
+      route.navigate({ type: "session", sessionID: id, prompt: ref?.current })
+      if (resumeSubmission) sent = false
+    }
+    if (!disposed) setRestoring(false)
+  })(), { signal: restoration.signal })
 
   createEffect(
     on(
@@ -940,11 +971,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         title: pasteSummaryEnabled() ? "Disable paste summary" : "Enable paste summary",
         category: "System",
         run: () => {
-          setPasteSummaryEnabled((prev) => {
-            const next = !prev
-            kv.set("paste_summary_enabled", next)
-            return next
-          })
+          kv.set("paste_summary_enabled", !pasteSummaryEnabled())
           dialog.clear()
         },
       },
@@ -1124,7 +1151,6 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       <Show when={Flag.OPENCODE_SHOW_TTFD}>
         <TimeToFirstDraw />
       </Show>
-      <Show when={ready()}>
         <box flexGrow={1} minHeight={0} flexDirection="column">
           <Switch>
             <Match when={route.data.type === "home"}>
@@ -1138,13 +1164,14 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
           </Switch>
           {plugin()}
         </box>
+      <Show when={ready()}>
         <box flexShrink={0}>
           <pluginRuntime.Slot name="app_bottom" />
         </box>
         <pluginRuntime.Slot name="app" />
       </Show>
-      <Show when={!startup.skipInitialLoading}>
-        <StartupLoading ready={ready} />
+      <Show when={!startup.skipInitialLoading || preparation.error !== undefined}>
+        <StartupLoading ready={() => preparation.ready} error={() => preparation.error} />
       </Show>
     </box>
   )

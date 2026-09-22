@@ -2,7 +2,7 @@ import { TextAttributes } from "@opentui/core"
 import { useTheme } from "../context/theme"
 import { useDialog } from "../ui/dialog"
 import { createStore } from "solid-js/store"
-import { For } from "solid-js"
+import { For, onCleanup } from "solid-js"
 import { useBindings } from "../keymap"
 
 export function DialogSessionDeleteFailed(props: {
@@ -16,6 +16,11 @@ export function DialogSessionDeleteFailed(props: {
   const { theme } = useTheme()
   const [store, setStore] = createStore({
     active: "delete" as "delete" | "restore",
+  })
+  let disposed = false
+  let pending = false
+  onCleanup(() => {
+    disposed = true
   })
 
   const options = [
@@ -34,8 +39,12 @@ export function DialogSessionDeleteFailed(props: {
   ]
 
   async function confirm() {
-    const result = await options.find((item) => item.id === store.active)?.run?.()
-    if (result === false) return
+    if (pending || disposed) return
+    pending = true
+    const result = await Promise.resolve(options.find((item) => item.id === store.active)?.run?.()).finally(() => {
+      pending = false
+    })
+    if (result === false || disposed) return
     props.onDone?.()
     if (!props.onDone) dialog.clear()
   }
