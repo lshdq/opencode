@@ -10,13 +10,14 @@ export type { FormWithLocation } from "@opencode/client/solid"
 
 export const { use: useData, provider: DataProvider } = createSimpleContext({
   name: "Data",
-  init: (props: { directory: string }) => {
+  init: (props: { directory: string; initialLocation?: () => Promise<LocationRef> }) => {
     const client = useClient()
     const data = createData({
       api: () => client.api,
       event: client.event,
       connection: client.connection,
       directory: props.directory,
+      initialLocation: props.initialLocation,
     })
     data satisfies Plugin.Context["data"]
     const [generatingTitles, setGeneratingTitles] = createStore<Record<string, boolean | undefined>>({})

@@ -16,6 +16,17 @@ export function datetime(input: number): string {
   return `${localTime} · ${localDate}`
 }
 
+/** Local creation time; retain a date for older messages even on narrow terminals. */
+export function messageTime(input: number, now = Date.now(), compact = false): string {
+  const date = new Date(input)
+  const today = new Date(now)
+  const pad = (value: number) => String(value).padStart(2, "0")
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}${compact ? "" : `:${pad(date.getSeconds())}`}`
+  if (date.toDateString() === today.toDateString()) return clock
+  const day = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  return `${compact && date.getFullYear() === today.getFullYear() ? day : `${date.getFullYear()}-${day}`} ${clock}`
+}
+
 export function number(num: number): string {
   if (num >= 1000000) {
     return (num / 1000000).toFixed(1) + "M"

@@ -109,6 +109,9 @@ describe("Ripgrep", () => {
       Effect.promise(() => tmpdir()),
       (tmp) =>
         Effect.gen(function* () {
+          // A user's global Git ignore may exclude .opencode before the basename glob reaches config.
+          // This fixture tests .git exclusion, not ambient ignore policy; whitelist only its own target tree.
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, ".ignore"), "!.opencode/\n"))
           yield* Effect.promise(() => fs.mkdir(path.join(tmp.path, ".opencode")))
           yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, ".opencode", "config"), "needle\n"))
           yield* Effect.promise(() => fs.mkdir(path.join(tmp.path, ".git")))
@@ -134,6 +137,29 @@ describe("Ripgrep", () => {
         }),
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
+  )
+
+  it.live("basename includes respect ignored parents until a local ignore whitelist permits traversal", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* Effect.promise(() =>
+        Promise.all(
+          [".opencode", ".git"].map(async (directory) => {
+            await fs.mkdir(path.join(tmp.path, directory))
+            await fs.writeFile(path.join(tmp.path, directory, "config"), "needle\r\n")
+          }),
+        ),
+      )
+      yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, ".gitignore"), ".opencode/\n"))
+      const ripgrep = yield* Ripgrep.Service
+      const input = { cwd: tmp.path, pattern: "needle", include: "config", limit: 10 }
+      expect(yield* ripgrep.grep(input)).toEqual([])
+
+      yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, ".ignore"), "!.opencode/\n"))
+      const matches = yield* ripgrep.grep(input)
+      expect(matches.map((item) => item.entry.path)).toEqual([RelativePath.make(".opencode/config")])
+      expect(matches[0]?.submatches).toEqual([{ text: "needle", start: 0, end: 6 }])
+    }),
   )
 
   it.live("excludes protected directory trees from catch-all find results", () =>

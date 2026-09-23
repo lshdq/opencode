@@ -5,6 +5,7 @@ import { Cause, Duration, Effect, Queue, Scope, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import type { ChildProcessHandle } from "effect/unstable/process/ChildProcessSpawner"
 import { Environment } from "../environment/index.js"
+import { McpWindows } from "@opencode/util/mcp-windows"
 
 /** Mirrors StdioClientTransport: wait this long for a graceful exit after stdin closes. */
 const CLOSE_GRACE = Duration.seconds(2)
@@ -36,8 +37,9 @@ export interface Options {
  * SDK's host-bound `StdioClientTransport`, so a workspace-backed location runs its MCP servers
  * wherever the rest of its execution happens.
  *
- * The process is acquired in the calling scope: closing the scope kills it (the spawner kills the
- * whole process group, so descendants go too) regardless of whether the transport was closed.
+ * The process is acquired in the calling scope. Local Windows execution additionally owns a
+ * kill-on-close job, so detached helpers cannot outlive a wrapper that exits before close().
+ * The opt-in is consumed only by the local spawner; remote drivers keep their original command.
  */
 export const make = Effect.fnUntraced(function* (options: Options) {
   const environment = yield* Environment.Service
@@ -78,15 +80,17 @@ export const make = Effect.fnUntraced(function* (options: Options) {
       startup = Effect.runPromise(
         Effect.gen(function* () {
           const handle = yield* environment.spawner.spawn(
-            ChildProcess.make(options.command, [...options.args], {
-              cwd: options.cwd,
-              env: options.environment,
-              extendEnv: true,
-              stdin: { stream: Stream.encodeText(Stream.fromQueue(outgoing)), endOnDone: true },
-              stdout: "pipe",
-              stderr: "pipe",
-              forceKillAfter: FORCE_KILL_AFTER,
-            }),
+            McpWindows.own(
+              ChildProcess.make(options.command, [...options.args], {
+                cwd: options.cwd,
+                env: options.environment,
+                extendEnv: true,
+                stdin: { stream: Stream.encodeText(Stream.fromQueue(outgoing)), endOnDone: true },
+                stdout: "pipe",
+                stderr: "pipe",
+                forceKillAfter: FORCE_KILL_AFTER,
+              }),
+            ),
           )
           state.handle = handle
           if (state.phase === "closed") {

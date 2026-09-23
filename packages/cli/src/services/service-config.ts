@@ -1,4 +1,6 @@
 import { Global } from "@opencode/util/global"
+import { FileMode } from "@opencode/util/file-mode"
+import { FileModeEffect } from "@opencode/util/file-mode-effect"
 import { OPENCODE_CHANNEL, OPENCODE_VERSION } from "../version"
 import { Hash } from "@opencode/util/hash"
 import { Service } from "@opencode/client/effect/service"
@@ -66,7 +68,8 @@ export const migrateRegistration = Effect.fnUntraced(function* (
   const registration = yield* decodeRegistration(text.value).pipe(Effect.option)
   if (Option.isNone(registration)) return
   if (!versionBelongsToChannel(registration.value.version, channel, installedVersion)) return
-  yield* fs.writeFileString(file, text.value, { flag: "wx", mode: 0o600 }).pipe(Effect.ignore)
+  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(legacy, { create: false, signal }))
+  yield* migrateWrite(file, text.value)
 })
 
 export const migrateConfig = Effect.fnUntraced(function* (legacy: string, file: string) {
@@ -74,7 +77,27 @@ export const migrateConfig = Effect.fnUntraced(function* (legacy: string, file: 
   const text = yield* fs.readFileString(legacy).pipe(Effect.option)
   if (Option.isNone(text)) return
   if (Option.isNone(yield* decodeInfo(text.value).pipe(Effect.option))) return
-  yield* fs.writeFileString(file, text.value, { flag: "wx", mode: 0o600 }).pipe(Effect.ignore)
+  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(legacy, { create: false, signal }))
+  yield* migrateWrite(file, text.value)
+})
+
+const migrateWrite = Effect.fnUntraced(function* (file: string, text: string) {
+  const fs = yield* FileSystem.FileSystem
+  if (process.platform !== "win32") {
+    yield* fs.writeFileString(file, text, { flag: "wx", mode: 0o600 }).pipe(Effect.ignore)
+    return
+  }
+  if (yield* fs.exists(file)) return
+  // A hard link publishes the complete inode atomically without replacing a
+  // concurrent winner. mkdtemp gives the scope ownership even if private file
+  // preparation is interrupted before it can report whether it created a file.
+  yield* Effect.gen(function* () {
+    const directory = yield* fs.makeTempDirectoryScoped({ directory: path.dirname(file), prefix: ".migration-" })
+    const temp = path.join(directory, "content")
+    yield* FileModeEffect.run((signal) => FileMode.prepare(temp, { exclusive: true, signal }))
+    yield* fs.writeFileString(temp, text)
+    yield* fs.link(temp, file).pipe(Effect.catchReason("PlatformError", "AlreadyExists", () => Effect.void))
+  }).pipe(Effect.scoped)
 })
 
 function configKey(key: string): Key {
@@ -103,6 +126,7 @@ const paths = Effect.gen(function* () {
 export const options = Effect.fnUntraced(function* (input: { readonly checkVersion?: boolean } = {}) {
   const { file, legacyRegistrationFiles } = yield* paths
   yield* Effect.forEach(legacyRegistrationFiles, (legacy) => migrateRegistration(legacy, file))
+  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(file, { create: false, signal }))
   return {
     file,
     version: input.checkVersion ? OPENCODE_VERSION : undefined,
@@ -118,6 +142,7 @@ export const options = Effect.fnUntraced(function* (input: { readonly checkVersi
 export const read = Effect.fn("cli.service-config.read")(function* () {
   const { fs, configFile, legacyConfigFile } = yield* paths
   if (legacyConfigFile) yield* migrateConfig(legacyConfigFile, configFile)
+  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(configFile, { create: false, signal }))
   return yield* fs.readFileString(configFile).pipe(
     Effect.flatMap(decodeInfo),
     Effect.orElseSucceed(() => ({}) as Info),
@@ -128,6 +153,7 @@ const write = Effect.fn("cli.service-config.write")(function* (value: Info) {
   const { fs, configFile } = yield* paths
   const temp = configFile + ".tmp"
   yield* fs.makeDirectory(path.dirname(configFile), { recursive: true })
+  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(temp, { signal }))
   yield* fs.writeFileString(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
   yield* fs.rename(temp, configFile)
 })

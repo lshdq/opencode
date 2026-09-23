@@ -43,7 +43,7 @@ export function PromptMetadataRow(props: {
           {(agent) => <text fg={fade(props.highlight, props.agentAlpha)}>{agent()}</text>}
         </Show>
         <Show when={props.mode === "normal" && layout().auto}>
-          <text fg={fade(theme.text.muted, props.agentAlpha)}>auto</text>
+          <text fg={fade(theme.text.permission.autoaccept, props.agentAlpha)}>auto</text>
         </Show>
         <Show when={props.mode === "normal" && layout().model}>
           <box flexDirection="row" gap={1} flexGrow={1} flexShrink={1} minWidth={0}>

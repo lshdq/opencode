@@ -9,6 +9,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { WebUi } from "../src/services/web-ui"
 import { it } from "../../core/test/lib/effect"
+import { loopbackRequest } from "../script/loopback-http"
 
 const root = await mkdtemp(path.join(tmpdir(), "opencode-web-ui-"))
 afterAll(() => rm(root, { recursive: true, force: true }))
@@ -47,7 +48,7 @@ describe("web UI", () => {
           Effect.gen(function* () {
             yield* Effect.forEach(["GET", "HEAD"], (method) =>
               Effect.gen(function* () {
-                const response = yield* Effect.promise(() => fetch(new URL(pathname, origin), { method }))
+                const response = yield* Effect.promise(() => loopbackRequest(new URL(pathname, origin), { method }))
                 expect(response.status).toBe(200)
                 expect(response.headers.get("www-authenticate")).toBeNull()
                 yield* Effect.promise(() => response.arrayBuffer())
@@ -57,14 +58,16 @@ describe("web UI", () => {
       )
       yield* Effect.forEach(["/api", "/api/info", "/api/event", "/api/missing", "/openapi.json"], (pathname) =>
         Effect.gen(function* () {
-          const response = yield* Effect.promise(() => fetch(new URL(pathname, origin)))
+          const response = yield* Effect.promise(() => loopbackRequest(new URL(pathname, origin)))
           expect(response.status).toBe(401)
           expect(response.headers.get("www-authenticate")).toBe('Basic realm="Secure Area"')
           yield* Effect.promise(() => response.arrayBuffer())
         }),
       )
       const response = yield* Effect.promise(() =>
-        fetch(new URL("/api/info", origin), { headers: { authorization: `Basic ${btoa("opencode:secret")}` } }),
+        loopbackRequest(new URL("/api/info", origin), {
+          headers: { authorization: `Basic ${btoa("opencode:secret")}` },
+        }),
       )
       expect(response.status).toBe(200)
       expect(yield* Effect.promise(() => response.json())).toHaveProperty("pid")
@@ -111,7 +114,7 @@ describe("web UI", () => {
           )
           const origin = HttpServer.formatAddress(http.address)
 
-          const status = yield* Effect.promise(() => fetch(`${origin}/api/info`))
+          const status = yield* Effect.promise(() => loopbackRequest(`${origin}/api/info`))
           expect(yield* Effect.promise(() => status.json())).toEqual({
             version: "test",
             pid: 1,
@@ -119,46 +122,46 @@ describe("web UI", () => {
             paths: { tmp: "/tmp/opencode" },
           })
 
-          const missing = yield* Effect.promise(() => fetch(`${origin}/api/missing`))
+          const missing = yield* Effect.promise(() => loopbackRequest(`${origin}/api/missing`))
           expect(missing.status).toBe(404)
           expect(yield* Effect.promise(() => missing.text())).toBe("")
 
           yield* Effect.forEach(["/_assets/old.js", "/_assets/old.css", "/_assets/missing"], (pathname) =>
             Effect.gen(function* () {
-              const missing = yield* Effect.promise(() => fetch(`${origin}${pathname}`))
+              const missing = yield* Effect.promise(() => loopbackRequest(`${origin}${pathname}`))
               expect(missing.status).toBe(404)
               expect(missing.headers.get("cache-control")).toBe("no-store")
               expect(yield* Effect.promise(() => missing.text())).toBe("")
             }),
           )
 
-          const script = yield* Effect.promise(() => fetch(`${origin}/_assets/app.js`))
+          const script = yield* Effect.promise(() => loopbackRequest(`${origin}/_assets/app.js`))
           expect(yield* Effect.promise(() => script.text())).toBe("console.log('embedded')")
           expect(script.headers.get("content-type")).toContain("javascript")
           expect(script.headers.get("cache-control")).toBe("public, max-age=31536000, immutable")
 
-          const worker = yield* Effect.promise(() => fetch(`${origin}/sw.js`))
+          const worker = yield* Effect.promise(() => loopbackRequest(`${origin}/sw.js`))
           expect(worker.headers.get("cache-control")).toBe("no-cache")
 
-          const registration = yield* Effect.promise(() => fetch(`${origin}/registerSW.js`))
+          const registration = yield* Effect.promise(() => loopbackRequest(`${origin}/registerSW.js`))
           expect(registration.headers.get("cache-control")).toBe("no-cache")
 
-          const font = yield* Effect.promise(() => fetch(`${origin}/font.woff2`))
+          const font = yield* Effect.promise(() => loopbackRequest(`${origin}/font.woff2`))
           expect(font.headers.get("content-type")).toBe("font/woff2")
           expect(new Uint8Array(yield* Effect.promise(() => font.arrayBuffer()))).toEqual(
             new Uint8Array([0, 1, 2, 255]),
           )
 
-          const fallback = yield* Effect.promise(() => fetch(`${origin}/workspace/example`))
+          const fallback = yield* Effect.promise(() => loopbackRequest(`${origin}/workspace/example`))
           expect(yield* Effect.promise(() => fallback.text())).toContain("embedded")
           expect(fallback.headers.get("content-security-policy")).toContain("default-src 'self'")
           expect(fallback.headers.get("content-security-policy")).toContain("connect-src * data: blob:")
 
-          const dotted = yield* Effect.promise(() => fetch(`${origin}/workspace/example.js`))
+          const dotted = yield* Effect.promise(() => loopbackRequest(`${origin}/workspace/example.js`))
           expect(dotted.status).toBe(200)
           expect(yield* Effect.promise(() => dotted.text())).toContain("embedded")
 
-          const legacy = yield* Effect.promise(() => fetch(`${origin}/assets/missing.js`))
+          const legacy = yield* Effect.promise(() => loopbackRequest(`${origin}/assets/missing.js`))
           expect(legacy.status).toBe(200)
           expect(yield* Effect.promise(() => legacy.text())).toContain("embedded")
         }),

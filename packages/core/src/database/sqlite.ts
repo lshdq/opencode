@@ -9,6 +9,8 @@ import type { SqlError } from "effect/unstable/sql/SqlError"
 export class Native extends Context.Service<Native, unknown>()("@opencode/core/database/SqliteNative") {}
 
 export interface ClientConfig {
+  /** May tighten this database's parent only when the caller explicitly owns it. */
+  readonly privateDirectory?: boolean
   readonly spanAttributes?: Record<string, unknown>
   readonly transformResultNames?: (str: string) => string
   readonly transformQueryNames?: (str: string) => string

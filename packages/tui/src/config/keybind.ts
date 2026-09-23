@@ -99,6 +99,8 @@ export const Definitions = {
   "terminal.toggle": keybind("<leader>t", "Toggle terminal pane"),
   "terminal.close": keybind("<leader>up", "Close terminal pane"),
   "session.toggle.scrollbar": keybind("none", "Toggle session scrollbar"),
+  "session.toggle.timestamps": keybind("none", "Toggle assistant creation timestamps"),
+  "permission.mode": keybind("f4", "Toggle auto-accept permissions for this TUI"),
   "opencode.status": keybind("<leader>s", "View status"),
   "opencode.debug": keybind("none", "View debug info"),
 

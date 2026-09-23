@@ -1,0 +1,50 @@
+name: Fork Windows build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packages/**"
+      - "bun.lock"
+      - "package.json"
+      - ".github/workflows/build-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      HUSKY: "0"
+      BUN_INSTALL_CACHE_DIR: D:\bun-cache
+      ELECTRON_CACHE: D:\electron-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Frozen dependencies
+        run: bun install --frozen-lockfile
+      - name: Restore tracked Windows type declaration symlinks
+        run: bun packages/cli/script/repair-windows-links.ts
+      - name: Isolation guard tests
+        working-directory: packages/cli
+        run: bun test script/windows-build.test.ts
+      - name: Build and isolated smoke (never deploy on CI)
+        shell: pwsh
+        run: ./packages/cli/script/build-win.ps1 -Bun (Get-Command bun).Source -SkipInstall -NoDeploy
+      - name: Verify lock unchanged
+        run: git diff --exit-code -- bun.lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-v2-windows-local
+          path: |
+            packages/cli/dist/windows/**/compiled/cli-windows-x64/bin/*
+            packages/cli/dist/windows/**/build-metadata.json
+            packages/cli/dist/windows/**/source.diff
+            packages/cli/dist/windows/**/smoke-result.json
+          if-no-files-found: error

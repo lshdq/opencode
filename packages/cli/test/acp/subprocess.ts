@@ -5,9 +5,9 @@ import type {
   SessionConfigSelectOption,
 } from "@agentclientprotocol/sdk"
 import fs from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
-import { isolatedEnv } from "../fixture/environment"
+import { isolatedEnv, isolatedRoot } from "../fixture/environment"
+import { startupTimeout, stopOwned } from "../fixture/service-lifecycle"
 
 type JsonRpcRequest = {
   readonly jsonrpc: "2.0"
@@ -72,7 +72,7 @@ description: Verifier compatibility skill.
 export async function createAcpFixture(
   options: { readonly skill?: string; readonly respond?: (request: unknown) => string | Promise<string> } = {},
 ) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-cli-acp-"))
+  const root = await isolatedRoot("opencode-cli-acp-")
   const home = path.join(root, "workspace")
   const config = path.join(root, "config")
   const models = path.join(root, "models.json")
@@ -313,7 +313,13 @@ function spawnAcp(input: { readonly env: Record<string, string | undefined> }): 
     const request: JsonRpcRequest =
       params === undefined ? { jsonrpc: "2.0", id, method } : { jsonrpc: "2.0", id, method, params }
     const response = write(request).then(async () => {
-      const response = await take((message) => isResponse(message) && message.id === id, 20_000, `${method} response`)
+      // initialize includes the same Windows source import/startup work as the service fixture.
+      // Keep ordinary RPC and EOF budgets unchanged after startup.
+      const response = await take(
+        (message) => isResponse(message) && message.id === id,
+        method === "initialize" ? startupTimeout : 20_000,
+        `${method} response`,
+      )
       if (!isResponse<T>(response)) throw new Error(`Invalid ACP response: ${JSON.stringify(response)}`)
       return response
     })
@@ -349,8 +355,7 @@ function spawnAcp(input: { readonly env: Record<string, string | undefined> }): 
     async [Symbol.asyncDispose]() {
       if (disposed) return
       disposed = true
-      if (child.exitCode === null) child.kill("SIGKILL")
-      await child.exited
+      await stopOwned(child)
       await Promise.all([output, errors])
     },
   }

@@ -1,8 +1,25 @@
 import { describe, expect, test } from "bun:test"
+import { join } from "node:path"
+import { FileMode } from "@opencode/util/file-mode"
+import { tmpdir } from "../../../../core/test/fixture/tmpdir"
 import { inlineThemePreload } from "../../../vite.js"
-import { milestoneForLine, summarizeDesktopStartup, type DesktopStartupSample } from "../devex/desktop-startup"
+import {
+  initializeColdProfile,
+  milestoneForLine,
+  summarizeDesktopStartup,
+  type DesktopStartupSample,
+} from "../devex/desktop-startup"
 
 describe("desktop startup benchmark", () => {
+  test("prepares its owned database parent before launching the desktop", async () => {
+    await using root = await tmpdir("opencode-cold-profile-ownership-")
+    const profile = await initializeColdProfile(root.path)
+    expect(profile.root).toBe(root.path)
+    // Verify-only: this rejects an inherited/shared Windows DACL rather than repairing it.
+    await FileMode.directory(join(root.path, "data"))
+    expect(await Bun.file(join(root.path, "data", "opencode.db")).exists()).toBe(false)
+  })
+
   test.each(["/oc-theme-preload.js", "./oc-theme-preload.js"])("inlines %s before the renderer runs", (path) => {
     const html = inlineThemePreload(`<script id="oc-theme-preload-script" src="${path}"></script>`)
     expect(html).not.toContain(" src=")

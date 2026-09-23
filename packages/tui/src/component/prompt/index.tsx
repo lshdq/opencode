@@ -14,13 +14,11 @@ import { useTheme, useThemes } from "../../context/theme"
 import { tint } from "../../theme/color"
 import { createAnimatable, tween } from "../../ui/animation"
 import { EmptyBorder, SplitBorder } from "../../ui/border"
-import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
+import { useTuiPaths, useTuiTerminalEnvironment, useTuiLifecycle } from "../../context/runtime"
 import { useClipboard } from "../../context/clipboard"
 import { Spinner } from "../spinner"
 import { useClient } from "../../context/client"
 import { useRoute } from "../../context/route"
-import { usePromptRef } from "../../context/prompt"
-import { useSessionTabs } from "../../context/session-tabs"
 import { useEvent } from "../../context/event"
 import { editorSelectionKey, useEditorContext, type EditorSelection } from "../../context/editor"
 import { normalizePromptContent, openEditor } from "../../editor"
@@ -34,7 +32,7 @@ import { emptyPrompt, usePromptHistory, type PromptInfo, type PromptPartRef } fr
 import { saveDraft, takeDraft } from "./draft-stash"
 import { Skill } from "@opencode/schema/skill"
 import { computePromptTraits } from "../../prompt/traits"
-import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
+import { expandTrackedPastedText } from "../../prompt/part"
 import { usePromptStash } from "../../prompt/stash"
 import { DialogStash } from "../dialog-stash"
 import { type AutocompleteOption, type AutocompleteRef, Autocomplete } from "./autocomplete"
@@ -69,6 +67,7 @@ import { directoryRecentValue } from "../../prompt/directory-completion"
 import { useWorkingDirectoryActions } from "../../ui/working-directory-actions"
 import { truncateFilePath } from "../../ui/file-path"
 import { PromptMetadataRow } from "./metadata"
+import { bindPromptUndo } from "./undo"
 
 export type PromptProps = {
   sessionID?: string
@@ -193,13 +192,12 @@ export function Prompt(props: PromptProps) {
   const muted = () => leader() || props.muted
   const local = useLocal()
   const paths = useTuiPaths()
+  const lifecycle = useTuiLifecycle()
   const terminalEnvironment = useTuiTerminalEnvironment()
   const clipboard = useClipboard()
   const client = useClient()
   const editor = useEditorContext()
   const route = useRoute()
-  const promptRef = usePromptRef()
-  const sessionTabs = useSessionTabs()
   const data = useData()
   const directoryRecents = useDirectoryRecents()
   const keymapCommands = Keymap.useCommands()
@@ -258,6 +256,7 @@ export function Prompt(props: PromptProps) {
     sessionID: () => props.sessionID,
   })
   const [pendingDirectory, setPendingDirectory] = createSignal<string>()
+  let directoryRequest: symbol | undefined
   Keymap.createLayer(() => ({
     mode: "global",
     enabled: !disabled(),
@@ -282,18 +281,25 @@ export function Prompt(props: PromptProps) {
             expanded,
           )
           if (!sessionID) {
+            const revision = composerRevision
+            const request = Symbol()
+            directoryRequest = request
             setPendingDirectory(directory)
-            const location = await client.api.location.get({ location: { directory } }).catch((error) => {
-              toast.show({ title: "Failed to change directory", message: errorMessage(error), variant: "error" })
-              return undefined
-            })
-            if (!location) {
-              setPendingDirectory(undefined)
-              return
+            try {
+              const location = await client.api.location.get({ location: { directory } }).catch((error) => {
+                if (!disposed && directoryRequest === request && revision === composerRevision)
+                  toast.show({ title: "Failed to change directory", message: errorMessage(error), variant: "error" })
+                return undefined
+              })
+              if (!location || disposed || directoryRequest !== request || revision !== composerRevision) return
+              if (sourceProjectID) directoryRecents.touch(sourceProjectID, location.directory)
+              currentLocation.set(location)
+            } finally {
+              if (directoryRequest === request) {
+                directoryRequest = undefined
+                if (!disposed) setPendingDirectory(undefined)
+              }
             }
-            if (sourceProjectID) directoryRecents.touch(sourceProjectID, location.directory)
-            currentLocation.set(location)
-            setPendingDirectory(undefined)
             return
           }
           const error = await client.api.session.move({ sessionID, directory: input }).then(
@@ -369,6 +375,36 @@ export function Prompt(props: PromptProps) {
   })
   let disposed = false
   let pasteQueue = Promise.resolve()
+  type Submission = { controller: AbortController; revision: number; queued: boolean; started: boolean }
+  let submission: Submission | undefined
+  let composerRevision = 0
+  function invalidateSubmission() {
+    composerRevision++
+    submission?.controller.abort()
+    submission = undefined
+  }
+  onCleanup(lifecycle.add(async () => invalidateSubmission()))
+  onCleanup(
+    keymap.intercept("key", ({ event, consume }) => {
+      if (event.name !== "escape" || !submission || !enabled() || props.visible === false) return
+      invalidateSubmission()
+      consume()
+    }, { priority: 102 }),
+  )
+  createEffect(
+    on([
+      () => route.data.type,
+      () => route.data.type === "session" ? route.data.sessionID : undefined,
+      () => currentLocation.ref?.directory,
+      () => props.visible,
+      enabled,
+    ], invalidateSubmission, { defer: true }),
+  )
+  createEffect(
+    on(() => store.mode, () => {
+      if (submission) invalidateSubmission()
+    }, { defer: true }),
+  )
 
   function enqueuePaste(run: (changed: () => boolean) => Promise<void>) {
     pasteQueue = pasteQueue
@@ -693,10 +729,11 @@ export function Prompt(props: PromptProps) {
     },
   }
 
-  function resetComposer() {
-    input.extmarks.clear()
+  function resetComposer(preserveSubmission = false) {
+    if (!preserveSubmission) invalidateSubmission()
     setStore("prompt", emptyPrompt())
     setStore("extmarkToPart", new Map())
+    // Native clear owns the text, extmark and undo-history reset together.
     input.clear()
   }
 
@@ -717,6 +754,7 @@ export function Prompt(props: PromptProps) {
   })
 
   onCleanup(() => {
+    invalidateSubmission()
     disposed = true
     if (store.prompt.text) {
       saveDraft(stashSessionID, { prompt: unwrap(store.prompt), cursor: input.cursorOffset })
@@ -751,6 +789,7 @@ export function Prompt(props: PromptProps) {
   })
 
   function restoreExtmarksFromPrompt(prompt: PromptInfo) {
+    invalidateSubmission()
     input.extmarks.clear()
     setStore("extmarkToPart", new Map())
 
@@ -1082,25 +1121,28 @@ export function Prompt(props: PromptProps) {
     }
   })
 
-  let submitting = false
   async function submit(delivery: SessionInbox.Delivery = "steer") {
-    if (disabled()) return false
-    // Prevent overlapping invocations (e.g. a double-pressed Enter, or the
-    // input's native onSubmit racing another dispatch). Without this guard,
-    // a second call slips past the empty-input check before the first call
-    // clears `store.prompt.text`, then awaits its own `session.create` and
-    // ultimately reads the now-empty store — sending a phantom empty prompt
-    // to a freshly created session.
-    if (submitting) return false
-    submitting = true
+    if (disposed || !input || input.isDestroyed || disabled() || props.visible === false || submission) return false
+    const pending: Submission = {
+      controller: new AbortController(),
+      revision: composerRevision,
+      queued: false,
+      started: false,
+    }
+    submission = pending
     try {
-      return await submitInner(delivery)
+      return await submitInner(delivery, pending)
+    } catch (error) {
+      if (!pending.controller.signal.aborted && !disposed)
+        toast.show({ title: "Failed to prepare session", message: errorMessage(error), variant: "error" })
+      return false
     } finally {
-      submitting = false
+      if (!pending.queued && submission === pending) submission = undefined
+      if (!pending.queued && !disposed && !submission && move.progress()) move.finishSubmit()
     }
   }
 
-  async function submitInner(delivery: SessionInbox.Delivery) {
+  async function submitInner(delivery: SessionInbox.Delivery, pending: Submission) {
     // IME: double-defer may fire before onContentChange flushes the last
     // composed character (e.g. Korean hangul) to the store, so read
     // plainText directly and sync before any downstream reads.
@@ -1114,16 +1156,7 @@ export function Prompt(props: PromptProps) {
     if (!trimmed && (!props.sessionID || store.mode === "shell" || delivery === "queue"))
       return delivery === "steer" ? (await props.onEmptySubmit?.()) === true : false
     const exitWord = trimmed === "exit" || trimmed === "quit" || trimmed === ":q"
-    const inputText = expandTrackedPastedText(
-      store.prompt.text,
-      input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
-        const ref = store.extmarkToPart.get(extmark.id)
-        if (ref?.type !== "pasted") return []
-        const part = store.prompt.pasted[ref.index]
-        if (!part) return []
-        return [{ start: extmark.start, end: extmark.end, text: part.text }]
-      }),
-    )
+    const inputText = expandTrackedPastedText(store.prompt.text, pastedRanges())
     const slash = argumentSlash(inputText, keymapCommands())
     if (delivery === "queue" && (store.mode === "shell" || exitWord || slash)) {
       toast.show({ message: "This prompt cannot be queued", variant: "warning" })
@@ -1139,9 +1172,28 @@ export function Prompt(props: PromptProps) {
       return true
     }
     const slashHead = parseSlashHead(inputText, /\s/)
-    const isCommand =
-      slashHead !== undefined &&
-      (data.location.command.list(currentLocation.ref) ?? []).some((command) => command.name === slashHead.name)
+    const commands = data.location.command.list(currentLocation.ref)
+    // Undefined is an unread catalog, not a known-empty one. Only unresolved
+    // normal-mode slash input needs it; local commands and exit already returned.
+    if (store.mode === "normal" && slashHead && commands === undefined) {
+      const location = currentLocation.ref ?? data.location.default()
+      const error = data.location.command.error(location)
+      toast.show({
+        title: error ? "Commands unavailable" : "Commands loading",
+        message: error ? errorMessage(error) : "The command catalog is not ready. Submit again when it is available.",
+        variant: error ? "error" : "info",
+        action: error
+          ? {
+              label: "Retry",
+              run: () => {
+                void data.location.command.sync(location).catch(toast.error)
+              },
+            }
+          : undefined,
+      })
+      return false
+    }
+    const isCommand = slashHead !== undefined && commands?.some((command) => command.name === slashHead.name) === true
     const editorSelection = editorContext()
     const pendingEditorSelection = editorSelection && editor.labelState() === "pending" ? editorSelection : undefined
     if (delivery === "queue" && pendingEditorSelection) {
@@ -1165,20 +1217,34 @@ export function Prompt(props: PromptProps) {
       return false
     }
 
-    // Snapshot the composer and clear it synchronously, before the first await.
-    // Everything below reads the snapshot: text typed while a request is in
-    // flight lands in the already-empty composer and survives, and prompt
-    // history records exactly what was submitted instead of the live store
-    // (which may have absorbed mid-flight typing). Failure paths restore the
-    // snapshot unless the user has started typing something new.
+    // Keep the editable draft until the last pre-send boundary. Cancellation
+    // never needs to overwrite newer input, and unmount stashes the draft normally.
     const currentMode = store.mode
-    const entry = { ...store.prompt, mode: currentMode }
-    if (trimmed) {
-      resetComposer()
+    const entry = structuredClone({ ...unwrap(store.prompt), mode: currentMode })
+    const current = () =>
+      !disposed &&
+      pending.revision === composerRevision &&
+      enabled() &&
+      props.visible !== false &&
+      store.mode === (pending.started && currentMode === "shell" ? "normal" : currentMode)
+    const check = () => {
+      if (!current() || input.isDestroyed || input.plainText !== entry.text || store.mode !== currentMode)
+        pending.controller.abort()
+      pending.controller.signal.throwIfAborted()
+    }
+    const start = () => {
+      check()
+      // After dispatch, admission may already be durable. Do not abort the HTTP
+      // request or let subsequent edits/navigation revoke it.
+      pending.started = true
+      if (submission === pending) submission = undefined
+      if (!trimmed) return
+      history.append(entry)
+      resetComposer(true)
       props.onSubmit?.()
     }
     const restoreEntry = () => {
-      if (disposed || input.isDestroyed || input.plainText !== "") return
+      if (!pending.started || !current() || input.isDestroyed || input.plainText !== "") return
       input.setText(entry.text)
       setStore("prompt", entry)
       setStore("mode", entry.mode ?? "normal")
@@ -1186,41 +1252,29 @@ export function Prompt(props: PromptProps) {
       input.cursorOffset = entry.text.length
     }
     const fail = (title: string, error: unknown) => {
+      if (pending.controller.signal.aborted || !current()) return
       toast.show({ title, message: errorMessage(error), variant: "error" })
       restoreEntry()
-    }
-    const attempt = async (title: string, run: () => Promise<unknown>) => {
-      return run().then(
-        () => true,
-        (error: unknown) => {
-          fail(title, error)
-          return false
-        },
-      )
     }
 
     const variant = selection.variant
     let sessionID = props.sessionID
     let session = sessionID ? data.session.get(sessionID) : undefined
-    let finishMoveProgress = false
     // New-session sends wait for creation and environment setup.
-    let newSession: { gate: Promise<unknown>; recover: (error: unknown) => void } | undefined
+    let gate: Promise<unknown> | undefined
     if (sessionID == null) {
-      const directory = await move.getDirectory()
+      const directory = await move.getDirectory(pending.controller.signal)
+      check()
       if (move.pending() && !directory) {
-        restoreEntry()
         return false
       }
-      finishMoveProgress = Boolean(move.progress())
       // The location context is where the next session is created: seeded by the home
       // route (launch cwd, inherited session location, or picked project) and updated
       // by /cd before a session exists.
       const location = currentLocation.ref ?? data.location.default()
 
-      // Optimistic create: the data layer mints the ID client-side and admits
-      // a local session record synchronously, so the navigation below happens
-      // immediately — enter feels sent even while the create round-trip is in
-      // flight. Sends against the new session gate on the request.
+      // Keep the official optimistic record, but navigate only after admission
+      // succeeds and only if the user has not left or edited the source composer.
       const created = data.session.create({
         location: directory ? { directory } : location,
         agent: agent.id,
@@ -1232,46 +1286,30 @@ export function Prompt(props: PromptProps) {
       })
       sessionID = created.id
       session = data.session.get(created.id)
-      newSession = {
-        gate: created.request.then(async (info) => {
-          if (terminalEnvironment.variables !== undefined) {
-            await client.api.session.environment({ sessionID: created.id, variables: terminalEnvironment.variables })
-          }
-        }),
-        recover: (error) => {
-          toast.show({
-            title: data.session.get(created.id) ? "Failed to set up session" : "Creating a session failed",
-            message: errorMessage(error),
-            variant: "error",
-          })
-          const active =
-            route.data.type === "session" && route.data.sessionID === created.id ? promptRef.current : undefined
-          const current = active?.current
-          const draft = current?.text
-            ? { prompt: { ...unwrap(current) }, cursor: current.text.length }
-            : (takeDraft(created.id) ?? { prompt: entry, cursor: entry.text.length })
-          saveDraft(undefined, draft)
-          active?.reset()
-          if (sessionTabs.enabled()) {
-            sessionTabs.close(created.id)
-          } else if (route.data.type === "session" && route.data.sessionID === created.id) {
-            route.navigate({ type: "home" })
-          }
-        },
-      }
+      gate = created.request.then(async () => {
+        check()
+        if (terminalEnvironment.variables !== undefined) {
+          await client.api.session.environment({ sessionID: created.id, variables: terminalEnvironment.variables })
+          check()
+        }
+      })
     }
 
     const target = sessionID
     const prepareAgent = async () => {
+      check()
       if (!session) {
         await data.session.sync(target)
+        check()
         session = data.session.get(target)
       }
       if (session?.agent !== agent.id) {
         await client.api.session.switchAgent({ sessionID: target, agent: agent.id })
+        check()
       }
     }
     const commitModel = () => {
+      check()
       const model = { providerID: selection.providerID, id: selection.modelID, variant }
       const cancelCommit = local.model.trackSessionCommit(target, model, agent.id)
       return client.api.session.switchModel({ sessionID: target, model }).catch((error) => {
@@ -1281,28 +1319,47 @@ export function Prompt(props: PromptProps) {
     }
     const commitSelection = async () => {
       await prepareAgent()
+      check()
       await commitModel()
+      check()
     }
     if (!trimmed) {
       // Blank Enter in an existing session commits the composer's agent and
       // model selection, then hands off to the route (queued prompt promotion).
-      await attempt("Failed to prepare session", async () => {
-        await commitSelection()
-        await props.onEmptySubmit?.()
-      })
-      return true
+      await commitSelection()
+      start()
+      return (await props.onEmptySubmit?.()) === true && current()
     }
-    history.append(entry)
+    const finish = () => {
+      if (submission === pending) submission = undefined
+      if (!disposed && !submission && move.progress()) move.finishSubmit()
+    }
+    const admitted = () => {
+      if (!current()) return
+      if (props.sessionID) return
+      if (pendingEditorSelection && editorSelectionKey(editor.selection()) === editorSelectionKey(pendingEditorSelection))
+        editor.preserveSelectionFromNewSession()
+      route.navigate({ type: "session", sessionID: target })
+    }
     if (currentMode === "shell") {
       move.startSubmit()
-      const send = () => client.api.session.shell({ sessionID: target, command: inputText })
-      void (newSession ? newSession.gate.then(send).catch(newSession.recover) : send())
-      setStore("mode", "normal")
+      const send = () => {
+        start()
+        setStore("mode", "normal")
+        return client.api.session.shell({ sessionID: target, command: inputText })
+      }
+      pending.queued = true
+      void (gate ?? Promise.resolve())
+        .then(send)
+        .then(admitted)
+        .catch((error) => fail("Failed to run shell command", error))
+        .finally(finish)
     } else if (slashHead && isCommand) {
       const send = async () => {
         // Commands inherit the composer selection; command-specific overrides
         // remain server-owned and run after this preparation.
         await commitSelection()
+        start()
         return client.api.session.command({
           sessionID: target,
           name: slashHead.name,
@@ -1313,38 +1370,46 @@ export function Prompt(props: PromptProps) {
           delivery,
         })
       }
-      void (newSession ? newSession.gate.then(send) : send()).catch((error) =>
-        newSession ? newSession.recover(error) : fail("Failed to run command", error),
-      )
+      pending.queued = true
+      void (gate ?? Promise.resolve())
+        .then(send)
+        .then(admitted)
+        .catch((error) => fail("Failed to run command", error))
+        .finally(finish)
     } else {
       move.startSubmit()
-      if (!(await attempt("Failed to prepare session", prepareAgent))) return true
+      // Every Session-scoped side effect must wait for creation/environment.
+      if (gate) await gate
+      check()
+      await prepareAgent()
+      check()
       // Revert must settle before optimistic admission: its committed echo
       // splices every local row at or after the boundary, which would include
       // a freshly admitted prompt.
-      if (
-        session?.revert &&
-        !(await attempt("Failed to commit revert", () => client.api.session.revert.commit({ sessionID: target })))
-      )
-        return false
+      if (session?.revert) {
+        await client.api.session.revert.commit({ sessionID: target })
+        check()
+      }
       if (pendingEditorSelection) {
         // Keep editor context hidden while admitting it before the corresponding user prompt.
-        const send = () =>
-          client.api.session.synthetic({
-            sessionID: target,
-            text: formatEditorContext(pendingEditorSelection),
-            resume: false,
-          })
-        // Fold into the setup gate so the context still admits before the
-        // user prompt once the session exists.
-        if (newSession) newSession.gate = newSession.gate.then(send)
-        else if (!(await attempt("Failed to send editor context", send))) return false
+        await client.api.session.synthetic({
+          sessionID: target,
+          text: formatEditorContext(pendingEditorSelection),
+          resume: false,
+        })
+        if (
+          !disposed && enabled() && props.visible !== false &&
+          editorSelectionKey(editor.selection()) === editorSelectionKey(pendingEditorSelection)
+        )
+          editor.markSelectionSent()
+        check()
       }
       // The data layer admits optimistically: the prompt renders immediately
       // and rolls back if the server rejects it, so submission does not wait
       // on the network. On rejection the row is already rolled back; restore
       // the composer unless the user has started typing something new.
-      data.session
+      pending.queued = true
+      void data.session
         .prompt({
           sessionID: target,
           text: inputText,
@@ -1352,37 +1417,29 @@ export function Prompt(props: PromptProps) {
           agents: entry.agents,
           skills: entry.skills?.length ? entry.skills : undefined,
           delivery,
-          gate: newSession?.gate,
+          signal: pending.controller.signal,
           // Commit the captured selection after earlier admissions, including
           // compaction setup. Cached state may still precede their SSE echoes;
           // the server makes an unchanged selection a no-op.
-          prepare: commitModel,
+          prepare: async () => {
+            await commitModel()
+            start()
+          },
         })
-        .catch((error) => (newSession ? newSession.recover(error) : fail("Failed to send prompt", error)))
-      if (pendingEditorSelection) editor.markSelectionSent()
+        .then(admitted)
+        .catch((error) => fail("Failed to send prompt", error))
+        .finally(finish)
     }
-
-    // Optimistic admission puts the message in the store synchronously, so
-    // the session view renders it on arrival.
-    if (!props.sessionID) {
-      if (pendingEditorSelection) editor.preserveSelectionFromNewSession()
-      // Text typed while session creation was in flight lives in this (home)
-      // prompt, which unmounts on navigation and would stash it under the
-      // home key. Re-stash it under the new session so that composer restores
-      // it, and clear it here so onCleanup does not also stash it for home.
-      if (!disposed && !input.isDestroyed && store.prompt.text) {
-        // Copy before clearing: unwrap returns the live store target, and the
-        // resetComposer store write merges into that same object.
-        saveDraft(sessionID, { prompt: { ...unwrap(store.prompt) }, cursor: input.cursorOffset })
-        resetComposer()
-      }
-      route.navigate({
-        type: "session",
-        sessionID,
-      })
-    }
-    if (finishMoveProgress) move.finishSubmit()
     return true
+  }
+
+  function pastedRanges() {
+    return input.extmarks.getAllForTypeId(promptPartTypeId).flatMap((extmark) => {
+      const ref = store.extmarkToPart.get(extmark.id)
+      if (ref?.type !== "pasted") return []
+      const part = store.prompt.pasted[ref.index]
+      return part ? [{ start: extmark.start, end: extmark.end, text: part.text }] : []
+    })
   }
 
   function pasteText(text: string, virtualText: string) {
@@ -1419,7 +1476,9 @@ export function Prompt(props: PromptProps) {
     const part = store.prompt.pasted[ref.index]
     if (!part) return false
 
-    input.extmarks.delete(extmarkId)
+    // Keep the part/mark alive until the native selection deletion captures it.
+    // That edit removes the mark itself; pre-deleting it would make undo capture
+    // a literal label instead of the payload-bearing placeholder.
     input.setSelection(extmark.start, extmark.end)
     input.insertText(part.text)
     return true
@@ -1744,6 +1803,7 @@ export function Prompt(props: PromptProps) {
               cursorStyle={config.cursor}
               onContentChange={() => {
                 const value = input.plainText
+                if (value !== store.prompt.text) invalidateSubmission()
                 setStore("prompt", "text", value)
                 auto()?.onInput(value)
                 syncExtmarksWithPromptParts()
@@ -1757,7 +1817,9 @@ export function Prompt(props: PromptProps) {
                 }
               }}
               onSubmit={() => {
-                if (disabled()) return
+                // Do not enqueue a native deferred Enter while preparation is
+                // already active: Escape could cancel it before the timer fires.
+                if (disabled() || submission) return
                 // IME: double-defer so the last composed character (e.g. Korean
                 // hangul) is flushed to plainText before we read it for submission.
                 setTimeout(() => setTimeout(() => submit(), 0), 0)
@@ -1788,8 +1850,49 @@ export function Prompt(props: PromptProps) {
               }}
               ref={(r: TextareaRenderable) => {
                 input = r
+                onCleanup(bindPromptUndo(r, () => {
+                  syncExtmarksWithPromptParts()
+                  const prompt = unwrap(store.prompt)
+                  // Copy mutable positions, but share immutable strings (large
+                  // pasted payloads/data URLs) across the bounded undo window.
+                  return {
+                    files: prompt.files?.map((part) => ({ ...part, mention: part.mention && { ...part.mention } })),
+                    agents: prompt.agents?.map((part) => ({ ...part, mention: part.mention && { ...part.mention } })),
+                    skills: prompt.skills?.map((part) => ({ ...part, mention: part.mention && { ...part.mention } })),
+                    pasted: prompt.pasted.map((part) => ({ ...part, source: { ...part.source } })),
+                  }
+                }, (snapshot) => {
+                  // A retained history entry must not become Solid's mutable
+                  // store backing object. Share strings, not part positions.
+                  const prompt = {
+                    text: r.plainText,
+                    files: snapshot.files?.map((part) => ({ ...part, mention: part.mention && { ...part.mention } })),
+                    agents: snapshot.agents?.map((part) => ({ ...part, mention: part.mention && { ...part.mention } })),
+                    skills: snapshot.skills?.map((part) => ({ ...part, mention: part.mention && { ...part.mention } })),
+                    pasted: snapshot.pasted.map((part) => ({ ...part, source: { ...part.source } })),
+                  }
+                  setStore("prompt", prompt)
+                  restoreExtmarksFromPrompt(prompt)
+                }))
                 Object.assign(r, {
-                  getClipboardText: (text: string) => expandPastedTextPlaceholders(text, store.prompt.pasted),
+                  canCut: () => !disabled() && !disposed && props.visible !== false,
+                  cutSelection: () => {
+                    invalidateSubmission()
+                    setStore("prompt", "text", r.plainText)
+                    syncExtmarksWithPromptParts()
+                    if (!r.deleteSelection()) return false
+                    setStore("prompt", "text", r.plainText)
+                    syncExtmarksWithPromptParts()
+                    return true
+                  },
+                  getClipboardText: (text: string) => {
+                    const range = r.getSelection()
+                    const start = range ? Math.min(range.start, range.end) : 0
+                    const end = range ? Math.max(range.start, range.end) : promptOffsetWidth(text)
+                    return expandTrackedPastedText(text, pastedRanges()
+                      .filter((part) => part.start >= start && part.end <= end)
+                      .map((part) => ({ ...part, start: part.start - start, end: part.end - start })))
+                  },
                 })
                 setInputTarget(r)
                 if (promptPartTypeId === 0) {

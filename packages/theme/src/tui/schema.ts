@@ -91,6 +91,7 @@ const BackgroundFeedbackDefinition = Schema.Struct({
 const TextDefinition = Schema.Struct({
   base: Schema.optional(ColorValue),
   muted: Schema.optional(ColorValue),
+  permission: Schema.optional(Schema.Struct({ autoaccept: Schema.optional(ColorValue) })),
   action: Schema.optional(ActionColorDefinition),
   formfield: Schema.optional(StatefulColorDefinition),
   feedback: Schema.optional(
@@ -224,6 +225,7 @@ const CompleteThemeTokensDefinition = Schema.Struct({
   text: Schema.Struct({
     base: ColorValue,
     muted: ColorValue,
+    permission: Schema.optional(Schema.Struct({ autoaccept: Schema.optional(ColorValue) })),
     action: CompleteActionColorDefinition,
     formfield: CompleteStatefulColorDefinition,
     feedback: Schema.Struct({

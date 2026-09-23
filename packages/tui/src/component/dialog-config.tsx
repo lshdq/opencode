@@ -103,6 +103,15 @@ export const settings: Setting[] = [
     keywords: ["tokens per second", "throughput"],
   },
   {
+    title: "Assistant timestamps",
+    category: "Session",
+    path: ["session", "timestamps"],
+    default: false,
+    values: [false, true],
+    labels: ["off", "on"],
+    keywords: ["creation time", "messages", "date"],
+  },
+  {
     title: "New session location",
     category: "Session",
     path: ["session", "new_location"],

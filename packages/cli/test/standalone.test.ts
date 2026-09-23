@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
-import { isolatedEnv } from "./fixture/environment"
+import { isolatedEnv, isolatedRoot } from "./fixture/environment"
+import { startupTimeout, stopOwned } from "./fixture/service-lifecycle"
 
 test("standalone server exits when its owner is killed", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-cli-standalone-"))
+  const root = await isolatedRoot("opencode-cli-standalone-")
   const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixture/standalone-owner.ts")], {
     cwd: path.join(import.meta.dir, ".."),
     env: isolatedEnv(root, { OPENCODE_SERVER_USERNAME: "custom" }),
@@ -15,7 +15,7 @@ test("standalone server exits when its owner is killed", async () => {
   })
   const line = await Promise.race([
     readLine(owner.stdout, "STANDALONE_READY "),
-    Bun.sleep(10_000).then(() => undefined),
+    Bun.sleep(startupTimeout).then(() => undefined),
   ])
   const [, rawPID, url, status] = line?.split(" ") ?? []
   const pid = Number(rawPID)
@@ -31,12 +31,11 @@ test("standalone server exits when its owner is killed", async () => {
 
     expect(await waitForExit(pid)).toBe(true)
   } finally {
-    owner.kill("SIGKILL")
-    await owner.exited
+    await stopOwned(owner)
     if (running(pid)) process.kill(pid, "SIGKILL")
     await fs.rm(root, { recursive: true, force: true })
   }
-})
+}, 90_000)
 
 async function readLine(stream: ReadableStream<Uint8Array>, prefix: string) {
   const reader = stream.getReader()

@@ -9,6 +9,7 @@ import { createEventStream, createFetch, directory, json } from "./fixture/tui-c
 import { tmpdir } from "./fixture/fixture"
 import { createAppFixture } from "./fixture/app"
 import type { PluginInfo } from "@opencode/client"
+import { takeDraft } from "../src/component/prompt/draft-stash"
 
 test.each([100, 44])("Ctrl-O is immediate, dismissible, and prunes cached deletions at width %s", async (width) => {
   await using state = await tmpdir()
@@ -877,6 +878,7 @@ test("session startup prompt is submitted exactly once", async () => {
 })
 
 test.each([false, true])("uses the resolved launch directory for new prompts (fallback: %s)", async (fallback) => {
+  takeDraft(undefined)
   await using state = await tmpdir()
   const target = fallback ? directory : process.cwd()
   const location = { directory: target, project: { id: "project", directory: target, canonical: target } }
@@ -938,15 +940,13 @@ test.each([false, true])("uses the resolved launch directory for new prompts (fa
     ]),
   ).toMatchObject({ text: "REMOTE_READY" })
   expect(await created.promise).toMatchObject({ location: { directory: target } })
-  expect(requests[0]?.pathname).toBe("/api/fs/list")
-  expect(requests[0]?.searchParams.get("location[directory]")).toBe(process.cwd())
+  expect(requests.find((url) => url.pathname === "/api/fs/list")?.searchParams.get("location[directory]")).toBe(process.cwd())
   expect(
     requests.filter((url) => url.pathname === "/api/location" && !url.searchParams.has("location[directory]")),
   ).toHaveLength(fallback ? 1 : 0)
   expect(
     requests
-      .slice(1)
-      .filter((url) => url.searchParams.has("location[directory]"))
+      .filter((url) => url.pathname !== "/api/fs/list" && url.pathname !== "/api/plugin" && url.searchParams.has("location[directory]"))
       .every((url) => url.searchParams.get("location[directory]") === target),
   ).toBe(true)
 })

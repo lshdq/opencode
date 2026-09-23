@@ -11,6 +11,9 @@
     "text": {
       "base": "$hue.neutral.200",
       "muted": "$hue.neutral.400",
+      "permission": {
+        "autoaccept": "$hue.orange.200"
+      },
       "action": {
         "primary": {
           "base": "$text.base",

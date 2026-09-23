@@ -32,6 +32,7 @@ export type ResolvedThemeTokens = {
   readonly text: {
     readonly base: RGBA
     readonly muted: RGBA
+    readonly permission: { readonly autoaccept: RGBA }
     readonly action: Readonly<Record<ActionVariant, StatefulColor>>
     readonly formfield: FormfieldColor
     readonly feedback: Readonly<Record<FeedbackKind, { readonly base: RGBA; readonly muted: RGBA }>>

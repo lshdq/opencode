@@ -9,6 +9,7 @@ import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { which } from "../util/which.js"
+import { extractZip } from "./extract-zip.js"
 
 export namespace RipgrepBinary {
   const VERSION = "15.1.0"
@@ -56,21 +57,17 @@ export namespace RipgrepBinary {
         target: string,
       ) {
         const dir = yield* fs.makeTempDirectoryScoped({ directory: global.bin, prefix: "ripgrep-" })
+        const extracted = path.join(
+          dir,
+          `ripgrep-${VERSION}-${config.platform}`,
+          process.platform === "win32" ? "rg.exe" : "rg",
+        )
 
         if (config.extension === "zip") {
-          const shell =
-            (yield* Effect.sync(() => findExecutable("powershell.exe") ?? findExecutable("pwsh.exe"))) ??
-            "powershell.exe"
-          const result = yield* run(shell, [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            `$global:ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath '${archive.replaceAll("'", "''")}' -DestinationPath '${dir.replaceAll("'", "''")}' -Force`,
-          ])
-          if (result.code !== 0)
-            throw new Error(
-              result.stderr.trim() || result.stdout.trim() || `ripgrep extraction failed with code ${result.code}`,
-            )
+          yield* extractZip({ archive, directory: dir, executable: extracted, find: findExecutable }).pipe(
+            Effect.provideService(FSUtil.Service, fs),
+            Effect.provideService(ChildProcessSpawner, spawner),
+          )
         }
 
         if (config.extension === "tar.gz") {
@@ -81,11 +78,6 @@ export namespace RipgrepBinary {
             )
         }
 
-        const extracted = path.join(
-          dir,
-          `ripgrep-${VERSION}-${config.platform}`,
-          process.platform === "win32" ? "rg.exe" : "rg",
-        )
         if (!(yield* fs.isFile(extracted))) throw new Error(`ripgrep archive did not contain executable: ${extracted}`)
 
         yield* fs.copyFile(extracted, target)

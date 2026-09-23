@@ -7,6 +7,9 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  createRoot,
+  getOwner,
+  runWithOwner,
   on,
   onCleanup,
   onMount,
@@ -85,7 +88,13 @@ type Trace = <T>(stage: string, tags: LogTags, task: () => Promise<T>) => Promis
 
 const PluginContext = createContext<Value>()
 
-export function PluginProvider(props: ParentProps<{ packages: PackageSource; directories: string[] }>) {
+export function PluginProvider(
+  props: ParentProps<{ packages: PackageSource; directories: string[] | Promise<string[]> }>,
+) {
+  const owner = getOwner()
+  let disposed = false
+  const shutdown = new AbortController()
+  const activations = new Map<string, () => Promise<void>>()
   const host = usePluginHost()
   const log = useLog({ component: "plugin" })
   const config = useConfig()
@@ -118,8 +127,17 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
     const stalled = setTimeout(
       () => log.warn("plugin operation stalled", { id, stage, elapsedMs: Date.now() - started, ...tags }),
       5_000,
-    )
-    return task()
+    ).unref()
+    const stopped = Promise.withResolvers<never>()
+    const abort = () => stopped.reject(shutdown.signal.reason)
+    shutdown.signal.addEventListener("abort", abort, { once: true })
+    return Promise.race([
+      Promise.resolve().then(() => {
+        if (disposed) throw new Error("Plugin host disposed")
+        return task()
+      }),
+      stopped.promise,
+    ])
       .then(
         (value) => {
           log.debug("plugin operation completed", { id, stage, durationMs: Date.now() - started, ...tags })
@@ -136,7 +154,10 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
           throw error
         },
       )
-      .finally(() => clearTimeout(stalled))
+      .finally(() => {
+        clearTimeout(stalled)
+        shutdown.signal.removeEventListener("abort", abort)
+      })
   }
   const markdown = createMarkdownRenderer(() =>
     Object.values(store.registrations).flatMap((registration) => (registration.active ? [registration.markdown] : [])),
@@ -148,40 +169,99 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
   }
 
   const activate = async (id: string) => {
+    if (disposed) return false
     const item = store.registrations[id]
     if (!item) return false
     await deactivate(id)
+    if (disposed) return false
     batch(() => {
       clearContributions(id)
       setStore("registrations", id, "cleanups", [])
     })
+    let closed = false
     const owned: Dispose[] = []
-    const context = createPluginContext({
-      host,
+    // setup may resume after shutdown. Dispose new ownership immediately rather
+    // than adding it to an already-drained cleanup list.
+    owned.push = (...items) => {
+      if (!closed) return Array.prototype.push.apply(owned, items)
+      items.forEach((cleanup) => {
+        void Promise.resolve().then(cleanup).catch((error) => log.warn("Late plugin cleanup failed", { error }))
+      })
+      return owned.length
+    }
+    const scope = createRoot((dispose) => ({ owner: getOwner(), dispose }), owner)
+    owned.push(async () => scope.dispose())
+    let closing: Promise<void> | undefined
+    const close = () => {
+      if (closing) return closing
+      closed = true
+      closing = disposeAll(owned)
+      return closing
+    }
+    activations.set(id, close)
+    const current = () => !closed && !disposed && activations.get(id) === close
+    const data: typeof host.data = {
+      ...host.data,
+      on: (type, handler) => {
+        if (!current()) return () => {}
+        const off = host.data.on(type, handler)
+        owned.push(async () => off())
+        return off
+      },
+      listen: (handler) => {
+        if (!current()) return () => {}
+        const off = host.data.listen(handler)
+        owned.push(async () => off())
+        return off
+      },
+    }
+    const base = createPluginContext({
+      host: { ...host, data },
       id,
       options: item.options,
       owned,
       registry: {
-        has: (kind, name) => Boolean(store.registrations[id]?.[kind][name]),
+        has: (kind, name) => current() && Boolean(store.registrations[id]?.[kind][name]),
         set: (
           kind: "routes" | "slots" | "markdown",
           name: string,
           value: Page | RegisteredSlot | MarkdownCodeBlockRenderer,
-        ) => setStore("registrations", id, kind, name, () => value),
+        ) => {
+          if (current()) setStore("registrations", id, kind, name, () => value)
+        },
         remove: (kind, name) =>
           setStore(
             "registrations",
             produce((registrations) => {
-              if (!registrations[id]) return
+              if (!current() || !registrations[id]) return
               delete registrations[id][kind][name]
             }),
           ),
-        active: () => Boolean(store.registrations[id]?.active),
+        active: () => current() && Boolean(store.registrations[id]?.active),
       },
     })
-    const cleanup = await trace("setup", { plugin: id, target: item.target }, () =>
-      setup(item.plugin, context, owned),
-    ).catch((error) => {
+    // Solid hooks used by plugin setup need an activation owner, including
+    // registrations made after an await. Never attach those to the app root.
+    const keymap: Plugin.Context["keymap"] = {
+      ...base.keymap,
+      layer: (input) => {
+        if (current()) runWithOwner(scope.owner, () => base.keymap.layer(input))
+      },
+    }
+    // Preserve the live theme/location getters while adapting the setup hook.
+    const context = new Proxy(base, {
+      get(target, property) {
+        if (property === "keymap") return keymap
+        return target[property as keyof Plugin.Context]
+      },
+    })
+    await trace("setup", { plugin: id, target: item.target }, () =>
+      Promise.resolve(runWithOwner(scope.owner, () => setup(item.plugin, context, owned))).then((cleanup) => {
+        if (cleanup) owned.push(async () => cleanup())
+      }),
+    ).catch(async (error) => {
+      await close().catch(() => undefined)
+      if (disposed) return
       clearContributions(id)
       if (item.target)
         setupFailures.set(item.target, {
@@ -191,10 +271,10 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
         })
       throw error
     })
-    if (cleanup) owned.push(async () => cleanup())
+    if (!current()) return false
     if (item.target && sameGeneration(setupFailures.get(item.target), item)) setupFailures.delete(item.target)
     batch(() => {
-      setStore("registrations", id, "cleanups", owned)
+      setStore("registrations", id, "cleanups", [close])
       setStore("registrations", id, "active", true)
       setStore("states", (items) =>
         items.map((state) =>
@@ -207,8 +287,11 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
 
   const deactivate = async (id: string) => {
     const item = store.registrations[id]
-    if (!item?.active) return false
-    const cleanups = [...item.cleanups]
+    if (!item) return false
+    const close = activations.get(id)
+    if (!item.active && !close) return false
+    activations.delete(id)
+    const cleanups = close ? [close] : [...item.cleanups]
     batch(() => {
       setStore("registrations", id, "active", false)
       setStore("registrations", id, "cleanups", [])
@@ -237,7 +320,7 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
       host.toast.show({ variant: "error", title: "Plugin", message: `${id}: cleanup failed: ${errorMessage(error)}` }),
     )
 
-  // Every lifecycle mutation — reconciles, manual dialog toggles, shutdown —
+  // Every lifecycle mutation except shutdown
   // is serialized through one chain so generations can never interleave.
   let loading = Promise.resolve()
   const enqueue = <T,>(task: () => Promise<T>) => {
@@ -279,19 +362,21 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
   const npmFailures = new Map<string, string>()
   let reconciliationID = 0
   const reconcile = async () => {
+    if (disposed) return
     const id = ++reconciliationID
     const started = Date.now()
     log.info("plugin reconciliation started", { id })
-    await trace("watch", { reconciliation: id, directories: props.directories }, () =>
-      Promise.all(props.directories.map(watcher.wait)).then(() => undefined),
+    const directories = await trace("directories", { reconciliation: id }, () => Promise.resolve(props.directories))
+    await trace("watch", { reconciliation: id, directories }, () =>
+      Promise.all(directories.map(watcher.wait)).then(() => undefined),
     )
     // Discovery admits TUI-only plugins while server inventory carries combined plugins.
     // Their overlap is intentional; explicit configuration remains the final authority.
     const entries = mergePluginTargets(
       [
         ...(
-          await trace("discover", { reconciliation: id, directories: props.directories }, () =>
-            discoverPluginTargets(props.directories),
+          await trace("discover", { reconciliation: id, directories }, () =>
+            discoverPluginTargets(directories),
           )
         ).map((entry) => ({
           entry,
@@ -316,6 +401,7 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
       desired.set(plugin.id, { plugin, source: "builtin", version: "builtin", enabled: true })
     const failures: State[] = []
     for (const source of entries) {
+      if (disposed) return
       const entry = source.entry
       const target = typeof entry === "string" ? entry : entry.package
       if (target.startsWith("-")) {
@@ -352,7 +438,9 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
             previous,
             props.packages,
             source.install,
-            sources.read,
+            (entrypoint) => sources.read(entrypoint).finally(() => {
+              if (disposed) sources.dispose()
+            }),
             trace,
             id,
           ).catch((error) => ({
@@ -399,6 +487,8 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
 
     // Compare: unchanged plugins are never touched, and a fully unchanged
     // generation is a no-op, so spurious watch events cost nothing.
+    if (disposed) return
+    const previous = new Map(Object.entries(store.registrations).map(([id, item]) => [id, toDesired(item)]))
     const currentIds = Object.keys(store.registrations)
     const desiredIds = [...desired.keys()]
     const structural =
@@ -426,15 +516,17 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
     // broken plugin cannot take the rest of the generation down.
     const errors = new Map<string, string>()
     for (const id of changed) {
+      if (disposed) return
       const item = desired.get(id)!
       const registration = store.registrations[id]
       const replaced = !registration || !sameGeneration(registration, item)
       // Snapshot the running version before it is overwritten: an import
       // failure keeps last-good in the resolve phase, and a setup failure
       // must not cost the previous version either.
-      const fallback = replaced && registration ? toDesired(registration) : undefined
+      const fallback = replaced ? previous.get(id) : undefined
       if (replaced) {
         if (registration) await deactivateNoisily(id)
+        if (disposed) return
         // In-place replacement keeps the registration's key position, which
         // slot ordering (mode "replace" takes the last one) depends on.
         setStore("registrations", id, toRegistration(item))
@@ -444,6 +536,7 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
         continue
       }
       const error = await activate(id).then(() => undefined, errorMessage)
+      if (disposed) return
       if (!error) continue
       errors.set(id, error)
       if (!fallback) continue
@@ -540,6 +633,7 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
     client.api.plugin
       .list({ location: data.location.default() })
       .then((response) => {
+        if (disposed) return
         const failed = response.data.filter(
           (plugin) =>
             plugin.state.status === "failed" &&
@@ -562,8 +656,10 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
       .catch(() => undefined)
   createEffect(
     on(
-      () => JSON.stringify(data.location.default()),
-      () => void syncServerPlugins(),
+      () => JSON.stringify([data.location.default(), Boolean(data.location.info())]),
+      () => {
+        if (data.location.info()) void syncServerPlugins()
+      },
     ),
   )
   onCleanup(client.event.on("plugin.updated", syncServerPlugins))
@@ -572,16 +668,11 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
     let disposing: Promise<void> | undefined
     const dispose = () => {
       if (disposing) return disposing
+      disposed = true
       stopWatching()
-      disposing = loading
-        .catch(() => undefined)
-        .then(() =>
-          Promise.all(
-            Object.entries(store.registrations)
-              .filter(([, registration]) => registration.active)
-              .map(([id]) => deactivate(id).catch(() => undefined)),
-          ),
-        )
+      shutdown.abort(new Error("Plugin host disposed"))
+      // Do not join loading: arbitrary third-party setup/import may never settle.
+      disposing = Promise.all([...activations.values()].map((close) => close().catch(() => undefined)))
         .then(() => setStore("registrations", reconcileStore({})))
         .finally(sources.dispose)
       return disposing
@@ -605,7 +696,7 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
             source: plugin.source,
             active: plugin.active,
           })),
-        route: (id, name) => store.registrations[id]?.routes[name]?.render,
+        route: (id, name) => (store.registrations[id]?.active ? store.registrations[id]?.routes[name]?.render : undefined),
         slots: { register: registerSlot, resolved },
         markdown,
         // Manual dialog toggles join the same chain as reconciles so a
@@ -632,7 +723,8 @@ function serverPluginName(plugin: PluginInfo) {
 
 async function disposeAll(cleanups: Dispose[]) {
   const failures: unknown[] = []
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch((error) => failures.push(error))
+  for (const cleanup of cleanups.splice(0).reverse())
+    await Promise.resolve().then(cleanup).catch((error) => failures.push(error))
   if (failures.length) throw failures[0]
 }
 

@@ -110,6 +110,68 @@ test("does not preload session summaries into the data context", async () => {
   }
 })
 
+test.each(["model", "provider", "mcp", "skill", "config"])("%s HTTP errors are retryable without a Location error", async (resource) => {
+  const events = createEventStream()
+  let failing = true
+  let requests = 0
+  const calls = createFetch((url) => {
+    if (url.pathname !== `/api/${resource}`) return undefined
+    requests++
+    if (failing) return new Response("fixture unavailable", { status: 503 })
+    return undefined
+  }, events)
+  let location!: ReturnType<typeof useLocation>
+  function Probe() {
+    location = useLocation()
+    return <box />
+  }
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <ClientProvider api={createApi(calls.fetch)}>
+        <DataProvider><Probe /></DataProvider>
+      </ClientProvider>
+    </TestTuiContexts>
+  ))
+  try {
+    await wait(() => location.resourceError !== undefined)
+    expect(location.error).toBeUndefined()
+    expect(location.current?.directory).toBe(directory)
+    failing = false
+    const before = requests
+    location.retry()
+    await wait(() => requests > before)
+    await Bun.sleep(30)
+    expect(location.resourceError).toBeUndefined()
+    expect(location.error).toBeUndefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("a genuine location read failure keeps the recovery target", async () => {
+  const calls = createFetch((url) => url.pathname === "/api/location"
+    ? new Response("Directory missing", { status: 404 }) : undefined, createEventStream())
+  let location!: ReturnType<typeof useLocation>
+  function Probe() {
+    location = useLocation()
+    return <box />
+  }
+  const app = await testRender(() => (
+    <TestTuiContexts>
+      <ClientProvider api={createApi(calls.fetch)}>
+        <DataProvider><Probe /></DataProvider>
+      </ClientProvider>
+    </TestTuiContexts>
+  ))
+  try {
+    await wait(() => location.error !== undefined)
+    expect(location.error?.location.directory).toBe(process.cwd())
+    expect(location.resourceError).toBeUndefined()
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("syncs VCS info and applies branch updates", async () => {
   const events = createEventStream()
   const calls = createFetch((url) => {

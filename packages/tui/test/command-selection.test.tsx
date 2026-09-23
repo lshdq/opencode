@@ -68,17 +68,29 @@ test("custom commands commit the captured agent, model and variant before execut
     await setup.waitForFrame(
       (frame) => frame.includes("Select model") && setup.renderer.currentFocusedRenderable instanceof InputRenderable,
     )
+    const modelInput = setup.renderer.currentFocusedEditor
     await setup.mockInput.typeText("second")
     await setup.renderOnce()
+    expect(modelInput?.plainText).toBe("second")
     setup.mockInput.pressEnter()
-    await setup.waitForFrame((frame) => frame.includes("Select variant") && frame.includes("low"))
+    // DialogSelect paints before its deferred focus callback. A visible option
+    // is not yet an editable search box: typing then would be dropped, and Enter
+    // would select Default rather than low. Wait for the new dialog's real input.
+    await setup.waitForFrame(
+      (frame) =>
+        frame.includes("Select variant") && frame.includes("low") &&
+        setup.renderer.currentFocusedEditor instanceof InputRenderable &&
+        setup.renderer.currentFocusedEditor !== modelInput,
+    )
     await setup.mockInput.typeText("low")
     await setup.renderOnce()
+    expect(setup.renderer.currentFocusedEditor?.plainText).toBe("low")
     setup.mockInput.pressEnter()
     await setup.waitForFrame(
       (frame) =>
         frame.includes("Plan · second model Demo · low") &&
-        setup.renderer.currentFocusedRenderable instanceof TextareaRenderable,
+        setup.renderer.currentFocusedRenderable instanceof TextareaRenderable &&
+        !(setup.renderer.currentFocusedRenderable instanceof InputRenderable),
     )
     await setup.mockInput.typeText("/review selected input")
     setup.mockInput.pressEscape()

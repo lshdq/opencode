@@ -977,6 +977,20 @@ export function Session(props: {
       },
     },
     {
+      title: configState.data.session.timestamps ? "Hide assistant timestamps" : "Show assistant timestamps",
+      id: "session.toggle.timestamps",
+      group: "Session",
+      palette: true as const,
+      run: () => {
+        void configState
+          .update((draft) => {
+            draft.session = { ...draft.session, timestamps: !configState.data.session.timestamps }
+          })
+          .catch(toast.error)
+        dialog.clear()
+      },
+    },
+    {
       title: groupExploration() ? "Show tool calls individually" : "Group related tool calls",
       id: "session.toggle.exploration_grouping",
       group: "Session",
@@ -1978,8 +1992,29 @@ function AssistantFooter(props: { message: SessionMessageAssistant }) {
             <span style={{ fg: theme.text.muted }}> · interrupted</span>
           </Show>
         </text>
+        <Show when={config.data.session.timestamps}>
+          <AssistantTimestamp created={props.message.time.created} />
+        </Show>
       </box>
     </>
+  )
+}
+
+export function AssistantTimestamp(props: { created: number }) {
+  const theme = useTheme()
+  const dimensions = useTerminalDimensions()
+  const [now, setNow] = createSignal(Date.now())
+  // Re-evaluate the date at local midnight, even for an idle open transcript.
+  createEffect(() => {
+    const next = new Date(now())
+    next.setHours(24, 0, 0, 0)
+    const timer = setTimeout(() => setNow(Date.now()), Math.max(1, next.getTime() - Date.now()))
+    onCleanup(() => clearTimeout(timer))
+  })
+  return (
+    <text fg={theme.text.muted} wrapMode="none" truncate>
+      {Locale.messageTime(props.created, now(), dimensions().width < 26)}
+    </text>
   )
 }
 

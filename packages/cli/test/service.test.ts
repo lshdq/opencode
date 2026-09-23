@@ -3,13 +3,16 @@ import { Service, type Info } from "@opencode/client/effect/service"
 import { Global } from "@opencode/util/global"
 import { OPENCODE_VERSION } from "../src/version"
 import { expect, test } from "bun:test"
-import { Effect, Schema } from "effect"
+import { Effect } from "effect"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { ServiceConfig } from "../src/services/service-config"
 import { ServiceRegistration } from "../src/services/service-registration"
-import { isolatedEnv } from "./fixture/environment"
+import { isolatedEnvironment } from "../script/windows-runtime"
+import { startupTimeout, stopOwned, waitForInfo } from "./fixture/service-lifecycle"
+import { isolatedRoot } from "./fixture/environment"
+import { loopbackRequest } from "../script/loopback-http"
 
 test("managed service ports are stable per installation channel", () => {
   expect(ServiceConfig.defaultPort("latest")).toBe(0xc0de)
@@ -162,7 +165,7 @@ test("deleting a managed service registration stops its owner", async () => {
   } finally {
     await stopManagedService(service)
   }
-}, 30_000)
+}, 90_000)
 
 test("deleting a failed service registration stops its owner", async () => {
   const service = await startManagedService("opencode-service-failed-delete-", true)
@@ -174,7 +177,7 @@ test("deleting a failed service registration stops its owner", async () => {
   } finally {
     await stopManagedService(service)
   }
-}, 30_000)
+}, 90_000)
 
 test("corrupting a managed service registration stops its owner", async () => {
   const service = await startManagedService("opencode-service-corrupt-")
@@ -186,7 +189,7 @@ test("corrupting a managed service registration stops its owner", async () => {
   } finally {
     await stopManagedService(service)
   }
-}, 30_000)
+}, 90_000)
 
 test("replacing a managed service registration stops its owner and preserves the foreign owner", async () => {
   const service = await startManagedService("opencode-service-foreign-")
@@ -199,7 +202,7 @@ test("replacing a managed service registration stops its owner and preserves the
   } finally {
     await stopManagedService(service)
   }
-}, 30_000)
+}, 90_000)
 
 test("clean managed service shutdown removes its registration", async () => {
   const service = await startManagedService("opencode-service-clean-")
@@ -210,21 +213,11 @@ test("clean managed service shutdown removes its registration", async () => {
   } finally {
     await stopManagedService(service)
   }
-}, 30_000)
+}, 90_000)
 
 test("concurrent service processes elect one server", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-election-"))
-  const database = path.join(root, "opencode.db")
-  const env = {
-    ...process.env,
-    HOME: root,
-    OPENCODE_DB: database,
-    OPENCODE_TEST_HOME: root,
-    XDG_CACHE_HOME: path.join(root, "cache"),
-    XDG_CONFIG_HOME: path.join(root, "config"),
-    XDG_DATA_HOME: path.join(root, "data"),
-    XDG_STATE_HOME: path.join(root, "state"),
-  }
+  const root = await isolatedRoot("opencode-service-election-")
+  const env = serviceEnv(root)
   const command = [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"]
   const registration = path.join(root, "state", "opencode", "service-local.json")
   const port = await availablePort()
@@ -234,7 +227,7 @@ test("concurrent service processes elect one server", async () => {
   const processes = Array.from({ length: 10 }, () => Bun.spawn(command, { env, stderr: "pipe", stdout: "pipe" }))
 
   try {
-    const info = await waitForInfo(registration)
+    const info = await waitForInfo(registration, processes)
     const winner = processes.find((process) => process.pid === info.pid)
     const losers = processes.filter((process) => process.pid !== info.pid)
     const exited = await Promise.all(
@@ -256,7 +249,7 @@ test("concurrent service processes elect one server", async () => {
     expect((await Bun.file(config).json()).password).toBe(info.password)
     expect(await Bun.file(registration + ".lock").exists()).toBe(false)
     expect(
-      await fetch(new URL("/api/info", info.url), {
+      await loopbackRequest(new URL("/api/info", info.url), {
         headers: { authorization: "Basic " + btoa(`opencode:${info.password}`) },
       }).then((response) => response.json()),
     ).toEqual({
@@ -264,33 +257,32 @@ test("concurrent service processes elect one server", async () => {
       pid: info.pid,
       urls: [info.url],
       // The server reports the canonical tmp directory; Windows os.tmpdir() can be an 8.3 short name.
-      paths: { tmp: await fs.realpath(path.join(os.tmpdir(), "opencode")) },
+      paths: { tmp: await fs.realpath(path.join(env.TEMP, "opencode")) },
     })
     const contender = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })
     try {
       const contenderExited = await Promise.race([
         contender.exited.then(() => true),
-        Bun.sleep(10_000).then(() => false),
+        Bun.sleep(startupTimeout).then(() => false),
       ])
       expect(contenderExited).toBe(true)
       expect(contender.exitCode).toBe(0)
-      expect((await waitForInfo(registration)).id).toBe(info.id)
+      expect((await waitForInfo(registration, processes)).id).toBe(info.id)
     } finally {
-      contender.kill("SIGTERM")
-      await contender.exited
+      await stopOwned(contender)
     }
     await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
-    await winner?.exited
+    expect(winner).toBeDefined()
+    expect(await waitForExit(winner!)).toBe(true)
     expect(await Bun.file(registration).exists()).toBe(false)
   } finally {
-    processes.forEach((process) => process.kill("SIGTERM"))
-    await Promise.all(processes.map((process) => process.exited))
+    await Promise.all(processes.map(stopOwned))
     await fs.rm(root, { recursive: true, force: true })
   }
-}, 120_000)
+}, 180_000)
 
 test("configured managed service port overrides the channel default", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-port-"))
+  const root = await isolatedRoot("opencode-service-port-")
   const port = await availablePort()
   const env = serviceEnv(root)
   const registration = path.join(root, "state", "opencode", "service-local.json")
@@ -303,18 +295,17 @@ test("configured managed service port overrides the channel default", async () =
     stdout: "ignore",
   })
   try {
-    const info = await waitForInfo(registration)
+    const info = await waitForInfo(registration, [owner])
     expect(new URL(info.url).port).toBe(String(port))
     expect(info.password).not.toBe("")
     expect((await Bun.file(config).json()).password).toBe(info.password)
     await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
-    await owner.exited
+    expect(await waitForExit(owner)).toBe(true)
   } finally {
-    owner.kill("SIGTERM")
-    await owner.exited
+    await stopOwned(owner)
     await fs.rm(root, { recursive: true, force: true })
   }
-}, 30_000)
+}, 90_000)
 
 test.each([
   { args: [], origins: ["http://192.0.2.10:3001", "https://configured.example.com"] },
@@ -325,7 +316,7 @@ test.each([
 ])(
   "managed service applies CORS configuration with flag overrides: $args",
   async ({ args, origins }) => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-cors-"))
+    const root = await isolatedRoot("opencode-service-cors-")
     const config = path.join(root, "config", ServiceConfig.filename())
     const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
     const cors = ["http://192.0.2.10:3001", "https://configured.example.com"]
@@ -333,13 +324,17 @@ test.each([
     await fs.writeFile(config, JSON.stringify({ cors }))
     const owner = Bun.spawn(
       [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service", "--port", "0", ...args],
-      { env: isolatedEnv(root), stderr: "pipe", stdout: "ignore" },
+      {
+        env: { ...serviceEnv(root), OPENCODE_CONFIG_DIR: path.join(root, "config") },
+        stderr: "pipe",
+        stdout: "ignore",
+      },
     )
     try {
-      const info = await waitForInfo(registration)
+      const info = await waitForInfo(registration, [owner])
       await Promise.all(
         [...new Set([...cors, ...origins, "https://unlisted.example.com"])].map(async (origin) => {
-          const response = await fetch(new URL("/api/info", info.url), {
+          const response = await loopbackRequest(new URL("/api/info", info.url), {
             method: "OPTIONS",
             headers: { Origin: origin, "Access-Control-Request-Method": "GET" },
           })
@@ -350,16 +345,15 @@ test.each([
       )
       expect((await Bun.file(config).json()).cors).toEqual(cors)
     } finally {
-      owner.kill("SIGTERM")
-      await owner.exited
+      await stopOwned(owner)
       await fs.rm(root, { recursive: true, force: true })
     }
   },
-  30_000,
+  90_000,
 )
 
 test("unrelated managed port occupancy reports an actionable conflict", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-conflict-"))
+  const root = await isolatedRoot("opencode-service-conflict-")
   const listener = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("unrelated") })
   const port = listener.port
   const registration = path.join(root, "state", "opencode", "service-local.json")
@@ -371,21 +365,21 @@ test("unrelated managed port occupancy reports an actionable conflict", async ()
     stdout: "pipe",
   })
   try {
-    expect(await contender.exited).not.toBe(0)
+    expect(await waitForExit(contender, startupTimeout)).toBe(true)
+    expect(contender.exitCode).not.toBe(0)
     const output = (await new Response(contender.stdout).text()) + (await new Response(contender.stderr).text())
     expect(output).toContain(`Managed service port ${port} on 127.0.0.1 is already in use by another process`)
     expect(output).toContain("opencode service set port <port>")
     expect(await Bun.file(registration).exists()).toBe(false)
   } finally {
     listener.stop(true)
-    contender.kill("SIGTERM")
-    await contender.exited
+    await stopOwned(contender)
     await fs.rm(root, { recursive: true, force: true })
   }
-}, 30_000)
+}, 90_000)
 
 test("unresponsive managed port occupancy reports a bounded conflict", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-unresponsive-conflict-"))
+  const root = await isolatedRoot("opencode-service-unresponsive-conflict-")
   const recognizing = Promise.withResolvers<void>()
   const requests = { count: 0 }
   using listener = Bun.serve({
@@ -419,21 +413,22 @@ test("unresponsive managed port occupancy reports a bounded conflict", async () 
   })
 
   try {
-    expect(await Promise.race([recognizing.promise.then(() => true), Bun.sleep(20_000).then(() => false)])).toBe(true)
+    expect(
+      await Promise.race([recognizing.promise.then(() => true), Bun.sleep(startupTimeout).then(() => false)]),
+    ).toBe(true)
     const exitCode = await Promise.race([contender.exited, Bun.sleep(20_000).then(() => undefined)])
     expect(exitCode).toBe(1)
     const output = (await new Response(contender.stdout).text()) + (await new Response(contender.stderr).text())
     expect(output).toContain(`Managed service port ${listener.port} on 127.0.0.1 is already in use by another process`)
     expect(await Bun.file(registration).json()).toEqual(stale)
   } finally {
-    contender.kill("SIGTERM")
-    await contender.exited
+    await stopOwned(contender)
     await fs.rm(root, { recursive: true, force: true })
   }
-}, 45_000)
+}, 100_000)
 
 test("port contender recognizes an incumbent registered during the bind race", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-bind-race-"))
+  const root = await isolatedRoot("opencode-service-bind-race-")
   const recognizing = Promise.withResolvers<void>()
   const requests = { count: 0 }
   using listener = Bun.serve({
@@ -470,8 +465,13 @@ test("port contender recognizes an incumbent registered during the bind race", a
   })
 
   try {
-    expect(await Promise.race([recognizing.promise.then(() => true), Bun.sleep(20_000).then(() => false)])).toBe(true)
+    expect(
+      await Promise.race([recognizing.promise.then(() => true), Bun.sleep(startupTimeout).then(() => false)]),
+    ).toBe(true)
     await Bun.sleep(8_000)
+    // Deliberately publish midway through recognizeIncumbent's 15s retry window,
+    // after its first observed request, not relative to source process startup.
+    expect(contender.exitCode).toBe(null)
     const info = {
       id: "incumbent",
       version: OPENCODE_VERSION,
@@ -484,11 +484,10 @@ test("port contender recognizes an incumbent registered during the bind race", a
     expect(await Promise.race([contender.exited, Bun.sleep(20_000).then(() => undefined)])).toBe(0)
     expect(await Bun.file(registration).json()).toEqual(info)
   } finally {
-    contender.kill("SIGTERM")
-    await contender.exited
+    await stopOwned(contender)
     await fs.rm(root, { recursive: true, force: true })
   }
-}, 45_000)
+}, 100_000)
 
 test("service registration replaces a stale owner with the bound address", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-stale-"))
@@ -523,65 +522,49 @@ test("service registration replaces a stale owner with the bound address", async
 })
 
 test("a failed service stays registered and owns the selected port until stopped", async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-failed-"))
+  const root = await isolatedRoot("opencode-service-failed-")
   const port = await availablePort()
   const database = path.join(root, "database")
   await fs.mkdir(database)
+  // A private parent is valid; the intentional boot failure remains a directory used as a DB file.
+  expect((await fs.stat(database)).isDirectory()).toBe(true)
   await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
   await fs.writeFile(path.join(root, "config", "opencode", "service-local.json"), JSON.stringify({ port }))
-  const env = {
-    ...process.env,
-    HOME: root,
-    OPENCODE_DB: database,
-    OPENCODE_TEST_HOME: root,
-    XDG_CACHE_HOME: path.join(root, "cache"),
-    XDG_CONFIG_HOME: path.join(root, "config"),
-    XDG_DATA_HOME: path.join(root, "data"),
-    XDG_STATE_HOME: path.join(root, "state"),
-  }
+  const env = { ...serviceEnv(root), OPENCODE_DB: database }
   const command = [process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"]
   const registration = path.join(root, "state", "opencode", "service-local.json")
   const owner = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })
 
   try {
-    const info = await waitForInfo(registration)
+    const info = await waitForInfo(registration, [owner])
     await waitForFailed(info)
     expect(owner.exitCode).toBe(null)
 
     const contender = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })
-    expect(await Promise.race([contender.exited.then(() => true), Bun.sleep(10_000).then(() => false)])).toBe(true)
-    expect(contender.exitCode).toBe(0)
-    expect((await waitForInfo(registration)).id).toBe(info.id)
+    try {
+      expect(await waitForExit(contender, startupTimeout)).toBe(true)
+      expect(contender.exitCode).toBe(0)
+    } finally {
+      await stopOwned(contender)
+    }
+    expect((await waitForInfo(registration, [owner])).id).toBe(info.id)
     expect(owner.exitCode).toBe(null)
 
     await Effect.runPromise(Service.stop({ file: registration }).pipe(Effect.provide(NodeFileSystem.layer)))
-    await owner.exited
+    expect(await waitForExit(owner)).toBe(true)
     expect(await Bun.file(registration).exists()).toBe(false)
   } finally {
-    owner.kill("SIGTERM")
-    await owner.exited
+    await stopOwned(owner)
     await fs.rm(root, { recursive: true, force: true })
   }
-}, 30_000)
-
-async function waitForInfo(file: string, accept: (info: Info) => boolean = () => true) {
-  for (let attempt = 0; attempt < 400; attempt++) {
-    const value = await Bun.file(file)
-      .json()
-      .catch(() => undefined)
-    if (value !== undefined) {
-      const info = await Schema.decodeUnknownPromise(Service.Info)(value)
-      if (accept(info)) return info
-    }
-    await Bun.sleep(50)
-  }
-  throw new Error("Timed out waiting for service registration")
-}
+}, 150_000)
 
 async function waitForFailed(info: Info) {
-  for (let attempt = 0; attempt < 400; attempt++) {
-    const status = await fetch(new URL("/api/info", info.url), {
+  const deadline = performance.now() + 20_000
+  while (performance.now() < deadline) {
+    const status = await loopbackRequest(new URL("/api/info", info.url), {
       headers: { authorization: "Basic " + btoa(`opencode:${info.password}`) },
+      signal: AbortSignal.timeout(2_000),
     })
       .then((response) => response.status)
       .catch(() => undefined)
@@ -601,8 +584,9 @@ async function availablePort() {
 
 function serviceEnv(root: string) {
   return {
-    ...process.env,
-    HOME: root,
+    ...isolatedEnvironment(root),
+    TEMP: root,
+    TMP: root,
     OPENCODE_DB: path.join(root, "opencode.db"),
     OPENCODE_TEST_HOME: root,
     XDG_CACHE_HOME: path.join(root, "cache"),
@@ -613,20 +597,22 @@ function serviceEnv(root: string) {
 }
 
 async function startManagedService(prefix: string, failBoot = false) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
+  const root = await isolatedRoot(prefix)
   const port = await availablePort()
   const registration = path.join(root, "state", "opencode", "service-local.json")
   await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
-  if (failBoot) await fs.mkdir(path.join(root, "database"))
+  if (failBoot) {
+    await fs.mkdir(path.join(root, "database"))
+    expect((await fs.stat(path.join(root, "database"))).isDirectory()).toBe(true)
+  }
   await fs.writeFile(path.join(root, "config", "opencode", "service-local.json"), JSON.stringify({ port }))
   const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
     env: failBoot ? { ...serviceEnv(root), OPENCODE_DB: path.join(root, "database") } : serviceEnv(root),
     stderr: "pipe",
     stdout: "ignore",
   })
-  const info = await waitForInfo(registration).catch(async (cause) => {
-    owner.kill("SIGTERM")
-    await owner.exited
+  const info = await waitForInfo(registration, [owner]).catch(async (cause) => {
+    await stopOwned(owner)
     await fs.rm(root, { recursive: true, force: true })
     throw cause
   })
@@ -634,8 +620,7 @@ async function startManagedService(prefix: string, failBoot = false) {
 }
 
 async function stopManagedService(service: Awaited<ReturnType<typeof startManagedService>>) {
-  service.owner.kill("SIGTERM")
-  await service.owner.exited
+  await stopOwned(service.owner)
   await fs.rm(service.root, { recursive: true, force: true })
 }
 
@@ -647,3 +632,55 @@ async function expectPortAvailable(port: number) {
   const server = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response() })
   await server.stop(true)
 }
+
+test("startup fixture accepts registration after the former 20s cold-start budget", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-startup-delay-"))
+  const file = path.join(root, "registration.json")
+  const owner = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  })
+  const info = { id: "fixture", version: "local", url: "http://127.0.0.1:1", pid: owner.pid, password: "fixture-only" }
+  const writer = Bun.sleep(20_100).then(() => Bun.write(file, JSON.stringify(info)))
+  try {
+    expect(await waitForInfo(file, [owner])).toEqual(info)
+    expect(owner.exitCode).toBe(null)
+  } finally {
+    await writer
+    await stopOwned(owner)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 90_000)
+
+test("startup timeout reports lifecycle without credentials and cleanup reaps its owner", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-startup-timeout-"))
+  const owner = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+    stdout: "ignore",
+    stderr: "ignore",
+  })
+  try {
+    const started = performance.now()
+    await expect(waitForInfo(path.join(root, "missing.json"), [owner], 150)).rejects.toThrow(
+      `owners=${owner.pid}:running`,
+    )
+    expect(performance.now() - started).toBeLessThan(5_000)
+  } finally {
+    await stopOwned(owner)
+    expect(owner.exitCode).not.toBe(null)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test("startup fixture fails early when the owned process exits before registration", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-startup-exit-"))
+  const owner = Bun.spawn([process.execPath, "-e", "process.exit(7)"], { stdout: "ignore", stderr: "ignore" })
+  try {
+    await owner.exited
+    const started = performance.now()
+    await expect(waitForInfo(path.join(root, "missing.json"), [owner])).rejects.toThrow(`owners=${owner.pid}:7`)
+    expect(performance.now() - started).toBeLessThan(1_000)
+  } finally {
+    await stopOwned(owner)
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})

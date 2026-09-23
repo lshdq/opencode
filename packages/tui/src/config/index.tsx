@@ -160,6 +160,9 @@ export const Info = Schema.Struct({
       tps: Schema.optional(Schema.Boolean).annotate({
         description: "Show average tokens per second",
       }),
+      timestamps: Schema.optional(Schema.Boolean).annotate({
+        description: "Show assistant message creation timestamps",
+      }),
       markdown: Schema.optional(Schema.Literals(["source", "rendered"])).annotate({
         description: "Show Markdown syntax markers or conceal them in rendered transcript content",
       }),

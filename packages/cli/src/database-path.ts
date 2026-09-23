@@ -11,3 +11,12 @@ export function databasePath(data: string) {
       : `opencode-${OPENCODE_CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")}.db`)
   return filename === ":memory:" ? filename : path.resolve(data, filename)
 }
+
+export function databaseOptions(data: string) {
+  return {
+    path: databasePath(data),
+    // Only the default location is application-owned. An explicit override
+    // must already be private; its parent is never permission-modified.
+    privateDirectory: process.env.OPENCODE_DB === undefined,
+  }
+}

@@ -209,12 +209,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   })
   const options = { baseUrl: input.server.endpoint.url, headers: Service.headers(input.server.endpoint) }
   const api = OpenCode.make(options)
-  const location = yield* Effect.tryPromise(() => api.file.list({ location: { directory: process.cwd() } })).pipe(
-    Effect.map((response) => response.location),
-    Effect.catch(() => Effect.tryPromise(() => api.location.get())),
-  )
-  const directory = location.directory
-  const pluginDirectories = yield* Effect.promise(() => localPluginDirectories(process.cwd(), global.config))
+  // Resolve the server's launch directory after mounting, including the remote
+  // server fallback. Plugin discovery remains based on the client's local cwd.
+  const directory = process.cwd()
+  const pluginDirectories = localPluginDirectories(directory, global.config)
+  void pluginDirectories.catch((error) => log("error", "Failed to discover plugin directories", { error }))
   const handoff = input.terminalHandoff ? yield* Effect.promise(input.terminalHandoff) : undefined
   const managed = input.server.service
   const service = managed
@@ -373,12 +372,21 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                     type: "session",
                                                     sessionID: "dummy",
                                                   }
-                                                : undefined
+                                                  : input.args.sessionID
+                                                    ? { type: "session", sessionID: input.args.sessionID }
+                                                    : undefined
                                             }
                                           >
                                             <ClientProvider api={api} url={input.server.endpoint.url} service={service}>
                                               <PermissionProvider>
-                                                <DataProvider directory={directory}>
+                                                <DataProvider
+                                                  directory={directory}
+                                                  initialLocation={() =>
+                                                    api.file.list({ location: { directory } })
+                                                      .then((response) => response.location)
+                                                      .catch(() => api.location.get())
+                                                  }
+                                                >
                                                   <LocationProvider>
                                                     <SessionTabsProvider>
                                                       <SessionTerminalsProvider>
@@ -487,6 +495,16 @@ function App(props: { pair?: DialogPairCredentials }) {
   const { mode, supports, setMode, locked, lock, unlock, afterPaint } = useThemes()
   const data = useData()
   const location = useLocation()
+  createEffect(() => {
+    const error = location.resourceError
+    if (!error) return
+    toast.show({
+      variant: "error",
+      title: "Location resources unavailable",
+      message: error.cause instanceof Error ? error.cause.message : String(error.cause),
+      action: { label: "Retry", run: location.retry },
+    })
+  })
   const exit = useExit()
   const promptRef = usePromptRef()
   const plugins = usePlugin()
@@ -665,8 +683,9 @@ function App(props: { pair?: DialogPairCredentials }) {
   let continued = false
   createEffect(() => {
     if (continued || !args.continue) return
-    continued = true
     const location = data.location.default()
+    if (!data.location.info(location)) return
+    continued = true
     void client.api.session
       .list({
         limit: 1,
@@ -1365,7 +1384,7 @@ function App(props: { pair?: DialogPairCredentials }) {
           <SessionTabs orientation="vertical" width={tabsResize.size()} />
         </Show>
         <box flexGrow={1} minWidth={0} flexDirection="column">
-          <Show when={plugins.ready()}>
+          <>
             <box flexGrow={1} minHeight={0} flexDirection="column">
               <Show when={tabsVisible() && !tabsVertical()}>
                 <SessionTabs />
@@ -1385,16 +1404,18 @@ function App(props: { pair?: DialogPairCredentials }) {
                   </Show>
                 </Match>
                 <Match when={route.data.type === "plugin"}>
-                  <PluginRoute
-                    fallback={(id, name) => (
-                      <PluginRouteMissing id={id} name={name} onHome={() => route.navigate({ type: "home" })} />
-                    )}
-                  />
+                  <Show when={plugins.ready()}>
+                    <PluginRoute
+                      fallback={(id, name) => (
+                        <PluginRouteMissing id={id} name={name} onHome={() => route.navigate({ type: "home" })} />
+                      )}
+                    />
+                  </Show>
                 </Match>
               </Switch>
             </box>
             <Slot path="app" />
-          </Show>
+          </>
         </box>
         <Show when={verticalTabsVisible()}>
           <PaneResizeHandle resize={tabsResize} left={tabsResize.size() - 1} />

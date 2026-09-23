@@ -27,21 +27,25 @@ export function usePromptMove(input: { projectID: () => string | undefined; sess
     return { ...location, directory: location.directory || paths.cwd }
   }
 
-  async function create(name: string) {
+  async function create(name: string, signal?: AbortSignal) {
     setCreating(true)
     setProgress("Creating worktree")
     try {
+      signal?.throwIfAborted()
       const sessionID = input.sessionID()
       const session = sessionID ? await resolveSession(sessionID) : undefined
+      signal?.throwIfAborted()
       if (sessionID && !session) throw new Error("Unable to determine current session location")
       const location = session?.location ?? homeLocation()
       if (!data.location.info(location)) await data.location.syncInfo(location)
+      signal?.throwIfAborted()
       const project = data.location.info(location)?.project
       if (!project) throw new Error("Unable to determine current project")
       const result = await client.api.worktree.create({
         projectID: project.id,
         name,
       })
+      signal?.throwIfAborted()
       const directory = result.directory
       if (!directory) throw new Error("No worktree directory returned")
 
@@ -49,6 +53,7 @@ export function usePromptMove(input: { projectID: () => string | undefined; sess
       // destination. A raw read initializes the server location but leaves the
       // optimistic session without its project until the create request echoes.
       await data.location.syncInfo({ directory })
+      signal?.throwIfAborted()
 
       setProgress("Creating session")
       return directory
@@ -56,6 +61,7 @@ export function usePromptMove(input: { projectID: () => string | undefined; sess
       setDestination(undefined)
       setProgress(undefined)
       setCreating(false)
+      if (signal?.aborted) return
       toast.show({ title: "Creating workspace failed", message: errorMessage(err), variant: "error" })
       return
     }
@@ -134,13 +140,14 @@ export function usePromptMove(input: { projectID: () => string | undefined; sess
   const pending = createMemo(() => Boolean(destination()))
   const pendingNew = createMemo(() => destination()?.type === "new")
 
-  async function getDirectory() {
+  async function getDirectory(signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const value = destination()
     if (!value) return
     if (value.type === "directory") {
       return value.directory
     }
-    return await create(value.name)
+    return await create(value.name, signal)
   }
 
   function startSubmit() {

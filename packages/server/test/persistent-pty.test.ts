@@ -14,6 +14,25 @@ import { ServerProcess } from "../src/process"
 const binary = process.env.OPENCODE_PTY_BIN ?? "/root/projects/opencode-pty/target/debug/opencode-pty"
 const smoke = existsSync(binary) ? it.live : it.live.skip
 
+it.live("opens the owned persistent terminal database without requiring a PTY binary", () =>
+  Effect.gen(function* () {
+    const fixture = yield* testDirectory("xdg")
+    const server = yield* ServerProcess.start<never, never>({
+      hostname: "127.0.0.1",
+      port: 0,
+      password: "secret",
+      app: { version: "test-version" },
+      database: fixture.database,
+      fs: { filewatcher: false },
+    })
+    expect(yield* request(HttpServer.formatAddress(server.address), "GET", "/api/info")).toMatchObject({
+      version: "test-version",
+    })
+    expect(existsSync(fixture.database.path)).toBeTrue()
+    expect(existsSync(fixture.directory)).toBeFalse()
+  }),
+)
+
 smoke(
   "reads the latest controlled terminal with optional physical line counts through the SDK",
   () =>
@@ -24,7 +43,7 @@ smoke(
         port: 0,
         password: "secret",
         app: { version: "test-version" },
-        database: { path: fixture.database },
+        database: fixture.database,
         fs: { filewatcher: false },
       })
       const base = HttpServer.formatAddress(server.address)
@@ -148,7 +167,7 @@ smoke(
         port: 0,
         password: "secret",
         app: { version: "test-version" },
-        database: { path: fixture.database },
+        database: fixture.database,
         fs: { filewatcher: false },
       })
       const base = HttpServer.formatAddress(server.address)
@@ -323,7 +342,7 @@ smoke(
         port: 0,
         password: "secret",
         app: { version: "test-version" },
-        database: { path: fixture.database },
+        database: fixture.database,
         fs: { filewatcher: false },
       }
       const original = yield* ServerProcess.start<never, never>(options).pipe(
@@ -402,7 +421,8 @@ function testDirectory(mode: "xdg" | "override") {
       process.env.SHELL = "/bin/sh"
       if (mode === "override") process.env.OPENCODE_PTY_RUNTIME_DIR = runtime
       return {
-        database: path.join(root, "opencode.db"),
+        // Only this freshly allocated fixture root is owned, not a caller's custom path.
+        database: { path: path.join(root, "opencode.db"), privateDirectory: true },
         directory: mode === "override" ? runtime : path.join(runtime, "opencode-pty"),
         environment,
         root,

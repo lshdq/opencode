@@ -14,7 +14,7 @@ import { Env } from "./env"
 import { ServiceConfig } from "./services/service-config"
 import { ServiceRegistration } from "./services/service-registration"
 import { WebUi } from "./services/web-ui"
-import { databasePath } from "./database-path"
+import { databaseOptions } from "./database-path"
 
 export type Mode = "default" | "service" | "stdio"
 
@@ -93,9 +93,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
           password,
           pty: { handoff },
           simulation: truthy(process.env.OPENCODE_SIMULATE),
-          database: {
-            path: databasePath(global.data),
-          },
+          database: databaseOptions(global.data),
           models: {
             url: process.env.OPENCODE_MODELS_URL,
             file: process.env.OPENCODE_MODELS_PATH,

@@ -130,9 +130,11 @@ describe("DatabaseMigration", () => {
 
     await Effect.runPromise(
       Effect.all(
-        [Database.layer({ path: filename }), Database.layer({ path: filename })].map((layer) =>
-          Effect.scoped(Layer.build(layer)),
-        ),
+        // Both independent layers open the same parent owned by this tmpdir fixture.
+        [
+          Database.layer({ path: filename, privateDirectory: true }),
+          Database.layer({ path: filename, privateDirectory: true }),
+        ].map((layer) => Effect.scoped(Layer.build(layer))),
         { concurrency: "unbounded" },
       ).pipe(Effect.provideService(Global.Service, Global.make({ data: tmp.path }))),
     )

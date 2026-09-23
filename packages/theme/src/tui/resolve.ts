@@ -68,7 +68,11 @@ function resolveExpandedTheme(definition: ThemeDefinition): ResolvedTheme {
 
 function tokens(definition: ThemeDefinition): ThemeTokensDefinition {
   return {
-    text: definition.text,
+    text: {
+      ...definition.text,
+      // Older/custom themes need the same independent semantic default, not a status alias.
+      permission: { autoaccept: definition.text.permission?.autoaccept ?? "$hue.orange.200" },
+    },
     background: definition.background,
     border: definition.border,
     scrollbar: definition.scrollbar,

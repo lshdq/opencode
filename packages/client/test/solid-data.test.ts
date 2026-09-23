@@ -14,6 +14,92 @@ const session = (viewed: number): SessionInfo => ({
   location: { directory: "/project" },
 })
 
+test.each(["gate", "prepare"])("disposing client data prevents late prompt admission after %s", async (phase) => {
+  const gate = Promise.withResolvers<void>()
+  const started = Promise.withResolvers<void>()
+  let requests = 0
+  const api = OpenCode.make({ baseUrl: "http://fixture.invalid", fetch: async () => {
+    requests++
+    return Response.json({ data: {} })
+  } })
+  const setup = createRoot((dispose) => ({
+    dispose,
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+  }))
+  const request = setup.data.session.prompt({
+    sessionID: "ses_refresh", text: "Never send after exit", id: "msg_cancelled",
+    ...(phase === "gate" ? { gate: gate.promise } : { prepare: () => { started.resolve(); return gate.promise } }),
+  })
+  // Attach rejection handling before shutdown to avoid an unhandled rejection.
+  void request.catch(() => undefined)
+  if (phase === "prepare") await started.promise
+  setup.dispose()
+  gate.resolve()
+  await expect(request).rejects.toThrow("disposed")
+  expect(requests).toBe(0)
+  expect(setup.data.session.pending.list("ses_refresh")).toEqual([])
+  expect(setup.data.session.message.list("ses_refresh")).toEqual([])
+})
+
+test("catalog errors are observable, preserve last-good data, and retry independently", async () => {
+  let fail = false
+  let requests = 0
+  const api = OpenCode.make({ baseUrl: "http://fixture.invalid", fetch: async () => {
+    requests++
+    if (fail) return new Response("unavailable", { status: 503 })
+    return Response.json({ location: { directory: "/project" }, data: [{ id: "model", providerID: "provider", name: "Model", variants: [] }] })
+  } })
+  const setup = createRoot((dispose) => ({
+    dispose,
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+  }))
+  try {
+    await setup.data.location.model.sync()
+    fail = true
+    setup.data.location.model.invalidate()
+    await expect(setup.data.location.model.sync()).rejects.toBeDefined()
+    expect(setup.data.location.model.error()).toBeDefined()
+    expect(setup.data.location.model.list()?.[0]?.id).toBe("model")
+    fail = false
+    await setup.data.location.model.sync()
+    expect(setup.data.location.model.error()).toBeUndefined()
+    await setup.data.location.model.sync()
+    expect(requests).toBe(3)
+  } finally {
+    setup.dispose()
+  }
+})
+
+test.each(["gate", "prepare"])("cancelled prompt does not send after delayed %s", async (phase) => {
+  const gate = Promise.withResolvers<void>()
+  const started = Promise.withResolvers<void>()
+  const controller = new AbortController()
+  let requests = 0
+  const api = OpenCode.make({ baseUrl: "http://fixture.invalid", fetch: async () => {
+    requests++
+    return Response.json({ data: {} })
+  } })
+  const setup = createRoot((dispose) => ({
+    dispose,
+    data: createData({ api: () => api, directory: "/project", event: { on: () => () => {}, listen: () => () => {} } }),
+  }))
+  try {
+    const request = setup.data.session.prompt({
+      sessionID: "ses_refresh", text: "cancelled", signal: controller.signal,
+      ...(phase === "gate" ? { gate: gate.promise } : { prepare: () => { started.resolve(); return gate.promise } }),
+    })
+    void request.catch(() => undefined)
+    if (phase === "prepare") await started.promise
+    controller.abort(new Error("cancelled by composer"))
+    gate.resolve()
+    await expect(request).rejects.toThrow("cancelled by composer")
+    expect(requests).toBe(0)
+    expect(setup.data.session.pending.list("ses_refresh")).toEqual([])
+  } finally {
+    setup.dispose()
+  }
+})
+
 test("uses the configured initial window and retains normal cursor page sizes", async () => {
   const requests: { limit: string | null; cursor: string | null }[] = []
   const api = OpenCode.make({

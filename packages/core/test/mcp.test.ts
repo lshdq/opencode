@@ -756,8 +756,7 @@ test("joins concurrent stdio transport closes", async () => {
   )
 })
 
-const testMcpDescendants =
-  process.platform === "win32" ? testEffect(hostEnvironmentLayer).live.skip : testEffect(hostEnvironmentLayer).live
+const testMcpDescendants = testEffect(hostEnvironmentLayer).live
 testMcpDescendants(
   "terminates MCP descendants after the wrapper exits successfully",
   Effect.gen(function* () {
@@ -781,7 +780,7 @@ testMcpDescendants(
       Deferred.doneUnsafe(ready, Exit.void)
     }
     yield* Effect.promise(() => transport.start())
-    yield* Deferred.await(ready).pipe(Effect.timeout("3 seconds"))
+    yield* Deferred.await(ready).pipe(Effect.timeout(process.platform === "win32" ? "10 seconds" : "3 seconds"))
     const pid = Number(yield* Effect.promise(() => fs.readFile(pidFile, "utf8")))
 
     yield* Effect.promise(() => transport.close()).pipe(Effect.timeout("6 seconds"))
@@ -794,7 +793,7 @@ testMcpDescendants(
     )
     expect(Exit.isFailure(stopped)).toBe(true)
   }),
-  15_000,
+  25_000,
 )
 
 test("closes a stdio process that finishes spawning after close", async () => {

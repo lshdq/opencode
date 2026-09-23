@@ -57,6 +57,8 @@ type OpenCodeEventMap = { [Type in OpenCodeEvent["type"]]: Extract<OpenCodeEvent
 export type CreateDataInput = {
   readonly api: () => OpenCodeClient
   readonly directory: string
+  /** Optional launch-directory resolution. Runs with the first default-location read, never before mounting. */
+  readonly initialLocation?: () => Promise<LocationRef>
   /** Raw-message window used for an initial transcript read. Older pages retain their normal size. */
   readonly initialMessageLimit?: () => number
   readonly event: {
@@ -246,6 +248,7 @@ export function createData(config: CreateDataInput) {
   })
 
   const [defaultLocation, setDefaultLocation] = createSignal<LocationRef>({ directory: config.directory })
+  let initialLocationResolved = false
   const sessions = createMemo(() =>
     Object.values(store.session.info).toSorted((a, b) => b.time.updated - a.time.updated),
   )
@@ -358,7 +361,10 @@ export function createData(config: CreateDataInput) {
     const previous = sending.get(sessionID)
     const request = Promise.resolve()
       .then(() => Promise.all([gate, created, previous]))
-      .then(send)
+      .then(() => {
+        if (disposed) throw new Error("Client data disposed before admission")
+        return send()
+      })
     track(
       sending,
       sessionID,
@@ -613,15 +619,8 @@ export function createData(config: CreateDataInput) {
               if (activeUpdates === updates) activeUpdates = undefined
             }),
         )
-        refresh(() =>
-          api()
-            .location.get({ location: locationQuery(defaultLocation()) })
-            .then((location) => {
-              const key = locationKey(location)
-              setStore("location", key, { info: location })
-            }),
-        )
-        refresh(() => result.location.vcs.sync())
+        refresh(() => result.location.syncInfo())
+        refresh(() => result.location.syncInfo().then(() => result.location.vcs.sync()))
         refresh(() => result.project.sync())
         return
       }
@@ -1303,14 +1302,21 @@ export function createData(config: CreateDataInput) {
     load: (location: ReturnType<typeof locationQuery>) => Promise<{ location: LocationRef; data: LocationData[Field] }>,
     options?: { alias?: boolean },
   ) {
+    const [errors, setErrors] = createStore<Record<string, unknown>>({})
     const publish = (key: string, value: LocationData[Field]) => setStore("location", key, { [field]: value })
     return {
       list: (ref?: LocationRef) => store.location[locationKey(ref ?? defaultLocation())]?.[field],
+      error: (ref?: LocationRef) => errors[locationKey(ref ?? defaultLocation())],
       sync: (ref?: LocationRef) => {
         const location = ref ?? defaultLocation()
         const id = locationKey(location)
         return sync.run(`location.${field}:${id}`, async () => {
-          const response = await load(locationQuery(location))
+          const response = await load(locationQuery(location)).catch((error) => {
+            if (!disposed) setErrors(id, () => error)
+            throw error
+          })
+          if (disposed) return
+          setErrors(id, undefined)
           const key = locationKey(response.location)
           publish(key, response.data)
           if (options?.alias && key !== id) publish(id, response.data)
@@ -1541,8 +1547,8 @@ export function createData(config: CreateDataInput) {
       // upsert that same ID with the server's payload. Server admission is
       // idempotent per ID, so retrying with the identical payload cannot
       // double-admit.
-      prompt(input: SessionPromptInput & { gate?: Promise<unknown>; prepare?: () => Promise<unknown> }) {
-        const { gate, prepare, ...request } = input
+      prompt(input: SessionPromptInput & { gate?: Promise<unknown>; prepare?: () => Promise<unknown>; signal?: AbortSignal }) {
+        const { gate, prepare, signal, ...request } = input
         const id = request.id ?? SessionMessage.ID.create()
         // A retry may reuse an ID that is already rendered — and possibly
         // already durable. Admit optimistically only for new IDs so a failed
@@ -1571,7 +1577,10 @@ export function createData(config: CreateDataInput) {
         return sendAdmission(
           request.sessionID,
           async () => {
+            signal?.throwIfAborted()
             await prepare?.()
+            if (disposed) throw new Error("Client data disposed before admission")
+            signal?.throwIfAborted()
             return api().session.prompt({ ...request, id })
           },
           gate,
@@ -1843,11 +1852,18 @@ export function createData(config: CreateDataInput) {
       syncInfo(ref?: LocationRef) {
         const current = ref ?? defaultLocation()
         return sync.run(`location:${locationKey(current)}`, async () => {
-          const location = await api().location.get({ location: locationQuery(current) })
+          const resolved = await (!ref && !initialLocationResolved && config.initialLocation
+            ? config.initialLocation()
+            : current)
+          if (disposed) return
+          const location = await api().location.get({ location: locationQuery(resolved) })
+          if (disposed) return
           const key = locationKey(location)
           if (!store.location[key]) setStore("location", key, {})
           setStore("location", key, "info", location)
+          if (key !== locationKey(current)) setStore("location", locationKey(current), { info: location })
           if (!ref) {
+            initialLocationResolved = true
             setDefaultLocation({ directory: location.directory })
           }
         })
