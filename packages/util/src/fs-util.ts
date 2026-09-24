@@ -51,6 +51,7 @@ export namespace FSUtil {
     readonly up: (options: UpOptions) => Effect.Effect<string[], Error>
     readonly globUp: (pattern: string, start: string, stop?: string) => Effect.Effect<string[], Error>
     readonly scan: (pattern: string, options?: Glob.Options) => Effect.Effect<string[], Error>
+    readonly scanChecked: (pattern: string, options?: Glob.Options) => Effect.Effect<string[], Error>
     readonly globMatch: (pattern: string, filepath: string) => boolean
   }
 
@@ -182,6 +183,13 @@ export namespace FSUtil {
         })
       })
 
+      const scanChecked = Effect.fn("FileSystem.scanChecked")(function* (pattern: string, options?: Glob.Options) {
+        return yield* Effect.tryPromise({
+          try: () => Glob.scanChecked(pattern, options),
+          catch: (cause) => new FileSystemError({ method: "glob", cause }),
+        })
+      })
+
       const up = Effect.fn("FileSystem.up")(function* (options: UpOptions) {
         const result: string[] = []
         let current = options.start
@@ -237,6 +245,7 @@ export namespace FSUtil {
         up,
         globUp,
         scan,
+        scanChecked,
         globMatch: Glob.match,
       })
     }),

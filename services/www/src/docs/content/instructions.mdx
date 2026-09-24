@@ -68,7 +68,7 @@ The selected agent or provider system prompt is sent first. OpenCode then assemb
 1. Agent or provider system prompt
 2. Built-in environment and date context
 3. Code Mode tool guidance, when enabled
-4. Global and project AGENTS.md files
+4. Global and project AGENTS.md files and configured instructions
 5. Available skill, reference, and MCP guidance
 6. Session-specific instruction entries supplied through the API
 ```
@@ -77,7 +77,7 @@ These sources are combined rather than used as overrides. Nested `AGENTS.md` fil
 
 ## Updates
 
-Edit a global or upward-discovered `AGENTS.md` while a session is running to update its guidance.
+Edit a global or upward-discovered `AGENTS.md` or a configured instruction source while a session is running to update its guidance.
 
 ```bash
 $ printf '\n- Run the integration suite before committing.\n' >> AGENTS.md
@@ -100,7 +100,7 @@ Instruction values remain privileged. Clients can see which sources changed, but
 
 ## Configuration
 
-The V2 config schema accepts an `instructions` array, but V2 does not currently resolve its files, glob patterns, or URLs. This configuration does not add instructions to the model yet:
+Add files, glob patterns, or HTTP(S) URLs to `instructions` in `opencode.jsonc`. OpenCode loads them alongside discovered `AGENTS.md` files:
 
 ```jsonc title="opencode.jsonc"
 {
@@ -109,4 +109,7 @@ The V2 config schema accepts an `instructions` array, but V2 does not currently 
 }
 ```
 
-Use `AGENTS.md` for active V2 instructions. See [Config](/config) for configuration locations and precedence.
+- Relative paths and globs are searched from the current Location upward to the project root; absolute patterns match at their specified location, and `~/` expands to the home directory.
+- Configured sources are read in configuration order, with nearer matches before farther ones. Sources that resolve to the same file as an automatically discovered `AGENTS.md` are loaded only once.
+
+See [Config](/config) for configuration locations and precedence.

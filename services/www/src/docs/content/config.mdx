@@ -414,16 +414,16 @@ See the [commands guide](/commands) for arguments, models, agents, and file-base
 
 ### Instructions
 
-Declare additional instruction files, globs, or URLs. OpenCode accepts this
-field but does not load its entries; use `AGENTS.md` for instructions.
+Load additional instruction files, glob patterns, or HTTP(S) URLs alongside
+discovered `AGENTS.md` files.
 
 ```jsonc
 {
-  "instructions": ["CONTRIBUTING.md", "docs/guidelines/*.md"],
+  "instructions": ["CONTRIBUTING.md", "docs/guidelines/*.md", "https://example.com/instructions.md"],
 }
 ```
 
-See the [instructions guide](/instructions) for project instructions and `AGENTS.md`.
+See the [instructions guide](/instructions) for path resolution, project instructions, and `AGENTS.md`.
 
 ### References
 

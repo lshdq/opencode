@@ -1,15 +1,16 @@
 export * as InstructionDiscovery from "./instruction-discovery.js"
 
-import { Context, Effect, Layer, Schema, Types } from "effect"
+import { Context, Effect, Layer, Schema, Scope, Types } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { createPatch } from "diff"
 import { Bus } from "./bus.js"
 import { Instructions } from "./instructions/index.js"
-import { AbsolutePath } from "./schema.js"
 import { State } from "./state.js"
 
 export class File extends Schema.Class<File>("InstructionDiscovery.File")({
-  path: AbsolutePath,
+  // Local paths retain their original shape; remote identities are opaque digests.
+  path: Schema.String,
+  label: Schema.optional(Schema.String),
   content: Schema.String,
 }) {}
 
@@ -21,7 +22,7 @@ export const Event = {
 }
 
 export type Data = {
-  files: Map<AbsolutePath, Types.DeepMutable<File>>
+  files: Map<string, Types.DeepMutable<File>>
   available: boolean
 }
 
@@ -42,6 +43,8 @@ export interface Interface extends State.Transformable<Editor> {
   readonly global: boolean
   readonly list: () => Effect.Effect<File[] | Instructions.Unavailable>
   readonly load: () => Effect.Effect<Instructions.List>
+  /** Refresh remote sources at a model boundary, not on a timer. */
+  readonly onLoad: (refresh: () => Effect.Effect<void>) => Effect.Effect<void, never, Scope.Scope>
 }
 
 export const Options = Schema.Struct({
@@ -57,6 +60,7 @@ export const layer = (options?: Options) =>
     Service,
     Effect.gen(function* () {
       const bus = yield* Bus.Service
+      const refreshers = new Set<() => Effect.Effect<void>>()
       const state = State.create<Data, Editor>({
         name: "instruction-discovery",
         initial: () => ({ files: new Map(), available: true }),
@@ -64,12 +68,12 @@ export const layer = (options?: Options) =>
           list: () => Array.from(editor.files.values()),
           add: (file) => editor.files.set(file.path, new File(file) as Types.DeepMutable<File>),
           update: (path, update) => {
-            const current = editor.files.get(AbsolutePath.make(path))
+            const current = editor.files.get(path)
             if (!current) return
             update(current)
-            current.path = AbsolutePath.make(path)
+            current.path = path
           },
-          remove: (path) => editor.files.delete(AbsolutePath.make(path)),
+          remove: (path) => editor.files.delete(path),
           unavailable: () => {
             editor.available = false
           },
@@ -101,7 +105,14 @@ export const layer = (options?: Options) =>
         transform: state.transform,
         reload: state.reload,
         list,
+        onLoad: (refresh) =>
+          Effect.gen(function* () {
+            const scope = yield* Scope.Scope
+            refreshers.add(refresh)
+            yield* Scope.addFinalizer(scope, Effect.sync(() => refreshers.delete(refresh)))
+          }),
         load: Effect.fn("InstructionDiscovery.load")(function* () {
+          yield* Effect.forEach(refreshers, (refresh) => refresh(), { discard: true })
           const files = yield* list()
           if (!Array.isArray(files)) return source(files)
           return source(files.length === 0 ? Instructions.removed : files)
@@ -121,7 +132,20 @@ export function configured(options?: Options) {
 export const node = configured()
 
 function render(files: ReadonlyArray<File>) {
-  return files.map((file) => `Instructions from: ${file.path}\n${file.content}`).join("\n\n")
+  return files.map((file) => `Instructions from: ${label(file)}\n${file.content}`).join("\n\n")
+}
+
+function label(file: File) {
+  if (file.label) return file.label
+  // Older persisted URL sources can still appear in a diff after upgrading.
+  if (!file.path.startsWith("http://") && !file.path.startsWith("https://")) return file.path
+  if (!URL.canParse(file.path)) return "remote instruction"
+  const url = new URL(file.path)
+  url.username = ""
+  url.password = ""
+  url.search = ""
+  url.hash = ""
+  return url.toString()
 }
 
 function renderUpdate(previous: ReadonlyArray<File>, current: ReadonlyArray<File>) {
@@ -132,12 +156,12 @@ function renderUpdate(previous: ReadonlyArray<File>, current: ReadonlyArray<File
     (before, after) => before.content !== after.content,
   )
   return [
-    ...changes.removed.map((file) => `The instructions from ${file.path} no longer apply.`),
+    ...changes.removed.map((file) => `The instructions from ${label(file)} no longer apply.`),
     ...changes.added.map((file) => `New instructions apply from:\n${render([file])}`),
     ...changes.changed.map(({ previous: before, current: after }) => {
-      const patch = createPatch(after.path, before.content, after.content, "", "", { context: 3 })
+      const patch = createPatch(label(after), before.content, after.content, "", "", { context: 3 })
       const diff = [
-        `The instructions from ${after.path} changed. Here's the diff:`,
+        `The instructions from ${label(after)} changed. Here's the diff:`,
         "```diff",
         patch.slice(patch.indexOf("@@")).trimEnd(),
         "```",
