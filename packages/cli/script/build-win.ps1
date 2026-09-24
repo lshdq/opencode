@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [string]$Bun = 'D:\Program\bun-v2\node_modules\@oven\bun-windows-x64\bin\bun.exe',
+    [string]$Bun = 'D:\Program\bun\node_modules\@oven\bun-windows-x64\bin\bun.exe',
     [switch]$BuildOnly,
     [switch]$NoDeploy,
     [switch]$SkipInstall,

@@ -9,6 +9,7 @@ import {
   isolatedEnvironment,
   prepareIsolatedDatabaseDirectory,
   sha256,
+  upstreamAtCommit,
 } from "./windows-runtime"
 
 if (process.platform !== "win32") throw new Error("Windows smoke requires Windows")
@@ -16,7 +17,9 @@ if (!process.argv[2]) throw new Error("Usage: bun script/smoke-win.ts <versioned
 const output = await realpath(process.argv[2])
 await rm(path.join(output, "smoke-result.json"), { force: true })
 const metadata = await Bun.file(path.join(output, "build-metadata.json")).json()
-if (metadata.channel !== channel || metadata.version !== "2.0.12") throw new Error("Unexpected build identity")
+const repo = path.resolve(import.meta.dir, "../../..")
+if (metadata.channel !== channel || metadata.version !== (await upstreamAtCommit(repo, metadata.upstream)).version)
+  throw new Error("Unexpected build identity")
 const binary = await realpath(path.join(output, "compiled", "cli-windows-x64", "bin", "opencode.exe"))
 if ((await sha256(binary)) !== metadata.binarySha256) throw new Error("Binary differs from build metadata")
 const root = await mkdtemp(path.join(output, "smoke-"))

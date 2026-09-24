@@ -12,7 +12,7 @@ import {
   isolatedEnvironment,
   prepareIsolatedDatabaseDirectory,
   sha256,
-  upstream,
+  upstreamAtCommit,
 } from "./windows-runtime"
 import { stopOwned, waitForInfo } from "../test/fixture/service-lifecycle"
 
@@ -20,9 +20,9 @@ if (process.platform !== "win32" || !process.argv[2])
   throw new Error("Usage on Windows: bun <absolute compiled-integration-win.ts> <build-directory>")
 const output = await realpath(process.argv[2])
 const metadata = await Bun.file(path.join(output, "build-metadata.json")).json()
-assert.equal(metadata.upstream, upstream)
+const repo = path.resolve(import.meta.dir, "../../..")
+assert.equal(metadata.version, (await upstreamAtCommit(repo, metadata.upstream)).version)
 assert.equal(metadata.channel, "local")
-assert.equal(metadata.version, "2.0.12")
 const binary = await realpath(path.join(output, "compiled/cli-windows-x64/bin/opencode.exe"))
 assert.equal(await sha256(binary), metadata.binarySha256)
 assert.equal(await sha256(process.execPath), metadata.bunSha256)
@@ -53,11 +53,10 @@ try {
   )
   const databaseDirectory = await prepareIsolatedDatabaseDirectory(root)
 
-  // Build a synthetic baseline fixture from the fixed official generated DDL, not from live data.
+  // Build a synthetic baseline fixture from the recorded upstream generated DDL, not from live data.
   // This tests copy/open/data preservation, not arbitrary historical migrations or rollback of live sessions.
-  const repo = path.resolve(import.meta.dir, "../../..")
-  const schema = await execute(["git", "show", `${upstream}:packages/core/src/database/schema.gen.ts`], repo)
-  const journal = await execute(["git", "show", `${upstream}:packages/core/src/database/migration.gen.ts`], repo)
+  const schema = await execute(["git", "show", `${metadata.upstream}:packages/core/src/database/schema.gen.ts`], repo)
+  const journal = await execute(["git", "show", `${metadata.upstream}:packages/core/src/database/migration.gen.ts`], repo)
   const statements = [...schema.matchAll(/tx\.run\(\s*`((?:\\.|[^`])*)`\s*,?\s*\)/g)].map((match) =>
     match[1].replaceAll("\\`", "`"),
   )
@@ -65,7 +64,7 @@ try {
   assert.ok(statements.length > 20)
   assert.ok(statements.every((sql) => !sql.includes("${")))
   const ids = [...journal.matchAll(/from "\.\/migration\/(.+)\.js"/g)].map((match) => match[1])
-  assert.equal(ids.length, 47)
+  assert.ok(ids.length > 0)
   const baseline = path.join(databaseDirectory, "official-base.db")
   const db = new Database(baseline)
   try {

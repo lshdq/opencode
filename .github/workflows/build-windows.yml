@@ -24,6 +24,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare upstream V2 baseline
+        shell: pwsh
+        run: |
+          $shallow = git rev-parse --is-shallow-repository
+          if ($LASTEXITCODE -ne 0 -or $shallow -ne 'false') { throw "Checkout must contain the full HEAD history" }
+          git fetch --no-tags https://github.com/anomalyco/opencode.git +refs/heads/v2:refs/remotes/upstream/v2
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch the official upstream/v2 ref" }
+          $baseline = git merge-base HEAD refs/remotes/upstream/v2
+          if ($LASTEXITCODE -ne 0 -or -not $baseline) { throw "HEAD and upstream/v2 have no verifiable common ancestor" }
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2

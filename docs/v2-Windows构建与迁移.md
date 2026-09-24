@@ -1,13 +1,12 @@
 # v2 Windows 构建、隔离验证与配置迁移
 
-## 固定基线与工具链
+## 已合入上游基线与工具链
 
-- upstream commit：`080b7671dea45a693b537c1e358e89ab14463d0d`。
-- 上游根 package version：`2.0.12`；Bun：`1.4.2`。
-- 本机便携 Bun：`D:\Program\bun-v2\node_modules\@oven\bun-windows-x64\bin\bun.exe`。
-- 从上述**固定提交的 package.json**读取版本，不 fetch、不查询 npm latest、不改 package 版本或锁文件。
+- 上游基线：构建时对本地 Git 引用执行 `git merge-base HEAD upstream/v2`；上游前进但未合入 fork 的提交不会改变此基线。`upstream/v2` 不存在或无法解析时失败，不自动 fetch。Bun：`1.4.2`。
+- 本机便携 Bun：`D:\Program\bun\node_modules\@oven\bun-windows-x64\bin\bun.exe`（Bun 1.4.2；本机无 Bun PATH）。包装脚本以此为默认路径，也可通过 `-Bun` 显式指定。
+- 从上述**已合入基线提交的根 package.json**读取动态版本（要求 packageManager 为 `bun@1.4.2`）；不查询 npm latest、不改 package 版本或锁文件。产物 `--version`、注册服务及 HTTP 身份须与该版本一致；元数据保留实际基线 SHA，以便之后 `upstream/v2` 移动时重跑旧产物 smoke。
 - `build-metadata.json` 独立记录 fork HEAD、dirty 状态、Git status、实际源码文件哈希清单及集合哈希、bun/lock/二进制 SHA256、构建参数和时间。清单区分 tracked/untracked、file/symlink/deleted，symlink 记录目标及目标文本哈希。未提交和未跟踪源码亦纳入；构建期间源码改变则拒绝部署。
-- 同时保存相对 HEAD 的二进制安全 `source.diff`（含 staged 与 unstaged 的最终内容差异），并将其 SHA256 写入 metadata；部署和 CI artifact 一并保留。未跟踪文件内容由逐文件哈希追溯，不把“HEAD 仍等于基线”误解为未打补丁。
+- 同时在构建目录保存相对 HEAD 的二进制安全 `source.diff`（含 staged 与 unstaged 的最终内容差异），并将其 SHA256 写入 metadata；CI artifact 一并保留，单文件部署不复制这些元数据。未跟踪文件内容由逐文件哈希追溯，不把“HEAD 仍等于基线”误解为未打补丁。
 - `source.diff` 通过 `executeRaw` 取得 Git stdout 的原始字节，直接以 Uint8Array 落盘，不解码、不 trim、不补换行；版本、SHA、路径等元数据继续使用规范化文本 `execute`。这样保留末行尾空白、LF/CRLF、无末尾换行标记和 binary patch。阶段7 R1修复前的制品差异文件可能被截断，不能作为最终交付，应重新构建、冒烟并核验，而不是手工补一个换行后复用旧制品。
 
 ## 构建命令
@@ -27,11 +26,11 @@
 
 包装调用官方 `packages/cli/script/build.ts --single --skip-web-ui --skip-install --outdir=<唯一目录>`。
 安装由包装提前执行 `bun install --frozen-lockfile`，不使用官方 build.ts 的跨平台、可能写 manifest/lock 的安装分支。
-输出：`packages/cli/dist/windows/v2-2.0.12-<source-hash>-<timestamp>-<nonce>/`；不重用/清空旧版本目录。
+输出：`packages/cli/dist/windows/v2-<上游基线版本>-<source-hash>-<timestamp>-<nonce>/`；不重用/清空旧构建目录。
 `--skip-web-ui` 表示不构建浏览器资源，不能据此宣称浏览器 UI 已通过验收。
 
-默认部署父目录 `D:\Program\opencode` 必须已存在；只创建其新版本子目录，**绝不写默认 opencode.exe、PATH、快捷方式或启动服务**。
-`-DeployRoot` 可指定已存在的替代父目录。部署前 smoke 必须成功；复制后二进制哈希再次验证。
+默认部署父目录 `D:\Program\opencode` 必须已存在；仅排他复制单个 `opencode-<上游基线版本>-<本地时间YYYYMMDDHHmm>.exe`，时间精确到分钟，同分钟重试若同名将失败而不覆盖已有文件。不创建版本子目录，绝不写默认 `opencode.exe`、PATH、快捷方式或启动服务。
+`-DeployRoot` 可指定已存在的替代父目录。部署前隔离 cold/warm smoke 必须成功；复制后校验二进制哈希，在隔离环境运行**已改名** exe 的 `--version` 并核对基线版本。元数据、smoke 报告和 source.diff **只在构建目录保留**，不随部署复制。
 失败产物保留在独立构建目录；不得将失败/未冒烟产物作为验收成功制品。
 
 ### Windows checkout 环境
@@ -39,7 +38,7 @@
 Git 设置 `core.symlinks=false` 时，app/enterprise 的 `src/custom-elements.d.ts` 可能被检出为路径文本，导致 TS1128。使用：
 
 ```powershell
-& 'D:\Program\bun-v2\node_modules\@oven\bun-windows-x64\bin\bun.exe' ./packages/cli/script/repair-windows-links.ts
+& 'D:\Program\bun\node_modules\@oven\bun-windows-x64\bin\bun.exe' ./packages/cli/script/repair-windows-links.ts
 ```
 
 只修复这两个 mode=120000 且内容等于索引目标的占位文件，通过命令级 `git -c core.symlinks=true checkout-index` 建立真实链接；不更改全局/local Git 配置或索引。不覆盖已编辑的文件，缺少创建 symlink 权限时明确失败。构建包装和 CI 已调用该预检。
@@ -60,8 +59,8 @@ smoke 使用新建目录中的 HOME/USERPROFILE、APPDATA/LOCALAPPDATA、XDG con
 仅读取该新目录的 `service-local.json`，绝不执行日常程序的 `service get password/status/stop`。终止前重新核对注册所有权；失败清理只操作持有的子进程对象。凭证/测试数据库结束后删除，报告仅保存非敏感身份及耗时。
 
 ```powershell
-# 可对保留构建重新执行 smoke；传入包含 build-metadata.json 的构建目录
-& 'D:\Program\bun-v2\node_modules\@oven\bun-windows-x64\bin\bun.exe' `
+# 可对保留构建重新执行 smoke；依据该产物记录的上游提交而非当前 upstream/v2 核对版本
+& 'D:\Program\bun\node_modules\@oven\bun-windows-x64\bin\bun.exe' `
   ./packages/cli/script/smoke-win.ts '<构建目录>'
 ```
 
@@ -100,7 +99,7 @@ if (-not (Test-Path -LiteralPath $parent -PathType Container)) { throw '父目�
 $directory = Join-Path $parent 'opencode-v2-private-db'
 if (Test-Path -LiteralPath $directory) { throw '拒绝修改已有目录，请选择全新的专用目录' }
 New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
-& 'D:\Program\bun-v2\node_modules\@oven\bun-windows-x64\bin\bun.exe' -e `
+& 'D:\Program\bun\node_modules\@oven\bun-windows-x64\bin\bun.exe' -e `
   'import { FileMode } from "./packages/util/src/file-mode.ts"; await FileMode.directory(process.argv[1], { owned: true })' `
   $directory
 if ($LASTEXITCODE -ne 0) { throw '私有目录准备失败，不要创建或复制数据库' }
@@ -121,7 +120,7 @@ $env:OPENCODE_DB = Join-Path $directory 'opencode.db'
 ## 源码启动诊断
 
 ```powershell
-& 'D:\Program\bun-v2\node_modules\@oven\bun-windows-x64\bin\bun.exe' `
+& 'D:\Program\bun\node_modules\@oven\bun-windows-x64\bin\bun.exe' `
   ./packages/cli/script/diagnose-source-win.ts 'D:\works\thirdparty\opencode-v2' `
   serve --service --port 0 --print-logs
 ```
@@ -132,4 +131,4 @@ $env:OPENCODE_DB = Join-Path $directory 'opencode.db'
 
 ## CI
 
-`.github/workflows/build-windows.yml` 使用 Windows runner 和 Bun 1.4.2，冻结安装、小测试、独立构建与 smoke；明确 `-NoDeploy`，仅上传 bin、metadata 和脱敏 smoke 报告。不提交、不推送、不发布 release。
+`.github/workflows/build-windows.yml` 使用 Windows runner 和 Bun 1.4.2，冻结安装、小测试、独立构建与 smoke；明确 `-NoDeploy`，仅上传 bin、metadata 和脱敏 smoke 报告。不提交、不推送、不发布 release。CI 在完整历史 checkout 后，显式从官方 `anomalyco/opencode` 的 `v2` 分支获取本地 `upstream/v2` 引用，并在安装依赖前验证其与 HEAD 存在共同祖先；构建脚本本身不会自动 fetch。离线运行或上游不可访问时，该 CI 前置步骤会失败。

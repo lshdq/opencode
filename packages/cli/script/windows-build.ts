@@ -1,20 +1,27 @@
-import { cp, mkdir, stat } from "node:fs/promises"
+import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import path from "node:path"
-import { channel, execute, executeRaw, sha256, sourceIdentity, upstream } from "./windows-runtime"
+import {
+  channel,
+  deployVerifiedWindowsBinary,
+  execute,
+  executeRaw,
+  sha256,
+  sourceIdentity,
+  upstreamBaseline,
+} from "./windows-runtime"
 import { repairWindowsLinks } from "./repair-windows-links"
 
 if (process.platform !== "win32" || process.arch !== "x64") throw new Error("Windows x64 is required")
 if (Bun.version !== "1.4.2") throw new Error("Bun 1.4.2 is required")
 const root = path.resolve(import.meta.dir, "../../..")
 await repairWindowsLinks(root)
-const base = JSON.parse(await execute(["git", "show", `${upstream}:package.json`], root))
-if (base.version !== "2.0.12" || base.packageManager !== "bun@1.4.2") throw new Error("Unexpected upstream metadata")
+const base = await upstreamBaseline(root)
 const lock = await sha256(path.join(root, "bun.lock"))
 const env = {
   ...process.env,
   PATH: `${path.dirname(process.execPath)};${process.env.PATH ?? ""}`,
-  BUN_INSTALL_CACHE_DIR: process.env.BUN_INSTALL_CACHE_DIR ?? "D:\\Program\\bun-v2\\cache",
-  ELECTRON_CACHE: process.env.ELECTRON_CACHE ?? "D:\\Program\\bun-v2\\electron-cache",
+  BUN_INSTALL_CACHE_DIR: process.env.BUN_INSTALL_CACHE_DIR ?? "D:\\Program\\bun\\cache",
+  ELECTRON_CACHE: process.env.ELECTRON_CACHE ?? "D:\\Program\\bun\\electron-cache",
   HUSKY: "0",
   OPENCODE_CHANNEL: channel,
   OPENCODE_VERSION: base.version,
@@ -60,7 +67,7 @@ if ((await sourceIdentity(root)).sha256 !== identity.sha256)
 const binary = path.join(output, "compiled", "cli-windows-x64", "bin", "opencode.exe")
 const metadata = {
   id,
-  upstream,
+  upstream: base.commit,
   version: base.version,
   channel,
   forkCommit: commit,
@@ -89,22 +96,10 @@ if (process.argv.includes("--no-deploy")) process.exit(0)
 const deploy = path.resolve(
   process.argv.find((arg) => arg.startsWith("--deploy-root="))?.slice(14) ?? "D:\\Program\\opencode",
 )
-if (!(await stat(deploy)).isDirectory()) throw new Error("Deployment parent must already exist")
-const destination = path.join(deploy, id)
-await mkdir(destination) // No overwrite; never activate the default executable or change PATH.
-await cp(path.dirname(binary), path.join(destination, "bin"), { recursive: true, errorOnExist: true, force: false })
-await cp(path.join(output, "build-metadata.json"), path.join(destination, "build-metadata.json"), {
-  errorOnExist: true,
-  force: false,
-})
-await cp(path.join(output, "smoke-result.json"), path.join(destination, "smoke-result.json"), {
-  errorOnExist: true,
-  force: false,
-})
-await cp(path.join(output, "source.diff"), path.join(destination, "source.diff"), {
-  errorOnExist: true,
-  force: false,
-})
-if ((await sha256(path.join(destination, "bin", "opencode.exe"))) !== metadata.binarySha256)
-  throw new Error("Deployed binary hash mismatch")
-console.log(`Versioned deployment (NOT activated): ${destination}`)
+const checkRoot = await mkdtemp(path.join(output, "deploy-check-"))
+try {
+  const destination = await deployVerifiedWindowsBinary(binary, deploy, base.version, metadata.binarySha256, checkRoot)
+  console.log(`Versioned deployment (NOT activated): ${destination}`)
+} finally {
+  await rm(checkRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+}

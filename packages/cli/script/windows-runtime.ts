@@ -1,9 +1,71 @@
 import { createHash } from "node:crypto"
-import { lstat, mkdir, readlink } from "node:fs/promises"
+import { constants, copyFile, lstat, mkdir, readlink, rm, stat } from "node:fs/promises"
 import path from "node:path"
 
-export const upstream = "080b7671dea45a693b537c1e358e89ab14463d0d"
 export const channel = "local"
+
+export async function upstreamBaseline(root: string) {
+  const commit = await execute(["git", "merge-base", "HEAD", "upstream/v2"], root)
+  return { commit, ...(await upstreamAtCommit(root, commit)) }
+}
+
+export async function upstreamAtCommit(root: string, commit: string) {
+  if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error("Invalid upstream baseline commit")
+  const packageJSON: unknown = JSON.parse(await execute(["git", "show", `${commit}:package.json`], root))
+  if (
+    typeof packageJSON !== "object" ||
+    packageJSON === null ||
+    !("version" in packageJSON) ||
+    typeof packageJSON.version !== "string" ||
+    !/^\d+\.\d+\.\d+$/.test(packageJSON.version) ||
+    !("packageManager" in packageJSON) ||
+    packageJSON.packageManager !== "bun@1.4.2"
+  )
+    throw new Error("Unexpected upstream baseline package metadata")
+  return { version: packageJSON.version }
+}
+
+export async function deployWindowsBinary(
+  binary: string,
+  root: string,
+  version: string,
+  expectedHash: string,
+  at = new Date(),
+) {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Invalid deployment version")
+  if (!(await stat(root)).isDirectory()) throw new Error("Deployment parent must already exist")
+  const stamp = [at.getFullYear(), at.getMonth() + 1, at.getDate(), at.getHours(), at.getMinutes()]
+    .map((value, index) => String(value).padStart(index === 0 ? 4 : 2, "0"))
+    .join("")
+  const destination = path.join(root, `opencode-${version}-${stamp}.exe`)
+  // Exclusive creation prevents a same-minute rerun (including a concurrent one) from overwriting an older build.
+  await copyFile(binary, destination, constants.COPYFILE_EXCL)
+  if ((await sha256(destination)) !== expectedHash) {
+    await rm(destination)
+    throw new Error("Deployed binary hash mismatch")
+  }
+  return destination
+}
+
+export async function deployVerifiedWindowsBinary(
+  binary: string,
+  root: string,
+  version: string,
+  expectedHash: string,
+  checkRoot: string,
+  at = new Date(),
+) {
+  const destination = await deployWindowsBinary(binary, root, version, expectedHash, at)
+  // Validate the renamed executable, not the original build path; only our exclusive copy may be removed on failure.
+  try {
+    if (cliVersion(await execute([destination, "--version"], checkRoot, isolatedEnvironment(checkRoot), 30_000)) !== version)
+      throw new Error("Renamed deployed binary version mismatch")
+  } catch (error) {
+    await rm(destination)
+    throw error
+  }
+  return destination
+}
 
 export function cliVersion(output: string) {
   const match = /^(?:opencode v)?(\d+\.\d+\.\d+)$/.exec(output.trim())
