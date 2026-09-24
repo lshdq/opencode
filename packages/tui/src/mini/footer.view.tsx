@@ -204,8 +204,9 @@ export function RunFooterView(props: RunFooterViewProps) {
   const variantCycle = () => monoShortcut(shortcuts.all("variant.cycle") ?? "", props.mono)
   const clearShortcut = () => shortcut("prompt.clear")
   const busy = createMemo(() => props.state().phase === "running")
-  const started = createMemo(() => (busy() ? performance.now() : undefined))
-  const statusWidth = createMemo(() => Math.max(1, width() - (busy() ? 2 : 0)))
+  const working = createMemo(() => busy() || activeTabs().length > 0)
+  const started = createMemo(() => (working() ? performance.now() : undefined))
+  const statusWidth = createMemo(() => Math.max(1, width() - (working() ? 2 : 0)))
   const armed = createMemo(() => props.state().interrupt > 0)
   const exiting = createMemo(() => props.state().exit > 0)
   const usage = createMemo(() => props.state().usage)
@@ -409,6 +410,7 @@ export function RunFooterView(props: RunFooterViewProps) {
     }
 
     if (notice()) return notice()
+    if (!busy() && activeTabs().length > 0) return "Subagent running"
     if (!footerDetails()) return shell() ? "Shell" : ""
     if (busy()) {
       if (stateStatus() === "reconnecting") return "reconnecting"
@@ -438,7 +440,7 @@ export function RunFooterView(props: RunFooterViewProps) {
       return theme().warning
     }
 
-    if (busy() || notice().length > 0 || stateStatus().length > 0) {
+    if (working() || notice().length > 0 || stateStatus().length > 0) {
       return theme().text
     }
 
@@ -496,7 +498,7 @@ export function RunFooterView(props: RunFooterViewProps) {
       cost: footerDetails() ? cost() : undefined,
       provider: info?.provider,
       menu: commandHint(),
-      spinner: busy() ? (props.mono ? "*" : "\u25aa") : undefined,
+      spinner: working() ? (props.mono ? "*" : "\u25aa") : undefined,
     })
   })
   const statusSections = createMemo(() => statuslineLayout().groups.filter((group) => group.id !== "spinner"))
@@ -962,7 +964,7 @@ export function RunFooterView(props: RunFooterViewProps) {
                 flexShrink={0}
                 backgroundColor="transparent"
               >
-                <Show when={busy()}>
+                <Show when={working()}>
                   <box id="mini-work-spinner" width={1} flexShrink={0}>
                     <OneCellSpinner
                       animation={props.mono ? SEED_MONO : WORK_SPINNERS[props.miniSettings().work_spinner]}

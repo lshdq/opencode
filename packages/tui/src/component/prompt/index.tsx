@@ -206,6 +206,10 @@ export function Prompt(props: PromptProps) {
   const dialog = useDialog()
   const toast = useToast()
   const status = createMemo(() => data.session.status(props.sessionID ?? ""))
+  const childRunning = createMemo(() =>
+    status() === "idle" && !!props.sessionID &&
+    data.session.family(props.sessionID).some((id) => id !== props.sessionID && data.session.status(id) === "running"),
+  )
   const history = usePromptHistory()
   const stash = usePromptStash()
   const keymap = Keymap.use()
@@ -2017,6 +2021,16 @@ export function Prompt(props: PromptProps) {
                       <text fg={theme.hue.accent[500]} wrapMode="none" truncate>
                         (new worktree)
                       </text>
+                    </box>
+                  </Match>
+                  <Match when={childRunning()}>
+                    <box flexDirection="row" gap={1} flexGrow={1} minWidth={0} justifyContent="flex-start">
+                      <box marginLeft={1}>
+                        <Show when={animationsEnabled()} fallback={<text fg={theme.text.muted}>[⋯]</text>}>
+                          <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
+                        </Show>
+                      </box>
+                      <text fg={theme.text.base} wrapMode="none" truncate flexShrink={1}>Subagent working</text>
                     </box>
                   </Match>
                   <Match when={true}>

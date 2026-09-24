@@ -164,7 +164,7 @@ async function renderFooter(
   } = {},
 ) {
   const [view, setView] = createSignal<FooterView>(input.view ?? { type: "prompt" })
-  const [subagents] = createSignal<FooterSubagentState>(
+  const [subagents, setSubagents] = createSignal<FooterSubagentState>(
     input.subagents ?? { tabs: [], details: {}, permissions: [], forms: [] },
   )
   const [state, setState] = footerState(input.state)
@@ -231,6 +231,7 @@ async function renderFooter(
     ...app,
     setView,
     setState,
+    setSubagents,
     setMiniSettings,
     setQueuedPrompts,
     cleanup() {
@@ -1891,6 +1892,92 @@ test("direct footer keeps the stop action before the menu at minimum width", asy
     await app.renderOnce()
     expect(app.captureCharFrame()).toContain("esc stop")
     expect(app.captureCharFrame()).not.toContain("menu")
+  } finally {
+    app.cleanup()
+  }
+})
+
+test.each([
+  { width: 24, mono: false, animations: false },
+  { width: 24, mono: false, animations: true },
+  { width: 24, mono: true, animations: false },
+  { width: 24, mono: true, animations: true },
+  { width: 80, mono: false, animations: false },
+  { width: 80, mono: true, animations: true },
+])("mini follows parent running, child-only running, and idle ($width, mono=$mono, animations=$animations)", async (options) => {
+  const app = await renderFooter({
+    width: options.width,
+    mono: options.mono,
+    tuiConfig: createTuiResolvedConfig({ animations: options.animations }),
+    state: { phase: "running" },
+    subagents: {
+      tabs: [subagent({ sessionID: "s-1", label: "Explore", description: "Inspect auth flow" })],
+      details: {},
+      permissions: [],
+      forms: [],
+    },
+  })
+  try {
+    await app.renderOnce()
+    const parent = app.captureCharFrame().split("\n")[footerStatusline(app.renderer.root).y]!
+    expect(parent).toMatch(/esc (stop|interrupt)/)
+    expect(parent).not.toContain("Subagent running")
+    expect(footerStatusline(app.renderer.root).findDescendantById("mini-work-spinner")?.width).toBe(1)
+
+    app.setState((state) => ({ ...state, phase: "idle" }))
+    await app.renderOnce()
+    const child = app.captureCharFrame().split("\n")[footerStatusline(app.renderer.root).y]!
+    expect(child).toContain("Subagent running")
+    expect(child).not.toMatch(/\b(stop|interrupt)\b/)
+    const frames = options.mono
+      ? options.animations
+        ? SEED_MONO.frames
+        : ["*"]
+      : options.animations
+        ? BLOCK_SOFT_SLIDE.frames
+        : ["\u25aa"]
+    expect(frames).toContain(Array.from(child)[0]!)
+    expect(footerStatusline(app.renderer.root).findDescendantById("mini-work-spinner")?.width).toBe(1)
+
+    app.setSubagents((state) => ({
+      ...state,
+      tabs: state.tabs.map((tab) => ({ ...tab, status: "completed" as const })),
+    }))
+    await app.renderOnce()
+    const idle = app.captureCharFrame().split("\n")[footerStatusline(app.renderer.root).y]!
+    expect(idle).not.toContain("Subagent running")
+    expect(idle).not.toMatch(/\b(stop|interrupt)\b/)
+    expect(footerStatusline(app.renderer.root).findDescendantById("mini-work-spinner")).toBeUndefined()
+  } finally {
+    app.cleanup()
+  }
+})
+
+test("mini retains the child-only indicator in a narrow footer with details hidden", async () => {
+  const app = await renderFooter({
+    width: 16,
+    tuiConfig: createTuiResolvedConfig({ animations: false }),
+    miniSettings: { ...resolveMiniSettings(), footer: "hide" },
+    subagents: {
+      tabs: [subagent({ sessionID: "s-1", label: "Explore", description: "Inspect auth flow", status: "running" })],
+      details: {},
+      permissions: [],
+      forms: [],
+    },
+  })
+  try {
+    await app.renderOnce()
+    const statusline = footerStatusline(app.renderer.root)
+    const text = app
+      .captureCharFrame()
+      .split("\n")
+      .slice(statusline.y, statusline.y + statusline.height)
+      .map((line) => line.trim())
+      .join(" ")
+    expect(statusline.height).toBe(2)
+    expect(text).toContain("Subagent running")
+    expect(text).not.toMatch(/\b(stop|interrupt)\b/)
+    expect(statusline.findDescendantById("mini-work-spinner")?.width).toBe(1)
   } finally {
     app.cleanup()
   }
