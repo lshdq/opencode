@@ -36,3 +36,15 @@ RELEASE_REVIEW.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# Keep local OpenCode data ignored, except the two fork-maintained skill guides.
+!/.opencode/
+/.opencode/*
+!/.opencode/skills/
+/.opencode/skills/*
+!/.opencode/skills/fork-development/
+!/.opencode/skills/merge-upstream/
+/.opencode/skills/fork-development/*
+/.opencode/skills/merge-upstream/*
+!/.opencode/skills/fork-development/SKILL.md
+!/.opencode/skills/merge-upstream/SKILL.md
