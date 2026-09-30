@@ -196,8 +196,20 @@ describe("OpenAI Responses route", () => {
           name: "crm",
           description: "Customer management",
           tools: [
-            { type: "function", name: "lookup", description: "Look up a customer", parameters: {}, strict: false },
-            { type: "function", name: "orders", description: "List customer orders", parameters: {}, strict: false },
+            {
+              type: "function",
+              name: "lookup",
+              description: "Look up a customer",
+              parameters: { type: "object" },
+              strict: false,
+            },
+            {
+              type: "function",
+              name: "orders",
+              description: "List customer orders",
+              parameters: { type: "object" },
+              strict: false,
+            },
           ],
         },
       ])
@@ -232,7 +244,15 @@ describe("OpenAI Responses route", () => {
           type: "namespace",
           name: "crm",
           description: "Customer management",
-          tools: [{ type: "function", name: "orders_list", description: "List orders", parameters: {}, strict: false }],
+          tools: [
+            {
+              type: "function",
+              name: "orders_list",
+              description: "List orders",
+              parameters: { type: "object" },
+              strict: false,
+            },
+          ],
         },
       ])
     }),
@@ -1925,7 +1945,7 @@ describe("OpenAI Responses route", () => {
       expect(prepared.body.prompt_cache_key).toBe("session_123")
       expect(prepared.body.include).toEqual(["reasoning.encrypted_content"])
       expect(prepared.body.reasoning).toEqual({ effort: "high", summary: "auto" })
-      expect(prepared.body.text).toEqual({ verbosity: "low" })
+      expect(prepared.body.text).toBeUndefined()
       expect(prepared.body.metadata).toEqual({ environment: "test", tenant: "acme" })
       expect(prepared.body.safety_identifier).toBe("user_123")
       expect(prepared.body.stream_options).toEqual({ include_obfuscation: false })
@@ -4973,6 +4993,42 @@ describe("OpenAI Responses route", () => {
         reason: { _tag: "ProviderInternal" },
         message: "server_error: Upstream model unavailable",
       })
+    }),
+  )
+
+  it.effect("retains the token-sharing HTTP 429 body for retry hooks", () =>
+    Effect.gen(function* () {
+      const body = JSON.stringify({ error: { code: "subscription_sharing_usage_limit_exceeded", message: "Rate limit exceeded" } })
+      const error = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(body, { status: 429, headers: { "content-type": "application/json" } }),
+        ),
+        Effect.flip,
+      )
+
+      expect(error).toMatchObject({ reason: { _tag: "RateLimit", http: { status: 429 }, body } })
+    }),
+  )
+
+  it.effect("retains the token-sharing response.failed event for retry hooks", () =>
+    Effect.gen(function* () {
+      const error = yield* LLMClient.generate(request).pipe(
+        Effect.provide(
+          fixedResponse(
+            sseEvents({
+              type: "response.failed",
+              response: {
+                id: "resp_usage_limit",
+                error: { code: "subscription_sharing_usage_limit_exceeded", message: "Rate limit exceeded" },
+              },
+            }),
+          ),
+        ),
+        Effect.flip,
+      )
+
+      expect(error).toMatchObject({ reason: { _tag: "RateLimit" } })
+      expect(error.reason.body).toContain("subscription_sharing_usage_limit_exceeded")
     }),
   )
 

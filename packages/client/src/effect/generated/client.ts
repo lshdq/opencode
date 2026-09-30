@@ -6,6 +6,9 @@ import { HttpApiClient } from "effect/unstable/httpapi"
 import { ClientApi } from "../../contract"
 import type {
   ServerInfoOutput,
+  ServerPairOutput,
+  ServerConnectInput,
+  ServerConnectOutput,
   LocationGetInput,
   LocationGetOutput,
   LocationReloadOutput,
@@ -150,6 +153,9 @@ import type {
   McpDisconnectOutput,
   McpResourceCatalogInput,
   McpResourceCatalogOutput,
+  CredentialListOutput,
+  CredentialCreateInput,
+  CredentialCreateOutput,
   CredentialUpdateInput,
   CredentialUpdateOutput,
   CredentialActivateInput,
@@ -281,7 +287,19 @@ const preserveStream =
 const EndpointServerInfo = (raw: RawClient["server.server"]) => () =>
   preserveEffect<ServerInfoOutput>()(raw["server.info"]({}).pipe(Effect.mapError(mapClientError)))
 
-const adaptGroupServer = (raw: RawClient["server.server"]) => ({ info: EndpointServerInfo(raw) })
+const EndpointServerPair = (raw: RawClient["server.server"]) => () =>
+  preserveEffect<ServerPairOutput>()(raw["server.pair"]({}).pipe(Effect.mapError(mapClientError)))
+
+const EndpointServerConnect = (raw: RawClient["server.server"]) => (input: ServerConnectInput) =>
+  preserveEffect<ServerConnectOutput>()(
+    raw["server.connect"]({ params: { code: input["code"] } }).pipe(Effect.mapError(mapClientError)),
+  )
+
+const adaptGroupServer = (raw: RawClient["server.server"]) => ({
+  info: EndpointServerInfo(raw),
+  pair: EndpointServerPair(raw),
+  connect: EndpointServerConnect(raw),
+})
 
 const EndpointLocationGet = (raw: RawClient["server.location"]) => (input?: LocationGetInput) =>
   preserveEffect<LocationGetOutput>()(
@@ -1006,6 +1024,30 @@ const adaptGroupMcp = (raw: RawClient["server.mcp"]) => ({
   resource: { catalog: EndpointMcpResourceCatalog(raw) },
 })
 
+const EndpointCredentialList = (raw: RawClient["server.credential"]) => () =>
+  preserveEffect<CredentialListOutput>()(
+    raw["credential.list"]({}).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointCredentialCreate = (raw: RawClient["server.credential"]) => (input: CredentialCreateInput) =>
+  preserveEffect<CredentialCreateOutput>()(
+    raw["credential.create"]({
+      payload: {
+        id: input["id"],
+        integrationID: input["integrationID"],
+        label: input["label"],
+        value: input["value"],
+        activate: input["activate"],
+      },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const EndpointCredentialUpdate = (raw: RawClient["server.credential"]) => (input: CredentialUpdateInput) =>
   preserveEffect<CredentialUpdateOutput>()(
     raw["credential.update"]({
@@ -1027,6 +1069,8 @@ const EndpointCredentialRemove = (raw: RawClient["server.credential"]) => (input
   )
 
 const adaptGroupCredential = (raw: RawClient["server.credential"]) => ({
+  list: EndpointCredentialList(raw),
+  create: EndpointCredentialCreate(raw),
   update: EndpointCredentialUpdate(raw),
   activate: EndpointCredentialActivate(raw),
   remove: EndpointCredentialRemove(raw),

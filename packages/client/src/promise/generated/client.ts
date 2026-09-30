@@ -1,5 +1,8 @@
 import type {
   ServerInfoOutput,
+  ServerPairOutput,
+  ServerConnectInput,
+  ServerConnectOutput,
   LocationGetInput,
   LocationGetOutput,
   LocationReloadOutput,
@@ -144,6 +147,9 @@ import type {
   McpDisconnectOutput,
   McpResourceCatalogInput,
   McpResourceCatalogOutput,
+  CredentialListOutput,
+  CredentialCreateInput,
+  CredentialCreateOutput,
   CredentialUpdateInput,
   CredentialUpdateOutput,
   CredentialActivateInput,
@@ -414,6 +420,22 @@ export function make(options: ClientOptions) {
       info: (requestOptions?: RequestOptions) =>
         request<ServerInfoOutput>(
           { method: "GET", path: `/api/info`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
+          requestOptions,
+        ),
+      pair: (requestOptions?: RequestOptions) =>
+        request<ServerPairOutput>(
+          { method: "POST", path: `/api/pair`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
+          requestOptions,
+        ),
+      connect: (input: ServerConnectInput, requestOptions?: RequestOptions) =>
+        request<ServerConnectOutput>(
+          {
+            method: "GET",
+            path: `/auth/connect/${encodeURIComponent(input.code)}`,
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
           requestOptions,
         ),
     },
@@ -1373,6 +1395,29 @@ export function make(options: ClientOptions) {
       },
     },
     credential: {
+      list: (requestOptions?: RequestOptions) =>
+        request<{ readonly data: CredentialListOutput }>(
+          { method: "GET", path: `/api/credential`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
+          requestOptions,
+        ).then((value) => value.data),
+      create: (input: CredentialCreateInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: CredentialCreateOutput }>(
+          {
+            method: "POST",
+            path: `/api/credential`,
+            body: {
+              id: input["id"],
+              integrationID: input["integrationID"],
+              label: input["label"],
+              value: input["value"],
+              activate: input["activate"],
+            },
+            successStatus: 200,
+            declaredStatuses: [400, 401, 409],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
       update: (input: CredentialUpdateInput, requestOptions?: RequestOptions) =>
         request<CredentialUpdateOutput>(
           {
