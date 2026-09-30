@@ -17,7 +17,8 @@ const pending = new Map<
   { raw: string; promise: Promise<MarkdownCacheEntry>; controller: AbortController; consumers: Set<symbol> }
 >()
 // Mermaid registers hooks on the shared instance that overwrite link attributes.
-const purifier = typeof window !== "undefined" ? DOMPurify(window) : DOMPurify
+const purifier =
+  typeof window !== "undefined" ? DOMPurify(window as unknown as Parameters<typeof DOMPurify>[0]) : DOMPurify
 const config = {
   USE_PROFILES: { html: true, mathMl: true },
   SANITIZE_NAMED_PROPS: true,
