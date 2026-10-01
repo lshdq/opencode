@@ -102,6 +102,7 @@ type ShellWait = {
   eventID: string
   messageID: string
   id?: string
+  settled?: boolean
   resolve: () => void
   abort: () => void
 }
@@ -118,6 +119,11 @@ type Attempt = {
 type ReplayBuffer = {
   attempt: Attempt
   events: RunV2Event[]
+}
+
+type HydrateOptions = {
+  render: boolean
+  reconnect?: boolean
 }
 
 type ToolState = {
@@ -146,8 +152,19 @@ type State = {
   quietText: Map<string, Array<{ partID: string; text: string }>>
   skillMessages: Set<string>
   shellCommands: Map<string, string>
+  /** Best-effort origin directory for shell lifecycle reconciliation. */
+  shellLocations: Map<string, string>
   shellStarted: Set<string>
   shellEnded: Set<string>
+  /** Shell lifecycle facts. Kept separate from transcript rendering state. */
+  shellSettled: Set<string>
+  /** Shell start commits already present in the current transcript. */
+  shellRenderedStarted: Set<string>
+  /** Shell terminal commits already present in the current transcript. */
+  shellRenderedEnded: Set<string>
+  /** Foreground requests can settle before their started event is delivered. */
+  shellSettledEvents: Set<string>
+  shellActive: Set<string>
   shellWait?: ShellWait
   wait?: Wait
   connected: boolean
@@ -395,6 +412,7 @@ const catalogEvents = new Set([
 // live shell.ended event usually lands within the same tick, but hold the turn
 // briefly so the output commit renders inside it.
 const SHELL_OUTPUT_GRACE_MS = 1500
+const SHELL_TOMBSTONE_LIMIT = 256
 
 function skillCommit(messageID: string, name: string, skillID = messageID): StreamCommit {
   return {
@@ -482,6 +500,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
   let generation = 0
   let activeAttempt: Attempt | undefined
   let settlementClient: OpenCodeClient | undefined
+  let deferredCommits: StreamCommit[] | undefined
   input.signal?.addEventListener("abort", () => controller.abort(), { once: true })
   const state: State = {
     permissions: [],
@@ -499,8 +518,14 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     quietText: new Map(),
     skillMessages: new Set(),
     shellCommands: new Map(),
+    shellLocations: new Map(),
     shellStarted: new Set(),
     shellEnded: new Set(),
+    shellSettled: new Set(),
+    shellRenderedStarted: new Set(),
+    shellRenderedEnded: new Set(),
+    shellSettledEvents: new Set(),
+    shellActive: new Set(),
     connected: false,
     closed: false,
     initial: true,
@@ -511,6 +536,8 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     admitted: new Set(),
     stepModel: undefined,
   }
+  let shellInventoryLocation = input.location
+  let shellInventoryGeneration = 0
   let readyResolve!: () => void
   let readyReject!: (error: unknown) => void
   const ready = new Promise<void>((resolve, reject) => {
@@ -552,15 +579,93 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
   })
   controller.signal.addEventListener("abort", () => subagents.close(), { once: true })
 
-  // The one "go idle" transition, shared by settlement, terminal events, and the
-  // interrupt ack so the flag and the paint cannot drift apart.
-  const paintIdle = (status: string) => {
-    state.rootActive = false
-    write([], { phase: "idle", status })
+  const hasActiveShells = () => state.shellActive.size > 0
+
+  const rememberBounded = (set: Set<string>, id: string) => {
+    set.delete(id)
+    set.add(id)
+    if (set.size <= SHELL_TOMBSTONE_LIMIT) return
+    const oldest = set.values().next().value
+    if (oldest !== undefined) set.delete(oldest)
   }
 
-  const write = (commits: StreamCommit[], patch?: Pick<FooterPatch, "phase" | "status" | "usage">) => {
+  const rememberShellSettled = (id: string) => rememberBounded(state.shellSettled, id)
+  const rememberShellSettledEvent = (id: string) => rememberBounded(state.shellSettledEvents, id)
+  const rememberShellRenderedStarted = (id: string) => rememberBounded(state.shellRenderedStarted, id)
+  const rememberShellRenderedEnded = (id: string) => rememberBounded(state.shellRenderedEnded, id)
+  const rememberShellLocation = (id: string, location: string | undefined) => {
+    if (location && !state.shellLocations.has(id)) state.shellLocations.set(id, location)
+  }
+  const settleShell = (id: string) => {
+    rememberShellSettled(id)
+    state.shellCommands.delete(id)
+    state.shellLocations.delete(id)
+  }
+
+  const shellLifecycleSnapshot = () => ({
+    active: new Set(state.shellActive),
+    commands: new Map(state.shellCommands),
+    locations: new Map(state.shellLocations),
+    started: new Set(state.shellStarted),
+    ended: new Set(state.shellEnded),
+    settled: new Set(state.shellSettled),
+    settledEvents: new Set(state.shellSettledEvents),
+  })
+  const restoreShellLifecycle = (snapshot: ReturnType<typeof shellLifecycleSnapshot>) => {
+    state.shellActive = new Set(snapshot.active)
+    state.shellCommands = new Map(snapshot.commands)
+    state.shellLocations = new Map(snapshot.locations)
+    state.shellStarted = new Set(snapshot.started)
+    state.shellEnded = new Set(snapshot.ended)
+    state.shellSettled = new Set(snapshot.settled)
+    state.shellSettledEvents = new Set(snapshot.settledEvents)
+  }
+
+  const updateShellInventoryLocation = (location: LocationRef | undefined) => {
+    if (!location || shellInventoryLocation?.directory === location.directory) return
+    shellInventoryLocation = { directory: location.directory }
+    shellInventoryGeneration++
+  }
+
+  // The one "go idle" transition, shared by settlement, terminal events, and the
+  // interrupt ack so the flag and the paint cannot drift apart. A shell can
+  // outlive the root execution, so it owns the running state until its ended
+  // event arrives.
+  const paintIdle = (status: string) => {
+    state.rootActive = false
+    if (hasActiveShells()) {
+      write([], { phase: "running", status: "running shell", activeShells: state.shellActive.size })
+      return
+    }
+    write([], { phase: "idle", status, activeShells: 0 })
+  }
+
+  const paintAfterShellSettlement = () => {
+    if (hasActiveShells()) {
+      write([], { phase: "running", status: "running shell", activeShells: state.shellActive.size })
+      return
+    }
+    if (state.rootActive) {
+      write([], {
+        phase: "running",
+        status: state.view.type === "prompt" ? "assistant responding" : blockerStatus(state.view),
+        activeShells: 0,
+      })
+      return
+    }
+    if (!state.wait) write([], { phase: "idle", status: "", activeShells: 0 })
+  }
+
+  const write = (
+    commits: StreamCommit[],
+    patch?: Pick<FooterPatch, "activeShells" | "phase" | "status" | "usage">,
+  ) => {
     if (state.closed || controller.signal.aborted || input.footer.isClosed) return
+    if (deferredCommits) {
+      deferredCommits.push(...commits)
+      if (!patch) return
+      commits = []
+    }
     if (!state.initial && state.buffered === undefined)
       commits.forEach((commit) => {
         if (!commit.messageID || !commit.partID || (commit.kind !== "assistant" && commit.kind !== "reasoning")) {
@@ -575,7 +680,20 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
       })
     writeSessionOutput(
       { footer: input.footer, trace: input.trace },
-      { commits, updates: patch ? [{ type: "stream.patch", patch }] : undefined },
+      {
+        commits,
+        updates: patch
+          ? [
+              {
+                type: "stream.patch",
+                patch:
+                  hasActiveShells() || "activeShells" in patch
+                    ? { ...patch, activeShells: state.shellActive.size }
+                    : patch,
+              },
+            ]
+          : undefined,
+      },
     )
   }
 
@@ -658,8 +776,19 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
             type: "stream.patch",
             patch:
               next.type === "prompt"
-                ? { phase: state.rootActive ? "running" : "idle", status: blockerStatus(next) }
-                : { status: blockerStatus(next) },
+                ? {
+                    ...(hasActiveShells() ? { activeShells: state.shellActive.size } : {}),
+                    phase: state.rootActive || hasActiveShells() ? "running" : "idle",
+                    status: state.rootActive
+                      ? "assistant responding"
+                      : hasActiveShells()
+                        ? "running shell"
+                        : blockerStatus(next),
+                  }
+                : {
+                    ...(hasActiveShells() ? { activeShells: state.shellActive.size } : {}),
+                    status: blockerStatus(next),
+                  },
           },
           { type: "stream.view", view: next },
         ],
@@ -766,7 +895,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     ])
   }
 
-  const renderMessage = (message: SessionMessageInfo, render: boolean) => {
+  const renderMessage = (message: SessionMessageInfo, render: boolean, projectedSourceLocation?: string) => {
     if (message.type === "user") {
       const waiting = state.wait?.messageID === message.id
       const admitted = state.admitted.delete(message.id)
@@ -787,33 +916,53 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
       write([skillCommit(message.id, message.name)])
       return
     }
+    if (message.type === "location-switched") {
+      updateShellInventoryLocation(message.location)
+      return
+    }
     if (message.type === "shell") {
-      state.shellCommands.set(message.shellID, message.command)
       if (state.shellWait?.messageID === message.id) state.shellWait.id = message.shellID
       const completed = message.time.completed !== undefined
+      const ended = state.shellEnded.has(message.shellID)
+      const settled = state.shellSettled.has(message.shellID)
+      if (!completed && (ended || settled)) return
+      if (completed) {
+        state.shellActive.delete(message.shellID)
+        rememberBounded(state.shellStarted, message.shellID)
+        rememberBounded(state.shellEnded, message.shellID)
+        settleShell(message.shellID)
+      } else if (!ended) {
+        rememberBounded(state.shellStarted, message.shellID)
+        // Projected shell messages do not carry their execution Location. Only
+        // use a Location supplied by the projected history's move context; an
+        // unknown origin must not be attributed to the current inventory.
+        rememberShellLocation(message.shellID, projectedSourceLocation)
+        state.shellCommands.set(message.shellID, message.command)
+        state.shellActive.add(message.shellID)
+      }
       if (!render) {
-        // Suppressed history: mark settled shells rendered so live redelivery
-        // stays silent. A still-running shell stays unmarked and renders in
-        // full when its live shell.ended event arrives.
-        if (completed) {
-          state.shellStarted.add(message.shellID)
-          state.shellEnded.add(message.shellID)
-        }
+        // Suppressed history updates lifecycle facts only. The rendered sets
+        // describe this transcript, so a later live event may fill a missing
+        // shell phase without reviving the shell lifecycle.
         return
       }
-      if (!state.shellStarted.has(message.shellID)) {
-        state.shellStarted.add(message.shellID)
-        write([
+      const commits: StreamCommit[] = []
+      if (!state.shellRenderedStarted.has(message.shellID)) {
+        rememberShellRenderedStarted(message.shellID)
+        commits.push(
           shellCommit(message.shellID, message.command, {
             text: "running shell",
             phase: "start",
             toolState: "running",
           }),
-        ])
+        )
       }
-      if (completed && message.output && !state.shellEnded.has(message.shellID)) {
-        state.shellEnded.add(message.shellID)
-        write(shellTerminal(message.shellID, message.command, message, message.output))
+      if (completed && message.output && !state.shellRenderedEnded.has(message.shellID)) {
+        rememberShellRenderedEnded(message.shellID)
+        commits.push(...shellTerminal(message.shellID, message.command, message, message.output))
+      }
+      if (commits.length) {
+        write(commits)
       }
       if (completed && state.shellWait?.id === message.shellID) state.shellWait.resolve()
       return
@@ -906,9 +1055,60 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
       )
     ).data.toReversed()
 
+  const renderProjectedMessages = (messages: SessionMessageInfo[], render: boolean) => {
+    let sourceLocation: string | undefined
+    for (const message of messages) {
+      renderMessage(message, render, sourceLocation)
+      if (message.type === "location-switched") sourceLocation = message.location.directory
+    }
+  }
+
+  const shellInventory = async (client: OpenCodeClient, attempt: Attempt) => {
+    const requestedLocation = shellInventoryLocation
+    const requestedGeneration = shellInventoryGeneration
+    const timeout = new AbortController()
+    const signal = AbortSignal.any([attempt.signal, timeout.signal])
+    const request = Promise.resolve()
+      .then(() =>
+        client.shell.list(
+          requestedLocation ? { location: { directory: requestedLocation.directory } } : undefined,
+          { signal },
+        ),
+      )
+      .then(async (response) => {
+        // Let a same-tick event delivery populate the replay buffer before
+        // accepting the response. Move events are intentionally buffered
+        // during resize hydration, but still invalidate this request.
+        await wait(0, signal)
+        if (requestedGeneration !== shellInventoryGeneration) return undefined
+        if (requestedLocation?.directory !== shellInventoryLocation?.directory) return undefined
+        if (
+          state.buffered?.attempt === attempt &&
+          state.buffered.events.some((event) => event.type === "session.moved" && sessionID(event) === input.sessionID)
+        )
+          return undefined
+        if (requestedLocation && response.location.directory !== requestedLocation.directory) return undefined
+        return { response, requestedLocation, requestedGeneration }
+      })
+      .catch(() => undefined)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const bounded = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => {
+        timeout.abort()
+        resolve(undefined)
+      }, 1000)
+    })
+    try {
+      return await Promise.race([request, bounded])
+    } finally {
+      if (timer) clearTimeout(timer)
+      timeout.abort()
+    }
+  }
+
   const settleSession = async (client: OpenCodeClient) => {
     await client.session.wait({ sessionID: input.sessionID }, { signal: controller.signal })
-    for (const message of await projectedMessages(client, controller.signal)) renderMessage(message, true)
+    renderProjectedMessages(await projectedMessages(client, controller.signal), true)
     paintIdle(blockerStatus(state.view))
     await input.footer.idle()
   }
@@ -949,9 +1149,10 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     return permissions.map((request) => permissionTool(request, state.toolSources))
   }
 
-  const hydrate = async (attempt: Attempt, next: { render: boolean; reconnect?: boolean }) => {
+  const hydrateState = async (attempt: Attempt, next: HydrateOptions) => {
     const client = attempt.client
     const options = { signal: attempt.signal }
+    const knownActive = new Set(state.shellActive)
     const [projected, pending, permissions, forms, globals, active] = await Promise.all([
       projectedMessages(client, attempt.signal),
       client.session.inbox.list({ sessionID: input.sessionID }, options),
@@ -977,7 +1178,48 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     syncPending()
     state.permissions = permissions
     pruneToolSources()
-    for (const message of projected) renderMessage(message, next.render)
+    renderProjectedMessages(projected, next.render)
+    const projectedActive = new Set(state.shellActive)
+    const inventory = await shellInventory(client, attempt)
+    if (!current(attempt)) return
+    const inventoryCurrent =
+      inventory &&
+      inventory.requestedGeneration === shellInventoryGeneration &&
+      inventory.requestedLocation?.directory === shellInventoryLocation?.directory &&
+      !(
+        state.buffered?.attempt === attempt &&
+        state.buffered.events.some((event) => event.type === "session.moved" && sessionID(event) === input.sessionID)
+      )
+    if (inventoryCurrent) {
+      const inventoryLocation = inventory.response.location.directory
+      const running = new Set(
+        inventory.response.data.flatMap((shell) =>
+          shell.status === "running" &&
+          shell.metadata.sessionID === input.sessionID &&
+          !state.shellSettled.has(shell.id)
+            ? [shell.id]
+            : [],
+        ),
+      )
+      for (const shell of inventory.response.data) {
+        if (running.has(shell.id)) rememberShellLocation(shell.id, inventoryLocation)
+      }
+      const previousActive = new Set(
+        [...knownActive, ...projectedActive].filter((id) => !state.shellSettled.has(id)),
+      )
+      const preserved = new Set<string>()
+      for (const id of previousActive) {
+        if (running.has(id)) continue
+        // shell.list is scoped to one Location. A shell observed in another
+        // Location, or one whose origin is not known, is still live from this
+        // session's point of view and must not be settled by this inventory.
+        if (state.shellLocations.get(id) === inventoryLocation) settleShell(id)
+        else preserved.add(id)
+      }
+      state.shellActive.clear()
+      for (const id of preserved) state.shellActive.add(id)
+      for (const id of running) state.shellActive.add(id)
+    }
     state.permissions = await resolvePermissionSources(client, permissions, attempt)
     if (!current(attempt)) return
     pruneToolSources()
@@ -996,11 +1238,22 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     })
     if (!current(attempt)) return
     write([], {
-      phase: state.rootActive ? "running" : "idle",
-      status: state.rootActive ? "assistant responding" : blockerStatus(state.view),
+      phase: state.rootActive || hasActiveShells() ? "running" : "idle",
+      status: state.rootActive ? "assistant responding" : hasActiveShells() ? "running shell" : blockerStatus(state.view),
+      activeShells: state.shellActive.size,
     })
-    if (!state.rootActive && !next.reconnect) await input.footer.idle()
+    if (!state.rootActive && !hasActiveShells() && !next.reconnect) await input.footer.idle()
     if (!current(attempt)) return
+  }
+
+  const hydrate = async (attempt: Attempt, next: HydrateOptions) => {
+    const snapshot = shellLifecycleSnapshot()
+    try {
+      await hydrateState(attempt, next)
+    } catch (error) {
+      if (current(attempt)) restoreShellLifecycle(snapshot)
+      throw error
+    }
   }
 
   const apply = (attempt: Attempt, event: RunV2Event) => {
@@ -1035,6 +1288,10 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     subagents.main(client, event, attempt.signal)
     if (event.type === "session.renamed") {
       input.onSessionTitle?.(event.data.title)
+      return
+    }
+    if (event.type === "session.moved") {
+      updateShellInventoryLocation(event.data.location)
       return
     }
     if (event.type === "session.inbox.enqueued") {
@@ -1123,44 +1380,79 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
       return
     }
     if (event.type === "session.shell.started") {
-      state.shellCommands.set(event.data.shell.id, event.data.shell.command)
       const wait = state.shellWait
-      if (wait?.eventID === event.id) wait.id = event.data.shell.id
-      if (state.shellStarted.has(event.data.shell.id)) return
-      state.shellStarted.add(event.data.shell.id)
+      const unobservedSettledRequest =
+        state.shellSettledEvents.has(event.id) ||
+        (wait?.eventID === event.id && wait.settled === true && wait.id === undefined)
+      if (unobservedSettledRequest) {
+        state.shellSettledEvents.delete(event.id)
+        rememberShellSettled(event.data.shell.id)
+        if (wait?.eventID === event.id) wait.id = event.data.shell.id
+        return
+      }
+      const id = event.data.shell.id
+      if (state.shellEnded.has(id) || state.shellSettled.has(id)) return
+      rememberShellLocation(id, event.location?.directory ?? event.data.shell.cwd)
+      state.shellCommands.set(id, event.data.shell.command)
+      if (wait?.eventID === event.id) wait.id = id
+      if (!state.shellStarted.has(id)) rememberBounded(state.shellStarted, id)
+      const active = state.shellActive.has(id)
+      state.shellActive.add(id)
+      if (active && state.shellRenderedStarted.has(id)) return
+      const commits = state.shellRenderedStarted.has(id)
+        ? []
+        : [
+            shellCommit(id, event.data.shell.command, {
+              text: "running shell",
+              phase: "start",
+              toolState: "running",
+            }),
+          ]
+      if (commits.length) rememberShellRenderedStarted(id)
       write(
-        [
-          shellCommit(event.data.shell.id, event.data.shell.command, {
-            text: "running shell",
-            phase: "start",
-            toolState: "running",
-          }),
-        ],
+        commits,
         {
           phase: "running",
           status: "running shell",
+          activeShells: state.shellActive.size,
         },
       )
       return
     }
     if (event.type === "session.shell.ended") {
-      const command = state.shellCommands.get(event.data.shell.id) ?? event.data.shell.command
+      const id = event.data.shell.id
+      rememberShellLocation(id, event.location?.directory ?? event.data.shell.cwd)
+      const command = state.shellCommands.get(id) ?? event.data.shell.command
       const commits: StreamCommit[] = []
-      if (!state.shellStarted.has(event.data.shell.id)) {
-        state.shellStarted.add(event.data.shell.id)
+      if (!state.shellStarted.has(id)) rememberBounded(state.shellStarted, id)
+      if (!state.shellRenderedStarted.has(id)) {
         if (command)
           commits.push(
-            shellCommit(event.data.shell.id, command, { text: "running shell", phase: "start", toolState: "running" }),
+            shellCommit(id, command, { text: "running shell", phase: "start", toolState: "running" }),
           )
+        if (command) rememberShellRenderedStarted(id)
       }
-      if (!state.shellEnded.has(event.data.shell.id)) {
-        state.shellEnded.add(event.data.shell.id)
-        commits.push(...shellTerminal(event.data.shell.id, command, event.data.shell, event.data.output))
+      if (!state.shellEnded.has(id)) rememberBounded(state.shellEnded, id)
+      if (!state.shellRenderedEnded.has(id)) {
+        rememberShellRenderedEnded(id)
+        commits.push(...shellTerminal(id, command, event.data.shell, event.data.output))
       }
+      settleShell(id)
+      state.shellActive.delete(id)
       const wait = state.shellWait
-      const owned = wait?.id === event.data.shell.id
-      write(commits, owned || state.wait || state.shellWait ? undefined : { phase: "idle", status: "" })
+      const owned = wait?.id === id
+      const patch = hasActiveShells()
+        ? { phase: "running" as const, status: "running shell", activeShells: state.shellActive.size }
+        : state.rootActive
+          ? {
+              phase: "running" as const,
+              status: state.view.type === "prompt" ? "assistant responding" : blockerStatus(state.view),
+              activeShells: 0,
+            }
+          : { activeShells: 0 }
+      write(commits, patch)
       if (owned) wait.resolve()
+      if (!state.wait && !state.rootActive && (!state.shellWait || owned)) paintIdle("")
       return
     }
     if (event.type === "session.text.started") {
@@ -1430,6 +1722,8 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
   const receive = (attempt: Attempt, event: RunV2Event) => {
     if (!current(attempt)) return
     if (state.buffered?.attempt === attempt) {
+      if (event.type === "session.moved" && sessionID(event) === input.sessionID)
+        updateShellInventoryLocation(event.data.location)
       state.buffered.events.push(event)
       return
     }
@@ -1494,7 +1788,14 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
             while (true) {
               const next = await nextEvent(stream, connection.signal)
               if (next.done) throw new Error("Event stream disconnected")
-              if (booting) buffered.push(next.value)
+              if (booting) {
+                // Hydration and the event consumer race. Observe moves while
+                // events are buffered so an in-flight inventory response is
+                // invalidated before it can reconcile the old Location.
+                if (next.value.type === "session.moved" && sessionID(next.value) === input.sessionID)
+                  updateShellInventoryLocation(next.value.data.location)
+                buffered.push(next.value)
+              }
               else receive(attempt, next.value)
             }
           })()
@@ -1585,6 +1886,16 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
         { sessionID: input.sessionID, id: messageID, command: next.prompt.text },
         { signal: abort.signal },
       )
+      active.settled = true
+      if (active.id) {
+        settleShell(active.id)
+        state.shellActive.delete(active.id)
+      } else rememberShellSettledEvent(active.eventID)
+      // HTTP success settles this foreground shell only. A root execution can
+      // still be active (and other background shells may still be running), so
+      // do not use paintIdle here: that transition intentionally clears the
+      // root lifecycle flag.
+      paintAfterShellSettlement()
       await Promise.race([output, wait(SHELL_OUTPUT_GRACE_MS, abort.signal)])
     } catch (error) {
       if (abort.signal.aborted) return
@@ -1592,6 +1903,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     } finally {
       next.signal?.removeEventListener("abort", onAbort)
       if (state.shellWait === active) state.shellWait = undefined
+      paintAfterShellSettlement()
     }
   }
 
@@ -1649,13 +1961,188 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     const replayBuffer = { attempt, events: buffered }
     let failure: unknown
     let reset = false
+    let projectedCommits: StreamCommit[] | undefined
+    const renderedStarted = new Set(state.shellRenderedStarted)
+    const renderedEnded = new Set(state.shellRenderedEnded)
+    const shellReplayID = (commit: StreamCommit) => {
+      if (commit.tool !== "shell" || !commit.partID?.startsWith("shell:")) return
+      return commit.partID.slice("shell:".length)
+    }
+    const shellReplayTerminal = (commit: StreamCommit) =>
+      commit.toolState === "completed" || commit.toolState === "error"
+    const localShellRows = localRows.filter((row) => shellReplayID(row.commit) !== undefined)
+    const localShellIDs = new Set(localShellRows.flatMap((row) => {
+      const id = shellReplayID(row.commit)
+      return id ? [id] : []
+    }))
+    const localShellPhases = new Map<string, { ended: boolean; explicitStart: boolean }>()
+    for (const row of localShellRows) {
+      const id = shellReplayID(row.commit)
+      if (!id) continue
+      const phases = localShellPhases.get(id) ?? { ended: false, explicitStart: false }
+      if (row.commit.phase === "start") phases.explicitStart = true
+      if (shellReplayTerminal(row.commit)) phases.ended = true
+      localShellPhases.set(id, phases)
+    }
+    const restoreRenderedShells = () => {
+      state.shellRenderedStarted.clear()
+      state.shellRenderedEnded.clear()
+      for (const id of renderedStarted) rememberShellRenderedStarted(id)
+      for (const id of renderedEnded) rememberShellRenderedEnded(id)
+    }
+    const commitKey = (commit: StreamCommit) => {
+      const shellID = shellReplayID(commit)
+      if (shellID) return `shell:${shellID}`
+      if (commit.messageID) return `${commit.kind}:${commit.messageID}:${commit.partID ?? ""}`
+      return undefined
+    }
+    const restoreLocalRows = (projectedCommits: StreamCommit[]) => {
+      const projectedShellAnchors = new Map<string, number>()
+      const projectedTerminals = new Map<string, StreamCommit[]>()
+      const projectedBase: StreamCommit[] = []
+      for (const commit of projectedCommits) {
+        const id = shellReplayID(commit)
+        if (!id || !localShellIDs.has(id)) {
+          projectedBase.push(commit)
+          continue
+        }
+        if (!projectedShellAnchors.has(id)) projectedShellAnchors.set(id, projectedBase.length)
+        if (shellReplayTerminal(commit)) {
+          const terminals = projectedTerminals.get(id) ?? []
+          terminals.push(commit)
+          projectedTerminals.set(id, terminals)
+        }
+      }
+
+      // A local shell row is always an insertion at its own local-row index.
+      // Keeping one insertion per row is important: a shell can have assistant
+      // output between its start and terminal commits.
+      const baseAnchors = new Map<string, number>()
+      projectedBase.forEach((commit, index) => {
+        const key = commitKey(commit)
+        if (key && !baseAnchors.has(key)) baseAnchors.set(key, index)
+      })
+      const anchor = (key: string) => {
+        const shellID = key.startsWith("shell:") ? key.slice("shell:".length) : undefined
+        if (shellID && projectedShellAnchors.has(shellID)) return { boundary: projectedShellAnchors.get(shellID)!, shell: true }
+        const boundary = baseAnchors.get(key)
+        return boundary === undefined ? undefined : { boundary, shell: false }
+      }
+      const insertionBoundary = (index: number) => {
+        for (let next = index + 1; next < localRows.length; next++) {
+          const nextAnchor = anchor(commitKey(localRows[next].commit) ?? "")
+          if (nextAnchor) return nextAnchor.boundary
+        }
+        for (let previous = index - 1; previous >= 0; previous--) {
+          const previousAnchor = anchor(commitKey(localRows[previous].commit) ?? "")
+          if (previousAnchor) return previousAnchor.shell ? previousAnchor.boundary : previousAnchor.boundary + 1
+        }
+        return projectedBase.length
+      }
+
+      const localExtras: Array<{ index: number; boundary: number; commits: StreamCommit[] }> = []
+      const seenLocalShellCommits = new Set<string>()
+      const syntheticStarts = new Set<string>()
+      for (const [index, row] of localRows.entries()) {
+        const id = shellReplayID(row.commit)
+        if (id) {
+          const commitKey = `${id}\u0000${row.commit.phase}`
+          if (seenLocalShellCommits.has(commitKey)) continue
+          seenLocalShellCommits.add(commitKey)
+          const commits = [row.commit]
+          const phases = localShellPhases.get(id)
+          if (!phases?.explicitStart && !syntheticStarts.has(id)) {
+            syntheticStarts.add(id)
+            commits.unshift(
+              shellCommit(id, row.commit.shell?.command ?? "", {
+                text: "running shell",
+                phase: "start",
+                toolState: "running",
+              }),
+            )
+          }
+          localExtras.push({
+            index,
+            boundary: projectedShellAnchors.get(id) ?? insertionBoundary(index),
+            commits,
+          })
+          continue
+        }
+
+        const key = commitKey(row.commit)
+        const commit = row.commit
+        let restored: StreamCommit | undefined = commit
+        if (commit.image && commit.messageID && commit.partID) {
+          const imageKey = streamPartKey(commit.messageID, commit.partID)
+          if (state.imageIDs.has(imageKey)) restored = undefined
+          else state.imageIDs.add(imageKey)
+        } else if (
+          commit.messageID &&
+          commit.partID &&
+          (commit.kind === "assistant" || commit.kind === "reasoning")
+        ) {
+          const prefix = commit.kind === "reasoning" ? "Thinking: " : ""
+          const text = commit.text.startsWith(prefix) ? commit.text.slice(prefix.length) : commit.text
+          const result = state.fragments.restore({ messageID: commit.messageID, partID: commit.partID }, text)
+          if (result.type === "covered") restored = undefined
+          if (result.type === "append") {
+            if (!result.suffix) restored = undefined
+            else restored = result.suffix === text ? commit : { ...commit, text: result.suffix }
+          }
+        } else if (commit.kind === "error" && commit.messageID) {
+          if (state.errors.has(commit.messageID)) restored = undefined
+          else state.errors.add(commit.messageID)
+        } else if (commit.messageID && state.messageIDs.has(commit.messageID)) {
+          restored = undefined
+        }
+        if (restored) localExtras.push({ index, boundary: insertionBoundary(index), commits: [restored] })
+      }
+
+      // If local rows only contain a shell start, retain the projected terminal
+      // but place it after the local rows at that shell's transcript boundary.
+      // This avoids dropping output while still keeping start -> terminal order.
+      for (const [id, terminals] of projectedTerminals) {
+        const phases = localShellPhases.get(id)
+        if (!phases || phases.ended) continue
+        const lastIndex = localRows.reduce(
+          (last, row, index) => (shellReplayID(row.commit) === id ? index : last),
+          -1,
+        )
+        if (lastIndex < 0) continue
+        localExtras.push({
+          // The terminal belongs after every local row at this projected shell
+          // boundary, including non-shell rows between the local start and the
+          // projected terminal.
+          index: localRows.length,
+          boundary: projectedShellAnchors.get(id) ?? insertionBoundary(lastIndex),
+          commits: terminals,
+        })
+      }
+
+      const insertions = new Map<number, Array<{ index: number; commits: StreamCommit[] }>>()
+      for (const extra of localExtras) {
+        const entries = insertions.get(extra.boundary) ?? []
+        entries.push({ index: extra.index, commits: extra.commits })
+        insertions.set(extra.boundary, entries)
+      }
+      return projectedBase.flatMap((commit, index) => [
+        ...(insertions.get(index) ?? []).sort((left, right) => left.index - right.index).flatMap((entry) => entry.commits),
+        commit,
+      ]).concat(
+        (insertions.get(projectedBase.length) ?? [])
+          .sort((left, right) => left.index - right.index)
+          .flatMap((entry) => entry.commits),
+      )
+    }
     state.buffered = replayBuffer
     try {
       await input.footer.idle()
       if (!current(attempt)) return false
+      state.shellRenderedStarted.clear()
+      state.shellRenderedEnded.clear()
       await next.reset()
-      if (!current(attempt)) return false
       reset = true
+      if (!current(attempt)) return false
       state.messageIDs.clear()
       state.imageIDs.clear()
       state.fragments.clear()
@@ -1665,54 +2152,36 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
       state.toolMessages.clear()
       state.quietText.clear()
       state.skillMessages.clear()
-      state.shellCommands.clear()
-      state.shellStarted.clear()
       state.activeCompaction = undefined
-      state.shellEnded.clear()
       state.errors.clear()
+      projectedCommits = []
+      deferredCommits = projectedCommits
       await hydrate(attempt, { render: true })
+      deferredCommits = undefined
     } catch (error) {
       failure = error
+      restoreRenderedShells()
+      if (reset) {
+        // The projection is incomplete. Rebuild transcript dedupe from the
+        // pre-reset local snapshot, not from partially hydrated history.
+        state.messageIDs.clear()
+        state.imageIDs.clear()
+        state.fragments.clear()
+        state.errors.clear()
+      }
     } finally {
       if (state.buffered === replayBuffer) state.buffered = undefined
+      deferredCommits = undefined
     }
     if (!current(attempt)) return false
     try {
       if (reset) {
-        for (const row of localRows) {
-          if (row.commit.image && row.commit.messageID && row.commit.partID) {
-            const key = streamPartKey(row.commit.messageID, row.commit.partID)
-            if (state.imageIDs.has(key)) continue
-            state.imageIDs.add(key)
-            input.footer.append(row.commit)
-            continue
-          }
-          if (
-            row.commit.messageID &&
-            row.commit.partID &&
-            (row.commit.kind === "assistant" || row.commit.kind === "reasoning")
-          ) {
-            const prefix = row.commit.kind === "reasoning" ? "Thinking: " : ""
-            const text = row.commit.text.startsWith(prefix) ? row.commit.text.slice(prefix.length) : row.commit.text
-            const restored = state.fragments.restore(
-              { messageID: row.commit.messageID, partID: row.commit.partID },
-              text,
-            )
-            if (restored.type === "covered") continue
-            if (restored.type === "append") {
-              if (restored.suffix)
-                input.footer.append(restored.suffix === text ? row.commit : { ...row.commit, text: restored.suffix })
-              continue
-            }
-          }
-          if (row.commit.kind === "error" && row.commit.messageID) {
-            if (state.errors.has(row.commit.messageID)) continue
-            state.errors.add(row.commit.messageID)
-            input.footer.append(row.commit)
-            continue
-          }
-          if (row.commit.messageID && state.messageIDs.has(row.commit.messageID)) continue
-          input.footer.append(row.commit)
+        const replayCommits = failure ? [] : (projectedCommits ?? [])
+        for (const commit of restoreLocalRows(replayCommits)) {
+          const id = shellReplayID(commit)
+          if (id && commit.phase === "start") rememberShellRenderedStarted(id)
+          if (id && shellReplayTerminal(commit)) rememberShellRenderedEnded(id)
+          input.footer.append(commit)
         }
       }
     } finally {

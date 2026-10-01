@@ -989,6 +989,8 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
                   phase: "idle",
                   usage: undefined,
                   first: true,
+                  status: "",
+                  activeShells: 0,
                 },
               })
               footer.append({
@@ -1002,7 +1004,6 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
               footer.event({
                 type: "stream.patch",
                 patch: {
-                  phase: "idle",
                   status: "failed to start new session",
                 },
               })

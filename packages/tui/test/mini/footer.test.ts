@@ -7,7 +7,7 @@ import { coalesceProgressCommit, resolveRunAgent, RunFooter } from "../../src/mi
 import { createRunDemo } from "../../src/mini/demo"
 import { resolveMiniSettings } from "../../src/mini/runtime.boot"
 import { RUN_THEME_FALLBACK, RUN_THEME_FALLBACK_LIGHT, RUN_THEME_MONO } from "../../src/mini/theme"
-import type { MiniSettingChange, MiniSettings, RunAgent, RunTuiConfig, StreamCommit } from "../../src/mini/types"
+import type { FooterState, MiniSettingChange, MiniSettings, RunAgent, RunTuiConfig, StreamCommit } from "../../src/mini/types"
 import { createTuiResolvedConfig } from "../fixture/tui-runtime"
 import { tmpdir } from "../fixture/fixture"
 import { createFooterApiFixture } from "./fixture/footer-api"
@@ -220,6 +220,23 @@ test("footer usage survives unrelated patches and clears when explicitly undefin
     app.footer.event({ type: "stream.patch", patch: { usage: undefined } })
     await app.renderOnce()
     expect(app.captureCharFrame()).not.toContain("7.5K")
+  } finally {
+    app.footer.destroy()
+    app.renderer.destroy()
+  }
+})
+
+test("turn idle does not clear active shell state when status was replaced", async () => {
+  const app = await setup()
+  try {
+    app.footer.event({ type: "stream.patch", patch: { phase: "running", status: "running shell", activeShells: 1 } })
+    app.footer.event({ type: "stream.patch", patch: { status: "awaiting permission" } })
+    app.footer.event({ type: "turn.idle" })
+    expect((app.footer as unknown as { state: () => FooterState }).state()).toMatchObject({
+      phase: "running",
+      status: "awaiting permission",
+      activeShells: 1,
+    })
   } finally {
     app.footer.destroy()
     app.renderer.destroy()

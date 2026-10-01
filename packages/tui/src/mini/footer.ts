@@ -244,6 +244,7 @@ export class RunFooter implements FooterApi {
     const [state, setState] = createSignal<FooterState>({
       phase: "idle",
       status: "",
+      activeShells: 0,
       notice: "",
       model: options.modelLabel,
       usage: undefined,
@@ -514,6 +515,9 @@ export class RunFooter implements FooterApi {
 
     const patch = eventPatch(next)
     if (patch) {
+      // A root prompt can finish before a background shell. The prompt queue's
+      // final turn.idle event must not hide that still-live shell lifecycle.
+      if (next.type === "turn.idle" && this.state().activeShells > 0) return
       if (typeof patch.status === "string") {
         this.clearNoticeTimer()
         patch.notice = ""
@@ -548,9 +552,16 @@ export class RunFooter implements FooterApi {
     }
 
     const prev = this.state()
+    const activeShells =
+      typeof next.activeShells === "number" && Number.isFinite(next.activeShells)
+        ? Math.max(0, Math.floor(next.activeShells))
+        : prev.activeShells
     const state = {
-      phase: next.phase ?? prev.phase,
+      // A shell lifecycle is still running even when a late turn.idle or a
+      // status-only patch arrives from the prompt queue.
+      phase: activeShells > 0 ? "running" : (next.phase ?? prev.phase),
       status: typeof next.status === "string" ? next.status : prev.status,
+      activeShells,
       notice: typeof next.notice === "string" ? next.notice : prev.notice,
       model: typeof next.model === "string" ? next.model : prev.model,
       usage: "usage" in next ? next.usage : prev.usage,

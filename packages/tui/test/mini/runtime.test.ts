@@ -19,6 +19,16 @@ function ok<T>(data: T) {
   return Promise.resolve(data)
 }
 
+async function waitFor<T>(read: () => T, ready: (value: T) => boolean, label: string, timeout = 1000) {
+  const deadline = Date.now() + timeout
+  while (true) {
+    const value = read()
+    if (ready(value)) return value
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`)
+    await Bun.sleep(1)
+  }
+}
+
 function host(): MiniHost {
   return {
     version: "local",
@@ -591,5 +601,188 @@ describe("run interactive runtime", () => {
     expect(catalogs.reference).toHaveBeenCalledWith(query, { signal: expect.any(AbortSignal) })
     expect(catalogs.command).toHaveBeenCalledWith(query, { signal: expect.any(AbortSignal) })
     expect(fileFind).toHaveBeenCalledWith({ query: "index", type: "file", ...query })
+  })
+
+  test("clears active shell state when creating a new session", async () => {
+    const sdk = OpenCode.make({ baseUrl: "https://opencode.test" })
+    const events: FooterEvent[] = []
+    const ui = createFooterApiFixture({ events })
+    const api = ui.api
+    const streamStarted = defer<void>()
+    const shellReset = defer<void>()
+    const emit = api.event
+    api.event = (event) => {
+      emit(event)
+      if (
+        event.type === "stream.patch" &&
+        event.patch.phase === "idle" &&
+        event.patch.status === "" &&
+        event.patch.activeShells === 0
+      )
+        shellReset.resolve()
+    }
+    stubCatalogLists(sdk)
+
+    const task = runInteractiveDeferredMode(
+      {
+        host: host(),
+        sdk,
+        directory: "/tmp",
+        target: async () => ({
+          sessionID: "ses_old",
+          location: { directory: "/tmp", project: { id: "pro-1", directory: "/tmp", canonical: "/tmp" } },
+          agent: "build",
+          model: { providerID: "test", modelID: "model" },
+          variant: undefined,
+          resume: false,
+        }),
+        createSession: async (_client, input) => ({
+          sessionID: "ses_new",
+          location: {
+            directory: input.location.directory,
+            project: { id: "pro-1", directory: input.location.directory, canonical: input.location.directory },
+          },
+          agent: input.agent,
+          model: input.model,
+          variant: input.variant,
+          resume: false,
+        }),
+        agent: "build",
+        model: { providerID: "test", modelID: "model" },
+        variant: undefined,
+        files: [],
+        thinking: false,
+      },
+      {
+        createRuntimeLifecycle: async () => ({
+          footer: api,
+          onResize: () => () => {},
+          refreshTheme: () => {},
+          setTitle: () => {},
+          resetForReplay: () => Promise.resolve(),
+          close: () => Promise.resolve(),
+        }),
+        streamTransport: Promise.resolve({
+          createSessionTransport: async () => {
+            streamStarted.resolve()
+            return {
+              runPromptTurn: async () => {},
+              admitPromptTurn: async () => {},
+              waitForIdle: async () => {},
+              interruptActiveTurn: async () => {},
+              selectSubagent: () => {},
+              replayOnResize: async () => false,
+              close: async () => {},
+            }
+          },
+          formatUnknownError: (error: unknown) => String(error),
+        }),
+      },
+    )
+
+    await streamStarted.promise
+    await ui.promptReady
+    api.event({ type: "stream.patch", patch: { phase: "running", status: "running shell", activeShells: 1 } })
+    expect(ui.submit("/new")).toBe(true)
+    await shellReset.promise
+    api.close()
+    await task
+
+    expect(events).toContainEqual({
+      type: "stream.patch",
+      patch: {
+        phase: "idle",
+        status: "",
+        activeShells: 0,
+        usage: undefined,
+        first: true,
+      },
+    })
+  })
+
+  test("keeps the old active shell footer when creating a new session fails", async () => {
+    const sdk = OpenCode.make({ baseUrl: "https://opencode.test" })
+    const events: FooterEvent[] = []
+    const ui = createFooterApiFixture({ events })
+    const api = ui.api
+    let streamReady = false
+    let createCalls = 0
+    let promptReady = false
+    const onPrompt = api.onPrompt
+    api.onPrompt = (handler) => {
+      promptReady = true
+      return onPrompt(handler)
+    }
+    const emit = api.event
+    api.event = (event) => {
+      emit(event)
+    }
+    stubCatalogLists(sdk)
+
+    const task = runInteractiveDeferredMode(
+      {
+        host: host(),
+        sdk,
+        directory: "/tmp",
+        target: async () => ({
+          sessionID: "ses_old",
+          location: { directory: "/tmp", project: { id: "pro-1", directory: "/tmp", canonical: "/tmp" } },
+          agent: "build",
+          model: { providerID: "test", modelID: "model" },
+          variant: undefined,
+          resume: false,
+        }),
+        createSession: async () => {
+          createCalls++
+          throw new Error("create failed")
+        },
+        agent: "build",
+        model: { providerID: "test", modelID: "model" },
+        variant: undefined,
+        files: [],
+        thinking: false,
+      },
+      {
+        createRuntimeLifecycle: async () => ({
+          footer: api,
+          onResize: () => () => {},
+          refreshTheme: () => {},
+          setTitle: () => {},
+          resetForReplay: () => Promise.resolve(),
+          close: () => Promise.resolve(),
+        }),
+        streamTransport: Promise.resolve({
+          createSessionTransport: async () => {
+            streamReady = true
+            return {
+              runPromptTurn: async () => {},
+              admitPromptTurn: async () => {},
+              waitForIdle: async () => {},
+              interruptActiveTurn: async () => {},
+              selectSubagent: () => {},
+              replayOnResize: async () => false,
+              close: async () => {},
+            }
+          },
+          formatUnknownError: (error: unknown) => String(error),
+        }),
+      },
+    )
+
+    try {
+      await waitFor(() => streamReady, Boolean, "new session stream")
+      await waitFor(() => promptReady, Boolean, "new session prompt handler")
+      api.event({ type: "stream.patch", patch: { phase: "running", status: "running shell", activeShells: 1 } })
+      expect(ui.submit("/new")).toBe(true)
+      await waitFor(() => createCalls, (count) => count > 0, "new session create")
+      expect(events.findLast((event) => event.type === "stream.patch" && event.patch.status === "failed to start new session")).toEqual({
+        type: "stream.patch",
+        patch: { status: "failed to start new session" },
+      })
+      expect(events.some((event) => event.type === "stream.patch" && event.patch.phase === "idle")).toBe(false)
+    } finally {
+      api.close()
+      await task
+    }
   })
 })

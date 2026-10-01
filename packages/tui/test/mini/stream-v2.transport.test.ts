@@ -65,6 +65,16 @@ function defer<T = void>() {
   return { promise, resolve }
 }
 
+async function waitFor<T>(read: () => T, ready: (value: T) => boolean, label: string, timeout = 1000) {
+  const deadline = Date.now() + timeout
+  while (true) {
+    const value = read()
+    if (ready(value)) return value
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`)
+    await Bun.sleep(1)
+  }
+}
+
 function connected(id = "evt_connected") {
   return { id, type: "server.connected", data: {} } satisfies RunV2Event
 }
@@ -77,6 +87,74 @@ function durable<const Version extends 1 | 2>(
 ): { aggregateID: string; seq: number; version: Version }
 function durable(sessionID: string, seq = 0, version: 1 | 2 = 1) {
   return { aggregateID: sessionID, seq, version }
+}
+
+function shellStarted(id: string, command: string, location?: string) {
+  return {
+    id: `evt_${id}_started`,
+    created: 0,
+    type: "session.shell.started" as const,
+    durable: durable("ses_1"),
+    ...(location ? { location: { directory: location } } : {}),
+    data: {
+      sessionID: "ses_1",
+      shell: {
+        id,
+        status: "running" as const,
+        command,
+        cwd: "/tmp",
+        shell: "/bin/sh",
+        file: `/tmp/${id}`,
+        metadata: {},
+        time: { started: 0 },
+      },
+    },
+  } satisfies Extract<RunV2Event, { type: "session.shell.started" }>
+}
+
+function shellEnded(id: string, command: string, seq = 1, location?: string, output = "done") {
+  return {
+    id: `evt_${id}_ended`,
+    created: 1,
+    type: "session.shell.ended" as const,
+    durable: durable("ses_1", seq),
+    ...(location ? { location: { directory: location } } : {}),
+    data: {
+      sessionID: "ses_1",
+      shell: {
+        id,
+        status: "exited" as const,
+        command,
+        cwd: "/tmp",
+        shell: "/bin/sh",
+        file: `/tmp/${id}`,
+        exit: 0,
+        metadata: {},
+        time: { started: 0, completed: 1 },
+      },
+      output: { output, cursor: output.length, size: output.length, truncated: false },
+    },
+  } satisfies Extract<RunV2Event, { type: "session.shell.ended" }>
+}
+
+function executionSucceeded(seq = 2): RunV2Event {
+  return {
+    id: `evt_execution_succeeded_${seq}`,
+    created: 2,
+    type: "session.execution.succeeded",
+    durable: durable("ses_1", seq),
+    data: { sessionID: "ses_1" },
+  }
+}
+
+function executionStarted(seq = 1): RunV2Event {
+  return {
+    id: `evt_execution_started_${seq}`,
+    created: 1,
+    type: "session.execution.started",
+    durable: durable("ses_1", seq),
+    data: { sessionID: "ses_1" },
+  }
 }
 
 function promptAdmission(input: Parameters<OpenCodeClient["session"]["prompt"]>[0], sessionID = "ses_1") {
@@ -100,6 +178,20 @@ function footer() {
 }
 
 type SessionMessages = MessageListOutput["data"]
+type ShellInventory = Awaited<ReturnType<OpenCodeClient["shell"]["list"]>>["data"]
+
+function shellInfo(id: string, sessionID: string, status: ShellInventory[number]["status"] = "running") {
+  return {
+    id,
+    status,
+    command: "sleep 10",
+    cwd: "/tmp",
+    shell: "/bin/sh",
+    file: `/tmp/${id}`,
+    metadata: { sessionID },
+    time: { started: 0, ...(status === "running" ? {} : { completed: 1 }) },
+  } satisfies ShellInventory[number]
+}
 
 const image = {
   data: "cG5n",
@@ -147,6 +239,7 @@ function sdk(input: {
   streams: ReturnType<typeof feed>[]
   active?: () => Record<string, { type: "running" }>
   messages?: Record<string, SessionMessages>
+  shells?: ShellInventory
   sessions?: Array<{ id: string; parentID?: string; title?: string; agent?: string; time: { updated: number } }>
   forms?: Record<string, FormInfo[]>
   globals?: FormInfo[]
@@ -190,6 +283,13 @@ function sdk(input: {
     }),
   )
   spyOn(client.session, "active").mockImplementation(() => ok(input.active?.() ?? {}))
+  spyOn(client.shell, "list").mockImplementation(() => {
+    if (!input.shells) return Promise.reject(new Error("shell inventory unavailable")) as never
+    return ok({
+      location: { directory: "/tmp", project: { id: "proj_1", directory: "/tmp" } },
+      data: input.shells,
+    }) as never
+  })
   spyOn(client.session.inbox, "list").mockImplementation((request) => ok(input.pending?.[request.sessionID] ?? []))
   spyOn(client.session, "wait").mockImplementation(() => input.wait?.() ?? ok(undefined))
   spyOn(client.session.message, "get").mockImplementation((request) => {
@@ -2293,29 +2393,39 @@ describe("V2 mini transport", () => {
         delta: "hello",
       },
     })
-    await Bun.sleep(0)
-    spyOn(client.message, "list").mockImplementation(() => Promise.reject(new Error("projection failed")))
+    try {
+      await waitFor(() => live.length, (count) => count === 1, "assistant before failed resize")
+      events.push(shellStarted("sh_failure_transcript", "sleep 10"))
+      await waitFor(
+        () => ui.commits.filter((commit) => commit.partID === "shell:sh_failure_transcript").length,
+        (count) => count === 1,
+        "shell before failed resize",
+      )
+      spyOn(client.message, "list").mockImplementation(() => Promise.reject(new Error("projection failed")))
+      const replay = transport.replayOnResize({
+        localRows: () => ui.commits.map((commit) => ({ commit })),
+        reset: async () => {
+          ui.commits.length = 0
+        },
+      })
+      events.push({
+        id: "evt_text_2",
+        created: 0,
+        type: "session.text.delta",
+        data: {
+          sessionID: "ses_1",
+          assistantMessageID: "msg_assistant",
+          ordinal: 0,
+          delta: " world",
+        },
+      })
+      await expect(replay).rejects.toThrow("projection failed")
 
-    const replay = transport.replayOnResize({
-      localRows: () => live.map((commit) => ({ commit })),
-      reset: async () => {},
-    })
-    events.push({
-      id: "evt_text_2",
-      created: 0,
-      type: "session.text.delta",
-      data: {
-        sessionID: "ses_1",
-        assistantMessageID: "msg_assistant",
-        ordinal: 0,
-        delta: " world",
-      },
-    })
-    await expect(replay).rejects.toThrow("projection failed")
-
-    expect(ui.commits.slice(-2).map((commit) => commit.text)).toEqual(["hello", " world"])
-    expect(live.at(-1)?.text).toBe("hello world")
-    await transport.close()
+      expect(ui.commits.map((commit) => commit.text)).toEqual(["previous prompt", "hello", "running shell", " world"])
+      expect(live.at(-1)?.text).toBe("hello world")
+    } finally {
+      await transport.close()
+    }
   })
 
   test("dedupes a projected step failure from live redelivery", async () => {
@@ -2987,6 +3097,1199 @@ describe("V2 mini transport", () => {
     await transport.close()
   })
 
+  test("keeps the footer running when root execution ends before a background shell", async () => {
+    const events = feed()
+    events.push(connected())
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ streams: [events] }),
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(shellStarted("sh_background", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.status === "running shell",
+        "background shell start",
+      )
+
+      const beforeSucceeded = ui.events.filter((event) => event.type === "stream.patch").length
+      events.push(executionSucceeded())
+      await waitFor(
+        () => ui.events.filter((event) => event.type === "stream.patch").length,
+        (count) => count > beforeSucceeded,
+        "execution success patch",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toEqual({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+
+      events.push(shellEnded("sh_background", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle",
+        "background shell end",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.phase).toBe("idle")
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("keeps the footer running until the last background shell ends", async () => {
+    const events = feed()
+    events.push(connected())
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ streams: [events] }),
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(shellStarted("sh_first", "sleep 1"))
+      events.push(shellStarted("sh_second", "sleep 2"))
+      await waitFor(
+        () => ui.commits.filter((commit) => commit.toolState === "running").length,
+        (count) => count >= 2,
+        "parallel shell starts",
+      )
+      events.push(executionSucceeded())
+      events.push(shellEnded("sh_first", "sleep 1"))
+      await waitFor(
+        () => ui.commits.some((commit) => commit.partID === "shell:sh_first" && commit.phase === "progress"),
+        Boolean,
+        "first shell end",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toEqual({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+
+      events.push(shellEnded("sh_second", "sleep 2", 3))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle",
+        "last shell end",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.phase).toBe("idle")
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("restores assistant status when the last shell ends during root execution", async () => {
+    const events = feed()
+    events.push(connected())
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ streams: [events] }),
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(executionStarted())
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "running",
+        "root execution start",
+      )
+      events.push(shellStarted("sh_root", "sleep 1"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "root execution shell start",
+      )
+      events.push(shellEnded("sh_root", "sleep 1"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "running" && patch.activeShells === 0,
+        "root execution shell end",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toEqual({
+        phase: "running",
+        status: "assistant responding",
+        activeShells: 0,
+      })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test.each(["started then ended then duplicate started", "ended before started"] as const)(
+    "does not reactivate an ended shell when %s",
+    async (order) => {
+      const events = feed()
+      events.push(connected())
+      const ui = footer()
+      const transport = await createSessionTransport({
+        sdk: sdk({ streams: [events] }),
+        sessionID: "ses_1",
+        thinking: false,
+        footer: ui.api,
+      })
+      try {
+        const idlePatches = () => ui.events.filter((event) => event.type === "stream.patch" && event.patch.phase === "idle").length
+        if (order === "started then ended then duplicate started") {
+          events.push(shellStarted("sh_finished", "sleep 1"))
+          await waitFor(() => ui.commits.length, (count) => count > 0, "finished shell start")
+        }
+        const beforeEnded = idlePatches()
+        events.push(shellEnded("sh_finished", "sleep 1"))
+        await waitFor(idlePatches, (count) => count > beforeEnded, "finished shell end")
+        events.push(shellStarted("sh_finished", "sleep 1"))
+        const duplicateEventBaseline = ui.events.length
+        const duplicatePatchBaseline = ui.events.filter((event) => event.type === "stream.patch").length
+        const duplicateCommitBaseline = ui.commits.length
+        events.push(executionSucceeded())
+        await waitFor(
+          () => ui.events.filter((event) => event.type === "stream.patch").length,
+          (count) => count > duplicatePatchBaseline,
+          "duplicate shell event consumed",
+        )
+        expect(ui.events.length).toBeGreaterThan(duplicateEventBaseline)
+        expect(ui.commits).toHaveLength(duplicateCommitBaseline)
+        expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+          phase: "idle",
+          activeShells: 0,
+        })
+      } finally {
+        await transport.close()
+      }
+    },
+  )
+
+  test("does not reactivate a normally ended shell after resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ streams: [events] }),
+      sessionID: "ses_1",
+      replay: true,
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(shellStarted("sh_resize_settled", "sleep 1"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "resize shell start",
+      )
+      events.push(shellEnded("sh_resize_settled", "sleep 1"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "resize shell end",
+      )
+
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      const beforeLateStarted = ui.commits.length
+      const beforeLateStartedPatches = ui.events.filter((event) => event.type === "stream.patch").length
+      events.push(shellStarted("sh_resize_settled", "sleep 1"))
+      events.push(executionSucceeded(9))
+      await waitFor(
+        () => ui.events.filter((event) => event.type === "stream.patch").length,
+        (count) => count > beforeLateStartedPatches,
+        "late started shell after resize",
+      )
+      expect(ui.commits.length).toBe(beforeLateStarted)
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "idle",
+        activeShells: 0,
+      })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("inventory hydrates only this session's running shells beyond the message window", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: { ses_1: [] },
+      shells: [shellInfo("sh_active", "ses_1"), shellInfo("sh_other", "ses_2"), shellInfo("sh_old", "ses_1", "exited")],
+    })
+    const list = spyOn(client.shell, "list")
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/tmp" },
+      sessionID: "ses_1",
+      thinking: false,
+      replayLimit: 1,
+      footer: ui.api,
+    })
+    try {
+      expect(list).toHaveBeenCalledWith({ location: { directory: "/tmp" } }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+      events.push(shellEnded("sh_active", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle",
+        "inventory shell end",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(0)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("keeps a shell from an old location alive when the current inventory omits it", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events], messages: { ses_1: [] } })
+    const list = spyOn(client.shell, "list").mockImplementation(() =>
+      ok({ location: { directory: "/location-b" }, data: [] }) as never,
+    )
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/location-b" },
+      sessionID: "ses_1",
+      replay: true,
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(shellStarted("sh_old_location", "sleep 10", "/location-a"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "old-location shell start",
+      )
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      expect(list).toHaveBeenCalledWith(
+        { location: { directory: "/location-b" } },
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+      events.push(shellEnded("sh_old_location", "sleep 10", 1, "/location-a"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "old-location shell end",
+      )
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test.each(["reject", "timeout"] as const)(
+    "keeps an old-location shell alive when current inventory %s",
+    async (mode) => {
+      const events = feed()
+      events.push(connected())
+      const client = sdk({ streams: [events], messages: { ses_1: [] } })
+      let calls = 0
+      const list = spyOn(client.shell, "list").mockImplementation(() => {
+        calls++
+        if (calls === 1) return ok({ location: { directory: "/location-b" }, data: [] }) as never
+        if (mode === "reject") return Promise.reject(new Error("inventory unavailable")) as never
+        return new Promise(() => {}) as never
+      })
+      const ui = footer()
+      const transport = await createSessionTransport({
+        sdk: client,
+        location: { directory: "/location-b" },
+        sessionID: "ses_1",
+        replay: true,
+        thinking: false,
+        footer: ui.api,
+      })
+      try {
+        events.push(shellStarted("sh_old_location_failed_inventory", "sleep 10", "/location-a"))
+        await waitFor(
+          () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+          (patch) => patch?.activeShells === 1,
+          "old-location failed-inventory shell start",
+        )
+        await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+        expect(list.mock.calls.length).toBeGreaterThanOrEqual(2)
+        expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+          phase: "running",
+          status: "running shell",
+          activeShells: 1,
+        })
+        events.push(shellEnded("sh_old_location_failed_inventory", "sleep 10", 1, "/location-a"))
+        await waitFor(
+          () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+          (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+          "old-location failed-inventory shell end",
+        )
+      } finally {
+        await transport.close()
+      }
+    },
+  )
+
+  test("keeps an old-location shell alive across reconnect hydration", async () => {
+    const firstEvents = feed()
+    firstEvents.push(connected())
+    const secondEvents = feed()
+    secondEvents.push(connected("evt_old_location_reconnect"))
+    const first = sdk({ streams: [firstEvents], messages: { ses_1: [] } })
+    const second = sdk({ streams: [secondEvents], messages: { ses_1: [] } })
+    const firstList = spyOn(first.shell, "list").mockImplementation(() =>
+      ok({ location: { directory: "/location-b" }, data: [] }) as never,
+    )
+    const secondList = spyOn(second.shell, "list").mockImplementation(() =>
+      ok({ location: { directory: "/location-b" }, data: [] }) as never,
+    )
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: first,
+      reconnect: async () => second,
+      location: { directory: "/location-b" },
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      expect(firstList).toHaveBeenCalled()
+      firstEvents.push(shellStarted("sh_old_location_reconnect", "sleep 10", "/location-a"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "old-location reconnect shell start",
+      )
+      firstEvents.close()
+      await waitFor(() => secondList.mock.calls.length, (count) => count > 0, "old-location reconnect inventory")
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.status === "running shell" && patch.activeShells === 1,
+        "old-location reconnect hydration",
+      )
+      secondEvents.push(shellEnded("sh_old_location_reconnect", "sleep 10", 1, "/location-a"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "old-location reconnect shell end",
+      )
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("uses the moved session location for the next shell inventory", async () => {
+    const events = feed()
+    events.push(connected())
+    const moved = defer<void>()
+    const client = sdk({ streams: [events], messages: { ses_1: [] } })
+    const list = spyOn(client.shell, "list").mockImplementation((request) => {
+      const directory = request?.location?.directory ?? "/location-a"
+      return ok({ location: { directory }, data: [] }) as never
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/location-a" },
+      sessionID: "ses_1",
+      replay: true,
+      thinking: false,
+      footer: ui.api,
+      trace: {
+        write: (_type, data) => {
+          if (typeof data === "object" && data !== null && "type" in data && data.type === "session.moved")
+            moved.resolve()
+        },
+      },
+    })
+    try {
+      events.push(shellStarted("sh_moved_location", "sleep 10", "/location-a"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "moved-session shell start",
+      )
+      events.push({
+        id: "evt_session_moved",
+        created: 1,
+        type: "session.moved",
+        durable: durable("ses_1", 1),
+        data: { sessionID: "ses_1", location: { directory: "/location-b" }, projectID: "proj_1" },
+      })
+      await moved.promise
+      const beforeResize = list.mock.calls.length
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      expect(list.mock.calls.length).toBeGreaterThan(beforeResize)
+      expect(list.mock.calls.at(-1)?.[0]).toEqual({ location: { directory: "/location-b" } })
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+      events.push(shellEnded("sh_moved_location", "sleep 10", 2, "/location-a"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "moved-session shell end",
+      )
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("reconnect inventory restores a running shell outside the event replay", async () => {
+    const firstEvents = feed()
+    firstEvents.push(connected())
+    const secondEvents = feed()
+    secondEvents.push(connected("evt_reconnected"))
+    const first = sdk({ streams: [firstEvents], messages: { ses_1: [] } })
+    const second = sdk({
+      streams: [secondEvents],
+      messages: { ses_1: [] },
+      shells: [shellInfo("sh_reconnected", "ses_1")],
+    })
+    const list = spyOn(second.shell, "list")
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: first,
+      reconnect: async () => second,
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      firstEvents.close()
+      await waitFor(() => list.mock.calls.length, (count) => count > 0, "reconnect inventory request")
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "reconnected shell hydration",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+
+      secondEvents.push(shellEnded("sh_reconnected", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle",
+        "reconnected shell end",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(0)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test.each(["resize", "reconnect"] as const)(
+    "projected completion supersedes a pre-hydration active shell on %s without an ended event",
+    async (mode) => {
+      const firstEvents = feed()
+      firstEvents.push(connected())
+      const secondEvents = feed()
+      secondEvents.push(connected("evt_completed_reconnect"))
+      const messages: SessionMessages = []
+      const first = sdk({ streams: [firstEvents], messages: { ses_1: messages } })
+      const second = sdk({ streams: [secondEvents], messages: { ses_1: messages } })
+      const inventory = (request?: Parameters<OpenCodeClient["shell"]["list"]>[0]) =>
+        ok({ location: { directory: request?.location?.directory ?? "/location-b" }, data: [] }) as never
+      spyOn(first.shell, "list").mockImplementation(inventory)
+      const secondList = spyOn(second.shell, "list").mockImplementation(inventory)
+      const ui = footer()
+      const transport = await createSessionTransport({
+        sdk: first,
+        reconnect: async () => second,
+        location: { directory: "/location-b" },
+        sessionID: "ses_1",
+        replay: true,
+        thinking: false,
+        footer: ui.api,
+      })
+      try {
+        firstEvents.push(shellStarted("sh_projected_completed", "printf done", "/location-a"))
+        await waitFor(
+          () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+          (patch) => patch?.activeShells === 1,
+          "pre-hydration running shell",
+        )
+        messages.push({
+          id: "msg_projected_completed",
+          type: "shell",
+          shellID: "sh_projected_completed",
+          status: "exited",
+          command: "printf done",
+          exit: 0,
+          output: { output: "done", cursor: 4, size: 4, truncated: false },
+          time: { created: 1, completed: 2 },
+        })
+        if (mode === "resize") await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+        if (mode === "reconnect") {
+          firstEvents.close()
+          await waitFor(() => secondList.mock.calls.length, (count) => count > 0, "completed reconnect inventory")
+        }
+        await waitFor(
+          () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+          (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+          "projected completion without shell ended",
+        )
+        const events = mode === "resize" ? firstEvents : secondEvents
+        const patches = ui.events.filter((event) => event.type === "stream.patch").length
+        events.push(shellStarted("sh_projected_completed", "printf done", "/location-a"))
+        events.push(executionSucceeded(8))
+        await waitFor(
+          () => ui.events.filter((event) => event.type === "stream.patch").length,
+          (count) => count > patches,
+          "late start following projected completion",
+        )
+        expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+          phase: "idle",
+          activeShells: 0,
+        })
+      } finally {
+        await transport.close()
+      }
+    },
+  )
+
+  test("discards a stale inventory response after a buffered session move", async () => {
+    const events = feed()
+    events.push(connected())
+    const inventory = defer<{ location: { directory: string }; data: ShellInventory }>()
+    const client = sdk({ streams: [events], messages: { ses_1: [] } })
+    let calls = 0
+    const list = spyOn(client.shell, "list").mockImplementation(() => {
+      calls++
+      if (calls === 1) return ok({ location: { directory: "/location-a" }, data: [] }) as never
+      return inventory.promise as never
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/location-a" },
+      sessionID: "ses_1",
+      replay: true,
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(shellStarted("sh_stale_inventory", "sleep 10", "/location-a"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "stale inventory shell start",
+      )
+      const replay = transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      await waitFor(() => list.mock.calls.length, (count) => count >= 2, "stale inventory request")
+      inventory.resolve({ location: { directory: "/location-a" }, data: [] })
+      // Resolve the response first, then deliver the move in the same tick
+      // while shellInventory is yielding before its token check/reconcile.
+      events.push({
+        id: "evt_stale_inventory_move",
+        created: 2,
+        type: "session.moved",
+        durable: durable("ses_1", 2),
+        data: { sessionID: "ses_1", location: { directory: "/location-b" }, projectID: "proj_1" },
+      })
+      await replay
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+      events.push(shellEnded("sh_stale_inventory", "sleep 10", 3, "/location-a"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "stale inventory shell end",
+      )
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("resize inventory replaces stale activity and recovers shells outside replayLimit", async () => {
+    const events = feed()
+    events.push(connected())
+    const shells: ShellInventory = [shellInfo("sh_lost_end", "ses_1")]
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ streams: [events], messages: { ses_1: [] }, shells }),
+      sessionID: "ses_1",
+      replay: true,
+      replayLimit: 1,
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(1)
+      shells.splice(0, 1, shellInfo("sh_new_outside_history", "ses_1"))
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        activeShells: 1,
+      })
+      events.push(shellEnded("sh_new_outside_history", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle",
+        "resized shell end",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(0)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("does not revive a shell settled by inventory while admitting a new buffered shell", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events], messages: { ses_1: [] }, shells: [shellInfo("sh_old", "ses_1")] })
+    const list = spyOn(client.shell, "list")
+    const inventory = defer<{ location: { directory: string }; data: ShellInventory }>()
+    let resizing = false
+    list.mockImplementation(() => {
+      if (resizing) return inventory.promise as never
+      return ok({ location: { directory: "/tmp" }, data: [shellInfo("sh_old", "ses_1")] }) as never
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      replay: true,
+      footer: ui.api,
+      thinking: false,
+    })
+    try {
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(1)
+      resizing = true
+      const replay = transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      await waitFor(() => list.mock.calls.length, (count) => count >= 2, "resize inventory request")
+      events.push(shellStarted("sh_new", "sleep 10"))
+      inventory.resolve({ location: { directory: "/tmp" }, data: [] })
+      await replay
+
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        activeShells: 1,
+      })
+      const beforeLateOldStart = ui.events.length
+      const beforeLateOldStartPatches = ui.events.filter((event) => event.type === "stream.patch").length
+      events.push(shellStarted("sh_old", "sleep 10"))
+      events.push(executionSucceeded(4))
+      await waitFor(
+        () => ui.events.filter((event) => event.type === "stream.patch").length,
+        (count) => count > beforeLateOldStartPatches,
+        "late settled shell event",
+      )
+      expect(ui.events.length).toBeGreaterThan(beforeLateOldStart)
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(1)
+
+      events.push(shellEnded("sh_new", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle",
+        "new buffered shell end",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(0)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("settles a projected shell excluded by inventory before applying buffered starts", async () => {
+    const events = feed()
+    events.push(connected())
+    const messages: SessionMessages = [
+      {
+        id: "msg_projected_old",
+        type: "shell",
+        shellID: "sh_projected_old",
+        status: "running",
+        command: "sleep 10",
+        time: { created: 1 },
+      },
+    ]
+    const client = sdk({
+      streams: [events],
+      messages: { ses_1: messages },
+      shells: [shellInfo("sh_projected_old", "ses_1")],
+    })
+    const list = spyOn(client.shell, "list")
+    const inventory = defer<{ location: { directory: string }; data: ShellInventory }>()
+    let resizing = false
+    list.mockImplementation(() => {
+      if (resizing) return inventory.promise as never
+      return ok({ location: { directory: "/tmp" }, data: [shellInfo("sh_projected_old", "ses_1")] }) as never
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      replay: true,
+      footer: ui.api,
+      thinking: false,
+    })
+    try {
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(1)
+      resizing = true
+      const replay = transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      await waitFor(() => list.mock.calls.length, (count) => count >= 2, "projected shell inventory request")
+      events.push(shellStarted("sh_projected_old", "sleep 10"))
+      inventory.resolve({ location: { directory: "/tmp" }, data: [] })
+      await replay
+
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "idle",
+        activeShells: 0,
+      })
+      const beforeLateStart = ui.events.length
+      events.push(executionSucceeded(8))
+      await waitFor(
+        () => ui.events.length,
+        (count) => count > beforeLateStart,
+        "projected shell late-start settlement",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(0)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("rebuilds active shells from projected messages when inventory fails during resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events], messages: { ses_1: [] }, shells: [shellInfo("sh_stale", "ses_1")] })
+    const list = spyOn(client.shell, "list")
+    let calls = 0
+    list.mockImplementation(() => {
+      calls += 1
+      if (calls > 1) return Promise.reject(new Error("inventory unavailable")) as never
+      return ok({ location: { directory: "/tmp" }, data: [shellInfo("sh_stale", "ses_1")] }) as never
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      replay: true,
+      footer: ui.api,
+      thinking: false,
+    })
+    try {
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(1)
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        activeShells: 1,
+      })
+
+      const beforeLateStart = ui.events.length
+      const beforeLateStartPatches = ui.events.filter((event) => event.type === "stream.patch").length
+      events.push(shellEnded("sh_stale", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "stale shell inventory fallback settlement",
+      )
+      events.push(shellStarted("sh_stale", "sleep 10"))
+      events.push(executionSucceeded(5))
+      await waitFor(
+        () => ui.events.filter((event) => event.type === "stream.patch").length,
+        (count) => count > beforeLateStartPatches,
+        "stale shell late event",
+      )
+      expect(ui.events.length).toBeGreaterThan(beforeLateStart)
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(0)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("keeps an active shell running when resize hydration partially fails", async () => {
+    const events = feed()
+    events.push(connected())
+    let failSubagentHydration = false
+    const active = new Proxy<Record<string, { type: "running" }>>(
+      {},
+      {
+        ownKeys() {
+          if (failSubagentHydration) throw new Error("subagent hydration unavailable")
+          return []
+        },
+      },
+    )
+    const client = sdk({ streams: [events], messages: { ses_1: [] }, active: () => active })
+    const list = spyOn(client.shell, "list").mockImplementation((request) =>
+      ok({
+        location: { directory: request?.location?.directory ?? "/location-a" },
+        data: [],
+      }) as never,
+    )
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      replay: true,
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(shellStarted("sh_resize_hydration_failure", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "partial-failure shell start",
+      )
+      events.push({
+        id: "evt_partial_failure_move",
+        created: 1,
+        type: "session.moved",
+        durable: durable("ses_1", 1),
+        data: { sessionID: "ses_1", location: { directory: "/location-b" }, projectID: "proj_1" },
+      })
+      failSubagentHydration = true
+      await expect(transport.replayOnResize({ localRows: () => [], reset: async () => {} })).rejects.toThrow(
+        "subagent hydration unavailable",
+      )
+
+      failSubagentHydration = false
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      expect(list.mock.calls.at(-1)?.[0]).toEqual({ location: { directory: "/location-b" } })
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "running" && patch.activeShells === 1,
+        "partial-failure old-location shell preservation",
+      )
+      events.push(shellEnded("sh_resize_hydration_failure", "printf done after failure", 2, "/location-a", "done after failure"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "partial-failure shell end",
+      )
+      expect(ui.commits).toContainEqual(
+        expect.objectContaining({
+          partID: "shell:sh_resize_hydration_failure",
+          text: "done after failure",
+          toolState: "completed",
+        }),
+      )
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("does not wait forever for optional shell inventory during hydration", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events], messages: { ses_1: [] } })
+    let inventorySignal: AbortSignal | undefined
+    spyOn(client.shell, "list").mockImplementation((_request, options) => {
+      inventorySignal = options?.signal
+      return new Promise(() => {}) as never
+    })
+    const started = Date.now()
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      expect(Date.now() - started).toBeLessThan(1500)
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.phase).toBe("idle")
+      expect(inventorySignal).toBeDefined()
+      expect(inventorySignal?.aborted).toBe(true)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("falls back to projected shell state when optional inventory fails", async () => {
+    const events = feed()
+    events.push(connected())
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        streams: [events],
+        messages: {
+          ses_1: [{ id: "msg_fallback", type: "shell", shellID: "sh_fallback", status: "running", command: "sleep 10", time: { created: 1 } }],
+        },
+      }),
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        activeShells: 1,
+      })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("restores the shell status when a blocker disappears", async () => {
+    const events = feed()
+    events.push(connected())
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ streams: [events] }),
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(shellStarted("sh_blocked", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "blocked shell start",
+      )
+      events.push({
+        id: "evt_permission_shell",
+        created: 1,
+        type: "permission.asked",
+        data: { id: "per_shell", sessionID: "ses_1", action: "read", resources: ["/tmp/file"] },
+      })
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.view")?.view.type,
+        (type) => type === "permission",
+        "shell permission blocker",
+      )
+      events.push({
+        id: "evt_permission_shell_replied",
+        created: 2,
+        type: "permission.replied",
+        data: { sessionID: "ses_1", requestID: "per_shell", reply: "once" },
+      })
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.status === "running shell" && patch.activeShells === 1,
+        "unblocked shell status",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("restores a running footer for an unfinished shell during hydration", async () => {
+    const events = feed()
+    events.push(connected())
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        streams: [events],
+        messages: {
+          ses_1: [
+            {
+              id: "msg_background_shell",
+              type: "shell",
+              shellID: "sh_hydrated",
+              status: "running",
+              command: "sleep 10",
+              time: { created: 1 },
+            },
+          ],
+        },
+      }),
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toEqual({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("keeps a projected shell with an unknown origin alive when the current inventory is empty", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_projected_unknown_location",
+            type: "shell",
+            shellID: "sh_projected_unknown_location",
+            status: "running",
+            command: "sleep 10",
+            time: { created: 1 },
+          },
+        ],
+      },
+    })
+    spyOn(client.shell, "list").mockImplementation(() =>
+      ok({ location: { directory: "/location-b" }, data: [] }) as never,
+    )
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/location-b" },
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "running",
+        status: "running shell",
+        activeShells: 1,
+      })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("uses projected location-switch history instead of the current inventory location", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          // message.list returns desc order; transport reverses it before
+          // walking the historical location context.
+          {
+            id: "msg_projected_old_location_shell",
+            type: "shell",
+            shellID: "sh_projected_old_location",
+            status: "running",
+            command: "sleep 10",
+            time: { created: 2 },
+          },
+          {
+            id: "msg_projected_location_switch",
+            type: "location-switched",
+            location: { directory: "/location-a" },
+            time: { created: 1 },
+          },
+        ],
+      },
+    })
+    const list = spyOn(client.shell, "list").mockImplementation((request) =>
+      ok({ location: { directory: request?.location?.directory ?? "/location-b" }, data: [] }) as never,
+    )
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      location: { directory: "/location-b" },
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      expect(list).toHaveBeenCalledWith(
+        { location: { directory: "/location-a" } },
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "idle",
+        activeShells: 0,
+      })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("does not let prompt queue completion hide a background shell", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events] })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    try {
+      events.push(shellStarted("sh_queued", "sleep 10"))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.status === "running shell",
+        "queued shell start",
+      )
+
+      const prompt = spyOn(client.session, "prompt").mockImplementation((request) => {
+        queueMicrotask(() => {
+          events.push({
+            id: "evt_queued_delivered",
+            created: 1,
+            type: "session.inbox.delivered",
+            durable: durable("ses_1"),
+            data: { sessionID: "ses_1", inboxID: request.id! },
+          })
+          events.push(executionSucceeded(2))
+        })
+        return ok(promptAdmission(request)) as never
+      })
+      const queue = runPromptQueue({
+        footer: ui.api,
+        initialInput: "hello",
+        run: (next, signal) =>
+          transport.runPromptTurn({
+            agent: undefined,
+            model: undefined,
+            variant: undefined,
+            prompt: next,
+            files: [],
+            includeFiles: false,
+            signal,
+          }),
+        admit: async () => {
+          throw new Error("unexpected follow-up")
+        },
+        settle: () => transport.waitForIdle(),
+      })
+
+      try {
+        await waitFor(() => prompt.mock.calls.length, (count) => count > 0, "queued prompt admission")
+        await waitFor(
+          () => ui.events.filter((event) => event.type === "stream.patch" && event.patch.status === "running shell").length,
+          (count) => count >= 2,
+          "queued prompt completion patch",
+        )
+        expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toEqual({
+          phase: "running",
+          status: "running shell",
+          activeShells: 1,
+        })
+      } finally {
+        ui.api.close()
+        await queue
+      }
+    } finally {
+      await transport.close()
+    }
+  })
+
   test("runs a shell turn through v2.session.shell and renders live output", async () => {
     const events = feed()
     events.push(connected())
@@ -3067,7 +4370,197 @@ describe("V2 mini transport", () => {
       },
     ])
     expect(ui.events).toContainEqual({ type: "stream.patch", patch: { phase: "running", status: "running shell" } })
+    expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.phase).toBe("idle")
     await transport.close()
+  })
+
+  test("keeps a root execution running after foreground shell HTTP success", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events] })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    let request: Parameters<OpenCodeClient["session"]["shell"]>[0] | undefined
+    let complete!: () => void
+    spyOn(client.session, "shell").mockImplementation((input) => {
+      request = input
+      return new Promise<void>((resolve) => {
+        complete = resolve
+      }) as never
+    })
+    try {
+      events.push(executionStarted(20))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "running",
+        "root execution start",
+      )
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "sleep 10", parts: [], mode: "shell" },
+        files: [],
+        includeFiles: true,
+      })
+      await waitFor(() => request, (value) => value !== undefined, "root foreground shell request")
+      events.push({ ...shellStarted("sh_root_foreground", "sleep 10"), id: request!.id!.replace(/^msg_/, "evt_") })
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "root foreground shell start",
+      )
+      complete()
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "running" && patch?.activeShells === 0 && patch.status === "assistant responding",
+        "foreground shell success while root remains active",
+      )
+
+      events.push(executionSucceeded(21))
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "root execution completion",
+      )
+      await turn
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("settles a foreground shell on HTTP success across resize while preserving late ended output", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events] })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      replay: true,
+      thinking: false,
+      footer: ui.api,
+    })
+    let request: Parameters<OpenCodeClient["session"]["shell"]>[0] | undefined
+    let complete!: () => void
+    spyOn(client.session, "shell").mockImplementation((input) => {
+      request = input
+      return new Promise<void>((resolve) => {
+        complete = resolve
+      }) as never
+    })
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "sleep 10", parts: [], mode: "shell" },
+        files: [],
+        includeFiles: true,
+      })
+      await waitFor(() => request, (value) => value !== undefined, "foreground shell request")
+      const started = { ...shellStarted("sh_foreground", "sleep 10"), id: request!.id!.replace(/^msg_/, "evt_") }
+      events.push(started)
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.activeShells === 1,
+        "foreground shell start",
+      )
+      complete()
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "foreground shell HTTP settlement",
+      )
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+
+      const beforeLateStarted = ui.commits.length
+      const beforeLateStartedPatches = ui.events.filter((event) => event.type === "stream.patch").length
+      events.push(started)
+      events.push(executionSucceeded(6))
+      await waitFor(
+        () => ui.events.filter((event) => event.type === "stream.patch").length,
+        (count) => count > beforeLateStartedPatches,
+        "duplicate foreground start",
+      )
+      expect(ui.commits.length).toBe(beforeLateStarted)
+
+      events.push(shellEnded("sh_foreground", "sleep 10"))
+      await waitFor(
+        () => ui.commits.some((commit) => commit.partID === "shell:sh_foreground" && commit.phase === "progress"),
+        Boolean,
+        "late foreground shell output",
+      )
+      await turn
+      expect(ui.commits.find((commit) => commit.partID === "shell:sh_foreground" && commit.phase === "progress")?.text).toBe(
+        "done",
+      )
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("tombstones a foreground request before its started event arrives", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events] })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    let request: Parameters<OpenCodeClient["session"]["shell"]>[0] | undefined
+    let complete!: () => void
+    spyOn(client.session, "shell").mockImplementation((input) => {
+      request = input
+      return new Promise<void>((resolve) => {
+        complete = resolve
+      }) as never
+    })
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "sleep 10", parts: [], mode: "shell" },
+        files: [],
+        includeFiles: true,
+      })
+      await waitFor(() => request, (value) => value !== undefined, "unobserved foreground request")
+      complete()
+      await waitFor(
+        () => ui.events.findLast((event) => event.type === "stream.patch")?.patch,
+        (patch) => patch?.phase === "idle" && patch.activeShells === 0,
+        "unobserved foreground settlement",
+      )
+
+      const beforeLateStart = ui.events.filter((event) => event.type === "stream.patch").length
+      events.push({ ...shellStarted("sh_late_started", "sleep 10"), id: request!.id!.replace(/^msg_/, "evt_") })
+      events.push(executionSucceeded(7))
+      await waitFor(
+        () => ui.events.filter((event) => event.type === "stream.patch").length,
+        (count) => count > beforeLateStart,
+        "late foreground start settlement",
+      )
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch.activeShells).toBe(0)
+
+      events.push(shellEnded("sh_late_started", "sleep 10"))
+      await waitFor(
+        () => ui.commits.some((commit) => commit.partID === "shell:sh_late_started" && commit.phase === "progress"),
+        Boolean,
+        "late foreground output after tombstone",
+      )
+      await turn
+    } finally {
+      await transport.close()
+    }
   })
 
   test("aborts an active shell turn without interrupting the session", async () => {
@@ -3095,21 +4588,60 @@ describe("V2 mini transport", () => {
     )
     const interrupted = spyOn(client.session, "interrupt").mockImplementation(() => ok({ interrupted: true }))
 
-    const turn = transport.runPromptTurn({
-      agent: undefined,
-      model: undefined,
-      variant: undefined,
-      prompt: { text: "sleep 100", parts: [], mode: "shell" },
-      files: [],
-      includeFiles: true,
-    })
-    while (!started) await Bun.sleep(0)
-    await transport.interruptActiveTurn()
-    await turn
+    try {
+      const turn = transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "sleep 100", parts: [], mode: "shell" },
+        files: [],
+        includeFiles: true,
+      })
+      await waitFor(() => started, Boolean, "foreground shell request before abort")
+      await transport.interruptActiveTurn()
+      await turn
 
-    expect(aborted).toBe(true)
-    expect(interrupted).not.toHaveBeenCalled()
-    await transport.close()
+      expect(aborted).toBe(true)
+      expect(interrupted).not.toHaveBeenCalled()
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "idle",
+        activeShells: 0,
+      })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("settles a foreground shell that fails before started", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({ streams: [events] })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      footer: ui.api,
+    })
+    spyOn(client.session, "shell").mockImplementation(() => Promise.reject(new Error("shell failed")) as never)
+    try {
+      await expect(
+        transport.runPromptTurn({
+          agent: undefined,
+          model: undefined,
+          variant: undefined,
+          prompt: { text: "false", parts: [], mode: "shell" },
+          files: [],
+          includeFiles: true,
+        }),
+      ).rejects.toThrow("shell failed")
+      expect(ui.events.findLast((event) => event.type === "stream.patch")?.patch).toMatchObject({
+        phase: "idle",
+        activeShells: 0,
+      })
+    } finally {
+      await transport.close()
+    }
   })
 
   test("does not resolve an owned shell output wait from an unrelated shell", async () => {
@@ -3295,6 +4827,741 @@ describe("V2 mini transport", () => {
       { phase: "progress", partID: "shell:sh_1", text: "file.txt", toolState: "completed" },
     ])
     await transport.close()
+  })
+
+  test("replays a completed hydrated shell after resize when local rows are empty", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_resize_completed_shell",
+            type: "shell" as const,
+            shellID: "sh_resize_completed",
+            status: "exited",
+            command: "printf done",
+            exit: 0,
+            output: { output: "done", cursor: 4, size: 4, truncated: false },
+            time: { created: 1, completed: 2 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      await waitFor(
+        () => ui.commits.filter((commit) => commit.partID === "shell:sh_resize_completed").length,
+        (count) => count === 2,
+        "initial completed shell transcript",
+      )
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      const replayed = ui.commits.slice(beforeResize).filter((commit) => commit.partID === "shell:sh_resize_completed")
+      expect(replayed).toHaveLength(2)
+      expect(replayed.filter((commit) => commit.phase === "start")).toHaveLength(1)
+      expect(replayed.filter((commit) => commit.phase === "progress" && commit.text === "done")).toHaveLength(1)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("replays a running hydrated shell start after resize when local rows are empty", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_resize_running_shell",
+            type: "shell" as const,
+            shellID: "sh_resize_running",
+            status: "running",
+            command: "sleep 10",
+            time: { created: 1 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      await waitFor(
+        () => ui.commits.filter((commit) => commit.partID === "shell:sh_resize_running").length,
+        (count) => count === 1,
+        "initial running shell transcript",
+      )
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      const replayed = ui.commits.slice(beforeResize).filter((commit) => commit.partID === "shell:sh_resize_running")
+      expect(replayed).toHaveLength(1)
+      expect(replayed[0]).toMatchObject({ phase: "start", text: "running shell", toolState: "running" })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("uses local shell rows to suppress projected shell duplicates after resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_resize_local_shell",
+            type: "shell" as const,
+            shellID: "sh_resize_local",
+            status: "exited",
+            command: "printf local",
+            exit: 0,
+            output: { output: "local", cursor: 5, size: 5, truncated: false },
+            time: { created: 1, completed: 2 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      await waitFor(
+        () => ui.commits.filter((commit) => commit.partID === "shell:sh_resize_local").length,
+        (count) => count === 2,
+        "initial local shell transcript",
+      )
+      const localRows: Array<{ commit: StreamCommit }> = [
+        {
+          commit: {
+            kind: "tool",
+            source: "tool",
+            partID: "shell:sh_resize_local",
+            tool: "shell",
+            shell: { command: "printf local" },
+            text: "running shell",
+            phase: "start",
+            toolState: "running",
+          },
+        },
+        {
+          commit: {
+            kind: "tool",
+            source: "tool",
+            partID: "shell:sh_resize_local",
+            tool: "shell",
+            shell: { command: "printf local" },
+            text: "local",
+            phase: "progress",
+            toolState: "completed",
+          },
+        },
+      ]
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({ localRows: () => localRows, reset: async () => {} })
+      const replayed = ui.commits.slice(beforeResize).filter((commit) => commit.partID === "shell:sh_resize_local")
+      expect(replayed).toEqual(localRows.map((row) => row.commit))
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("restores a local shell start before a projected terminal after resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_resize_local_start",
+            type: "shell" as const,
+            shellID: "sh_resize_local_start",
+            status: "exited",
+            command: "printf ordered",
+            exit: 0,
+            output: { output: "ordered", cursor: 7, size: 7, truncated: false },
+            time: { created: 1, completed: 2 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      await waitFor(
+        () => ui.commits.filter((commit) => commit.partID === "shell:sh_resize_local_start").length,
+        (count) => count === 2,
+        "initial ordered shell transcript",
+      )
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({
+        localRows: () => [
+          {
+            commit: {
+              kind: "tool",
+              source: "tool",
+              partID: "shell:sh_resize_local_start",
+              tool: "shell",
+              shell: { command: "printf ordered" },
+              text: "running shell",
+              phase: "start",
+              toolState: "running",
+            },
+          },
+        ],
+        reset: async () => {},
+      })
+      const replayed = ui.commits
+        .slice(beforeResize)
+        .filter((commit) => commit.partID === "shell:sh_resize_local_start")
+      expect(replayed.map((commit) => commit.phase)).toEqual(["start", "progress"])
+      expect(replayed[1]).toMatchObject({ text: "ordered", toolState: "completed" })
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("places a projected terminal after intervening local assistant text and before the next projected row", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          { id: "msg_after_mixed_shell", type: "user", text: "after shell", files: [], agents: [], time: { created: 3 } },
+          {
+            id: "msg_mixed_shell",
+            type: "shell",
+            shellID: "sh_mixed_terminal",
+            status: "exited",
+            command: "printf done",
+            exit: 0,
+            output: { output: "done", cursor: 4, size: 4, truncated: false },
+            time: { created: 2, completed: 3 },
+          },
+          { id: "msg_before_mixed_shell", type: "user", text: "before shell", files: [], agents: [], time: { created: 1 } },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      await transport.replayOnResize({
+        localRows: () => [
+          { commit: { kind: "user", source: "system", messageID: "msg_before_mixed_shell", text: "before shell", phase: "start" } },
+          {
+            commit: {
+              kind: "tool",
+              source: "tool",
+              partID: "shell:sh_mixed_terminal",
+              tool: "shell",
+              shell: { command: "printf done" },
+              text: "running shell",
+              phase: "start",
+              toolState: "running",
+            },
+          },
+          {
+            commit: {
+              kind: "assistant",
+              source: "assistant",
+              messageID: "msg_local_between_shell_phases",
+              partID: "text:0",
+              text: "assistant between shell phases",
+              phase: "progress",
+            },
+          },
+          { commit: { kind: "user", source: "system", messageID: "msg_after_mixed_shell", text: "after shell", phase: "start" } },
+        ],
+        reset: async () => {
+          ui.commits.length = 0
+        },
+      })
+      expect(ui.commits.map((commit) => commit.text)).toEqual([
+        "before shell",
+        "running shell",
+        "assistant between shell phases",
+        "done",
+        "after shell",
+      ])
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("keeps projected non-shell history before local shell rows after resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_projected_running_after_user",
+            type: "shell" as const,
+            shellID: "sh_local_order",
+            status: "running",
+            command: "sleep 10",
+            time: { created: 2 },
+          },
+          {
+            id: "msg_before_local_shell",
+            type: "user",
+            text: "before shell",
+            files: [],
+            agents: [],
+            time: { created: 1 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({
+        localRows: () => [
+          {
+            commit: {
+              kind: "assistant",
+              source: "assistant",
+              messageID: "msg_local_before_shell",
+              partID: "text:0",
+              text: "local before",
+              phase: "progress",
+            },
+          },
+          {
+            commit: {
+              kind: "tool",
+              source: "tool",
+              partID: "shell:sh_local_order",
+              tool: "shell",
+              shell: { command: "sleep 10" },
+              text: "running shell",
+              phase: "start",
+              toolState: "running",
+            },
+          },
+          {
+            commit: {
+              kind: "assistant",
+              source: "assistant",
+              messageID: "msg_local_after_shell",
+              partID: "text:0",
+              text: "local after",
+              phase: "progress",
+            },
+          },
+        ],
+        reset: async () => {},
+      })
+      const replayed = ui.commits.slice(beforeResize)
+      const before = replayed.findIndex((commit) => commit.text === "local before")
+      const shell = replayed.findIndex((commit) => commit.partID === "shell:sh_local_order")
+      const after = replayed.findIndex((commit) => commit.text === "local after")
+      expect(replayed.findIndex((commit) => commit.kind === "user" && commit.text === "before shell")).toBeLessThan(shell)
+      expect(before).toBeLessThan(shell)
+      expect(shell).toBeLessThan(after)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("inserts a local-only shell between its projected transcript anchors after resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_local_only_after",
+            type: "user",
+            text: "after shell",
+            files: [],
+            agents: [],
+            time: { created: 3 },
+          },
+          {
+            id: "msg_local_only_before",
+            type: "user",
+            text: "before shell",
+            files: [],
+            agents: [],
+            time: { created: 1 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({
+        localRows: () => [
+          {
+            commit: {
+              kind: "user",
+              source: "system",
+              messageID: "msg_local_only_before",
+              text: "before shell",
+              phase: "start",
+            },
+          },
+          {
+            commit: {
+              kind: "tool",
+              source: "tool",
+              partID: "shell:sh_local_only",
+              tool: "shell",
+              shell: { command: "sleep 10" },
+              text: "running shell",
+              phase: "start",
+              toolState: "running",
+            },
+          },
+          {
+            commit: {
+              kind: "user",
+              source: "system",
+              messageID: "msg_local_only_after",
+              text: "after shell",
+              phase: "start",
+            },
+          },
+        ],
+        reset: async () => {},
+      })
+      const replayed = ui.commits.slice(beforeResize)
+      expect(replayed.map((commit) => commit.text)).toEqual(["before shell", "running shell", "after shell"])
+      const shell = replayed.findIndex((commit) => commit.partID === "shell:sh_local_only")
+      const before = replayed.findIndex((commit) => commit.text === "before shell")
+      const after = replayed.findIndex((commit) => commit.text === "after shell")
+      expect(before).toBeLessThan(shell)
+      expect(shell).toBeLessThan(after)
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("keeps non-contiguous local commits for one projected shell in row order", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_shell_sequence_after",
+            type: "user",
+            text: "after shell",
+            files: [],
+            agents: [],
+            time: { created: 4 },
+          },
+          {
+            id: "msg_shell_sequence_shell",
+            type: "shell",
+            shellID: "sh_non_contiguous",
+            status: "exited",
+            command: "printf done",
+            exit: 0,
+            output: { output: "done", cursor: 4, size: 4, truncated: false },
+            time: { created: 3, completed: 4 },
+          },
+          {
+            id: "msg_shell_sequence_before",
+            type: "user",
+            text: "before shell",
+            files: [],
+            agents: [],
+            time: { created: 1 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({
+        localRows: () => [
+          {
+            commit: {
+              kind: "user",
+              source: "system",
+              messageID: "msg_shell_sequence_before",
+              text: "before shell",
+              phase: "start",
+            },
+          },
+          {
+            commit: {
+              kind: "tool",
+              source: "tool",
+              partID: "shell:sh_non_contiguous",
+              tool: "shell",
+              shell: { command: "printf done" },
+              text: "running shell",
+              phase: "start",
+              toolState: "running",
+            },
+          },
+          {
+            commit: {
+              kind: "assistant",
+              source: "assistant",
+              messageID: "msg_shell_sequence_local_assistant",
+              partID: "text:0",
+              text: "assistant between shell phases",
+              phase: "progress",
+            },
+          },
+          {
+            commit: {
+              kind: "tool",
+              source: "tool",
+              partID: "shell:sh_non_contiguous",
+              tool: "shell",
+              shell: { command: "printf done" },
+              text: "done",
+              phase: "progress",
+              toolState: "completed",
+            },
+          },
+          {
+            commit: {
+              kind: "user",
+              source: "system",
+              messageID: "msg_shell_sequence_after",
+              text: "after shell",
+              phase: "start",
+            },
+          },
+        ],
+        reset: async () => {},
+      })
+      expect(ui.commits.slice(beforeResize).map((commit) => commit.text)).toEqual([
+        "before shell",
+        "running shell",
+        "assistant between shell phases",
+        "done",
+        "after shell",
+      ])
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("preserves interleaved local rows for two shells after resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({ streams: [events], messages: { ses_1: [] } }),
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    const shellRow = (id: string, text: string, phase: "start" | "progress", toolState: "running" | "completed") => ({
+      commit: {
+        kind: "tool" as const,
+        source: "tool" as const,
+        partID: `shell:${id}`,
+        tool: "shell" as const,
+        shell: { command: `printf ${id}` },
+        text,
+        phase,
+        toolState,
+      },
+    })
+    try {
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({
+        localRows: () => [
+          shellRow("sh_interleave_one", "running shell", "start", "running"),
+          shellRow("sh_interleave_two", "running shell", "start", "running"),
+          shellRow("sh_interleave_one", "one", "progress", "completed"),
+          shellRow("sh_interleave_two", "two", "progress", "completed"),
+        ],
+        reset: async () => {},
+      })
+      expect(ui.commits.slice(beforeResize).map((commit) => commit.text)).toEqual([
+        "running shell",
+        "running shell",
+        "one",
+        "two",
+      ])
+      expect(ui.commits.slice(beforeResize).map((commit) => commit.partID)).toEqual([
+        "shell:sh_interleave_one",
+        "shell:sh_interleave_two",
+        "shell:sh_interleave_one",
+        "shell:sh_interleave_two",
+      ])
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("keeps a projected shell before a later projected non-shell row after resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_projected_after_shell",
+            type: "assistant",
+            agent: "build",
+            model: { providerID: "test", id: "model" },
+            content: [{ type: "text", text: "after shell" }],
+            time: { created: 2 },
+          },
+          {
+            id: "msg_projected_shell_before_text",
+            type: "shell" as const,
+            shellID: "sh_projected_order",
+            status: "running",
+            command: "sleep 10",
+            time: { created: 1 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({ localRows: () => [], reset: async () => {} })
+      const replayed = ui.commits.slice(beforeResize)
+      expect(replayed.findIndex((commit) => commit.partID === "shell:sh_projected_order")).toBeLessThan(
+        replayed.findIndex((commit) => commit.text === "after shell"),
+      )
+    } finally {
+      await transport.close()
+    }
+  })
+
+  test("adds a missing shell start before a terminal-only local row after resize", async () => {
+    const events = feed()
+    events.push(connected())
+    const client = sdk({
+      streams: [events],
+      messages: {
+        ses_1: [
+          {
+            id: "msg_before_terminal_only_shell",
+            type: "user",
+            text: "before terminal",
+            files: [],
+            agents: [],
+            time: { created: 1 },
+          },
+          {
+            id: "msg_projected_terminal_only",
+            type: "shell" as const,
+            shellID: "sh_terminal_only",
+            status: "exited",
+            command: "printf done",
+            exit: 0,
+            output: { output: "done", cursor: 4, size: 4, truncated: false },
+            time: { created: 2, completed: 3 },
+          },
+        ],
+      },
+    })
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: client,
+      sessionID: "ses_1",
+      thinking: false,
+      replay: true,
+      footer: ui.api,
+    })
+    try {
+      const beforeResize = ui.commits.length
+      await transport.replayOnResize({
+        localRows: () => [
+          {
+            commit: {
+              kind: "tool",
+              source: "tool",
+              partID: "shell:sh_terminal_only",
+              tool: "shell",
+              shell: { command: "printf done" },
+              text: "done",
+              phase: "progress",
+              toolState: "completed",
+            },
+          },
+        ],
+        reset: async () => {},
+      })
+      const replayed = ui.commits.slice(beforeResize).filter((commit) => commit.partID === "shell:sh_terminal_only")
+      expect(replayed.map((commit) => commit.phase)).toEqual(["start", "progress"])
+      expect(replayed[1]).toMatchObject({ text: "done", toolState: "completed" })
+    } finally {
+      await transport.close()
+    }
   })
 
   test("renders failed projected shells as errors and marks truncated live output", async () => {

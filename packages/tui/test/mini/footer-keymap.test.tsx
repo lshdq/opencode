@@ -12,6 +12,7 @@ async function renderSubagent(interrupt: "ctrl+i" | "none") {
   const [state] = createSignal<FooterState>({
     phase: "idle",
     status: "",
+    activeShells: 0,
     notice: "",
     model: "gpt-5",
     usage: undefined,

@@ -139,6 +139,7 @@ function footerState(input: Partial<FooterState> = {}) {
     interrupt: 0,
     exit: 0,
     ...input,
+    activeShells: input.activeShells ?? 0,
   })
 }
 

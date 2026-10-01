@@ -175,6 +175,8 @@ type FooterPhase = "idle" | "running"
 export type FooterState = {
   phase: FooterPhase
   status: string
+  /** Number of shells known to be running for the current session. */
+  activeShells: number
   notice: string
   model: string
   usage: { tokens: number; percent?: number; cost?: number } | undefined
