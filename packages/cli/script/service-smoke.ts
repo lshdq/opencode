@@ -73,6 +73,7 @@ export async function runServiceSmoke(binary: string, inherited = process.env) {
     const serverInfo = await waitForReady(info.url, headers)
     if (serverInfo.pid !== info.pid || serverInfo.version !== info.version)
       throw new Error("Server info does not match registration")
+    await verifyWebUi(info.url)
     const tokenInfo = await loopbackRequest(new URL(`/api/info?auth_token=${token}`, info.url), {
       signal: AbortSignal.timeout(5_000),
     })
@@ -212,6 +213,17 @@ async function waitForReady(url: string, headers: HeadersInit) {
     await Bun.sleep(25)
   }
   throw new Error("Compiled service did not become ready")
+}
+
+async function verifyWebUi(url: string) {
+  const shell = await loopbackRequest(new URL("/", url), { signal: AbortSignal.timeout(5_000) })
+  const html = await shell.text()
+  if (shell.status !== 200 || !html.includes("<html")) throw new Error("Compiled service did not serve the web UI")
+  const script = html.match(/<script[^>]*\bsrc="(\/_assets\/[^\"]+\.js)"/)?.[1]
+  if (!script) throw new Error("Compiled web UI names no entry script")
+  const entry = await loopbackRequest(new URL(script, url), { signal: AbortSignal.timeout(5_000) })
+  if (entry.status !== 200 || (await entry.text()).length === 0)
+    throw new Error(`Compiled service did not serve ${script}`)
 }
 
 function exitsWithin(process: Bun.Subprocess, milliseconds: number) {

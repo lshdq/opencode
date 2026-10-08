@@ -3,6 +3,8 @@ import os from "node:os"
 import path from "node:path"
 import { isolatedEnvironment } from "../../script/windows-runtime"
 
+export const transpilerCache = path.join(os.tmpdir(), "opencode-test-transpiler-cache")
+
 // Only this fixture's freshly allocated root is owned, never a custom DB override's parent.
 export async function isolatedRoot(prefix: string) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix))

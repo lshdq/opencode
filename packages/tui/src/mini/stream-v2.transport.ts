@@ -2069,7 +2069,6 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
           continue
         }
 
-        const key = commitKey(row.commit)
         const commit = row.commit
         let restored: StreamCommit | undefined = commit
         if (commit.image && commit.messageID && commit.partID) {

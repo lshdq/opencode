@@ -44,6 +44,7 @@ describe("desktop startup benchmark", () => {
       ["serviceReady", "v2 CLI background service ready"],
       ["rendererViteConnected", "[vite] connected."],
     ] as const
+
     cases.forEach(([milestone, line]) => {
       expect(milestoneForLine(`\u001b[32m${line}\u001b[39m`)).toBe(milestone)
     })
@@ -81,6 +82,7 @@ function sample(run: number, commandToHomeReadyMs: number): DesktopStartupSample
     rendererViteConnected: 15,
     homeReady: commandToHomeReadyMs,
   }
+
   return {
     run,
     commandToHomeReadyMs,

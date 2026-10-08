@@ -45,6 +45,8 @@ type Waiter = {
 }
 
 export type AcpProcess = {
+  readonly pid: number
+  readonly exited: Promise<number>
   readonly request: <T>(method: string, params?: unknown) => Promise<JsonRpcResponse<T>>
   readonly send: <T>(
     method: string,
@@ -185,6 +187,33 @@ export function alternateValue(option: Extract<SessionConfigOption, { type: "sel
   const value = flattenSelectOptions(option).find((item) => item.value !== option.currentValue)?.value
   if (!value) throw new Error(`ACP config option ${option.id} has no alternate value`)
   return value
+}
+
+/** A streamed completion that calls one tool. */
+export function toolCallStream(id: string, name: string, input: unknown) {
+  const chunks = [
+    {
+      choices: [
+        {
+          delta: {
+            role: "assistant",
+            tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: "" } }],
+          },
+          finish_reason: null,
+        },
+      ],
+      usage: null,
+    },
+    {
+      choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify(input) } }] } }],
+      usage: null,
+    },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }], usage: null },
+    { choices: [], usage: { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 } },
+  ]
+  return new Response(`${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`, {
+    headers: { "content-type": "text/event-stream" },
+  })
 }
 
 function verifierConfig(llmUrl: string, skills?: string) {
@@ -332,6 +361,8 @@ function spawnAcp(input: { readonly env: Record<string, string | undefined> }): 
   }
 
   return {
+    pid: child.pid,
+    exited: child.exited,
     request: <T>(method: string, params?: unknown) => send<T>(method, params).response,
     send,
     notify: (method: string, params: unknown) => write({ jsonrpc: "2.0", method, params }),

@@ -5,6 +5,7 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Document } from "@opencode/schema/config"
 import { basename, dirname, isAbsolute, join, resolve } from "path"
+import { sameDirectory } from "@opencode/util/path"
 import { isDeepStrictEqual } from "node:util"
 import { createHash } from "node:crypto"
 import { Effect, FiberMap, PubSub, Semaphore, Stream } from "effect"
@@ -280,6 +281,6 @@ export const Plugin = define({
 })
 
 function ancestorDirectories(start: string, stop: string): string[] {
-  if (start === stop) return [start]
+  if (sameDirectory(start, stop)) return [start]
   return [start, ...ancestorDirectories(dirname(start), stop)]
 }

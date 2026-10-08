@@ -36,6 +36,7 @@ RELEASE_REVIEW.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+/artifacts/
 
 # Keep local OpenCode data ignored, except the two fork-maintained skill guides.
 !/.opencode/
