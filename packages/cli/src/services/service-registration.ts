@@ -3,7 +3,8 @@ export * as ServiceRegistration from "./service-registration"
 import { Service, type Info } from "@opencode/client/effect/service"
 import path from "node:path"
 import { Effect, FileSystem, Schedule, Schema } from "effect"
-import { HttpServer } from "effect/unstable/http"
+import { HttpServer } from "effect/http"
+import { NetAddress } from "effect/net"
 import { OPENCODE_VERSION } from "../version"
 import { FileMode } from "@opencode/util/file-mode"
 import { FileModeEffect } from "@opencode/util/file-mode-effect"
@@ -13,7 +14,7 @@ const encodeInfo = Schema.encodeEffect(infoJson)
 const decodeInfo = Schema.decodeUnknownEffect(infoJson)
 
 export const register = Effect.fnUntraced(function* (options: {
-  readonly address: HttpServer.Address
+  readonly address: NetAddress.SocketAddress
   readonly password: string
   readonly id: string
   readonly file: string
