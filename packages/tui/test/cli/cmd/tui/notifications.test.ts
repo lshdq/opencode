@@ -3,23 +3,33 @@ import Notifications from "../../../../src/feature-plugins/system/notifications"
 import type { OpenCodeEvent, PermissionAsked } from "@opencode/client"
 import type { AttentionNotifyOptions, Context, Route, ToastOptions } from "@opencode/plugin/tui/context"
 
-type Session = { id: string; title: string; parentID?: string }
+type Session = { id: string; title?: string; parentID?: string }
 
-async function setup(route: Route = { type: "session", sessionID: "session" }) {
+async function setup(
+  route: Route = { type: "session", sessionID: "session" },
+  initialStatuses: Partial<Record<string, "idle" | "running">> = {},
+  temporarilyHiddenSessions: string[] = [],
+) {
   const notifications: AttentionNotifyOptions[] = []
   const toasts: ToastOptions[] = []
   const handlers = new Map<OpenCodeEvent["type"], ((event: OpenCodeEvent) => void)[]>()
-  const session = (id: string, title: string, parentID?: string): Session => ({
+  const hiddenFamilies = new Set<string>()
+  const hiddenSessions = new Set(temporarilyHiddenSessions)
+  const session = (id: string, title?: string, parentID?: string): Session => ({
     id,
-    title,
+    ...(title && { title }),
     ...(parentID && { parentID }),
   })
   const sessions: Record<string, Session> = {
     session: session("session", "Demo session"),
     subagent: session("subagent", "Subagent session", "session"),
+    subagent2: session("subagent2", "Second subagent session", "session"),
+    nested: session("nested", "Nested subagent session", "subagent"),
     abort: session("abort", "Abort session"),
     timeout: session("timeout", "Timeout session"),
   }
+  const statuses: Record<string, "idle" | "running"> = Object.fromEntries(Object.keys(sessions).map((id) => [id, "idle"]))
+  Object.assign(statuses, initialStatuses)
 
   await Notifications.setup({
     ui: {
@@ -49,8 +59,16 @@ async function setup(route: Route = { type: "session", sessionID: "session" }) {
         }
       },
       session: {
-        get: (sessionID: string) => sessions[sessionID],
-        status: () => "running" as const,
+        get: (sessionID: string) => hiddenSessions.has(sessionID) ? undefined : sessions[sessionID],
+        family: (sessionID: string) => {
+          if (hiddenFamilies.has(sessionID)) return [sessionID]
+          return Object.values(sessions)
+            .filter((candidate) => !hiddenSessions.has(candidate.id))
+            .filter((candidate) => candidate.id === sessionID || candidate.parentID === sessionID)
+            .map((candidate) => candidate.id)
+        },
+        list: () => Object.values(sessions).filter((candidate) => !hiddenSessions.has(candidate.id)),
+        status: (sessionID: string) => statuses[sessionID],
       },
     },
   } as unknown as Context)
@@ -59,7 +77,35 @@ async function setup(route: Route = { type: "session", sessionID: "session" }) {
     notifications,
     toasts,
     emit(event: OpenCodeEvent) {
+      if (event.type === "session.created") {
+        sessions[event.data.sessionID] = session(
+          event.data.sessionID,
+          sessions[event.data.sessionID]?.title,
+          event.data.parentID,
+        )
+      }
+      if (event.type === "session.deleted") delete sessions[event.data.sessionID]
+      if (event.type === "session.execution.started") statuses[event.data.sessionID] = "running"
+      if (
+        event.type === "session.execution.succeeded" ||
+        event.type === "session.execution.interrupted" ||
+        event.type === "session.execution.failed"
+      ) {
+        statuses[event.data.sessionID] = "idle"
+      }
       for (const handler of handlers.get(event.type) ?? []) handler(event)
+    },
+    setStatus(sessionID: string, status: "idle" | "running") {
+      statuses[sessionID] = status
+    },
+    hideFamily(sessionID: string) {
+      hiddenFamilies.add(sessionID)
+    },
+    hideSession(sessionID: string) {
+      hiddenSessions.add(sessionID)
+    },
+    revealSession(sessionID: string) {
+      hiddenSessions.delete(sessionID)
     },
   }
 }
@@ -108,6 +154,16 @@ function executionSucceeded(id: string, sessionID = "session"): OpenCodeEvent {
   }
 }
 
+function executionInterrupted(id: string, sessionID = "session"): OpenCodeEvent {
+  return {
+    id,
+    created: 0,
+    type: "session.execution.interrupted",
+    durable: durable(sessionID),
+    data: { sessionID, reason: "user" },
+  }
+}
+
 function executionFailed(id: string, sessionID = "session"): OpenCodeEvent {
   return {
     id,
@@ -118,6 +174,33 @@ function executionFailed(id: string, sessionID = "session"): OpenCodeEvent {
       sessionID,
       error: { type: "unknown", message: "boom" },
     },
+  }
+}
+
+function sessionCreated(id: string, parentID: string): OpenCodeEvent {
+  return {
+    id,
+    created: 0,
+    type: "session.created",
+    durable: durable(id),
+    data: {
+      sessionID: id,
+      projectID: "project",
+      location: { directory: "/tmp/project" },
+      parentID,
+      slug: id,
+      version: "1",
+    },
+  }
+}
+
+function sessionDeleted(id: string, sessionID: string): OpenCodeEvent {
+  return {
+    id,
+    created: 0,
+    type: "session.deleted",
+    durable: { aggregateID: sessionID, seq: 0, version: 2 },
+    data: { sessionID },
   }
 }
 
@@ -278,6 +361,229 @@ describe("internal notifications TUI plugin", () => {
         sound: { name: "subagent_done", when: "always" },
       },
     ])
+  })
+
+  test("waits for a running subagent before notifying the main session", async () => {
+    const harness = await setup()
+    harness.emit(executionStarted("event-1", "subagent"))
+    harness.emit(executionSucceeded("event-2"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(executionSucceeded("event-3", "subagent"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Subagent session",
+        message: "Session done",
+        notification: false,
+        sound: { name: "subagent_done", when: "always" },
+      },
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+  })
+
+  test("TC-006: restores a subagent after reconnect when its next execution has no started event", async () => {
+    const harness = await setup()
+    harness.emit(executionSucceeded("event-1", "subagent"))
+    harness.setStatus("subagent", "running")
+    harness.emit(executionSucceeded("event-2"))
+
+    expect(harness.notifications).toHaveLength(1)
+    expect(harness.notifications[0]).toEqual({
+      title: "Subagent session",
+      message: "Session done",
+      notification: false,
+      sound: { name: "subagent_done", when: "always" },
+    })
+
+    harness.emit(executionSucceeded("event-3", "subagent"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Subagent session",
+        message: "Session done",
+        notification: false,
+        sound: { name: "subagent_done", when: "always" },
+      },
+      {
+        title: "Subagent session",
+        message: "Session done",
+        notification: false,
+        sound: { name: "subagent_done", when: "always" },
+      },
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+  })
+
+  test("notifies the main session once after multiple subagents finish", async () => {
+    const harness = await setup()
+    harness.emit(executionStarted("event-1", "subagent"))
+    harness.emit(executionStarted("event-2", "subagent2"))
+    harness.emit(executionSucceeded("event-3"))
+
+    harness.emit(executionSucceeded("event-4", "subagent"))
+    expect(harness.notifications).toHaveLength(1)
+    harness.emit(executionSucceeded("event-5", "subagent2"))
+    harness.emit(executionSucceeded("event-6", "subagent2"))
+
+    expect(
+      harness.notifications.filter(
+        (item) => item.sound && typeof item.sound === "object" && item.sound.name === "done",
+      ),
+    ).toHaveLength(1)
+  })
+
+  test("notifies the main session after the last subagent fails", async () => {
+    const harness = await setup()
+    harness.emit(executionStarted("event-1", "subagent"))
+    harness.emit(executionSucceeded("event-2"))
+
+    harness.emit(executionFailed("event-3", "subagent"))
+
+    expect(harness.notifications).toEqual([
+      {
+        title: "Subagent session",
+        message: "boom",
+        notification: false,
+        sound: { name: "error", when: "always" },
+      },
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+  })
+
+  test("waits for a running subagent before its family information is loaded", async () => {
+    const harness = await setup({ type: "session", sessionID: "session" }, {}, ["late-subagent"])
+    harness.emit(sessionCreated("late-subagent", "session"))
+    harness.emit(executionStarted("event-1", "late-subagent"))
+    harness.emit(executionSucceeded("event-2"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(executionSucceeded("event-3", "late-subagent"))
+    expect(harness.notifications).toEqual([
+      {
+        title: undefined,
+        message: "Session done",
+        notification: false,
+        sound: { name: "subagent_done", when: "always" },
+      },
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+    harness.revealSession("late-subagent")
+  })
+
+  test("restores running descendants after setup and releases deleted deferred parents", async () => {
+    const harness = await setup({ type: "session", sessionID: "session" }, { subagent: "running" })
+
+    harness.emit(executionSucceeded("event-1"))
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(sessionDeleted("event-2", "subagent"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+
+    harness.emit(sessionDeleted("event-3", "subagent"))
+    expect(harness.notifications).toHaveLength(1)
+  })
+
+  test("TC-008: suppresses late terminal events after a deleted subagent releases its parent", async () => {
+    const harness = await setup({ type: "session", sessionID: "session" }, { subagent: "running" })
+
+    harness.emit(executionSucceeded("event-1"))
+    harness.emit(sessionDeleted("event-2", "subagent"))
+    expect(harness.notifications).toHaveLength(1)
+
+    harness.emit(sessionDeleted("event-3", "subagent"))
+    harness.emit(executionSucceeded("event-4", "subagent"))
+    harness.emit(executionFailed("event-5", "subagent"))
+    harness.emit(executionInterrupted("event-6", "subagent"))
+
+    expect(harness.notifications).toHaveLength(1)
+    expect(harness.toasts).toHaveLength(0)
+  })
+
+  test("waits for nested descendants before notifying the main session", async () => {
+    const harness = await setup()
+    harness.emit(sessionCreated("subagent", "session"))
+    harness.emit(executionStarted("event-1", "subagent"))
+    harness.emit(sessionCreated("nested", "subagent"))
+    harness.emit(executionStarted("event-2", "nested"))
+    harness.emit(executionSucceeded("event-3"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(executionSucceeded("event-4", "subagent"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Subagent session",
+        message: "Session done",
+        notification: false,
+        sound: { name: "subagent_done", when: "always" },
+      },
+    ])
+
+    harness.emit(executionSucceeded("event-5", "nested"))
+    expect(harness.notifications).toHaveLength(3)
+    expect(harness.notifications[2]).toEqual({
+      title: "Demo session",
+      message: "Session done",
+      notification: { when: "blurred" },
+      sound: { name: "done", when: "always" },
+    })
+  })
+
+  test("TC-007: keeps the subagent interruption sound and waits for its last descendant", async () => {
+    const harness = await setup()
+    harness.emit(sessionCreated("subagent", "session"))
+    harness.emit(executionStarted("event-1", "subagent"))
+    harness.emit(sessionCreated("nested", "subagent"))
+    harness.emit(executionStarted("event-2", "nested"))
+    harness.emit(executionSucceeded("event-3"))
+
+    harness.emit(executionInterrupted("event-4", "subagent"))
+    harness.emit(executionInterrupted("event-4-duplicate", "subagent"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Subagent session",
+        message: "Session done",
+        notification: false,
+        sound: { name: "subagent_done", when: "always" },
+      },
+    ])
+
+    harness.emit(executionSucceeded("event-5", "nested"))
+    expect(harness.notifications).toHaveLength(3)
+    expect(harness.notifications[2]).toEqual({
+      title: "Demo session",
+      message: "Session done",
+      notification: { when: "blurred" },
+      sound: { name: "done", when: "always" },
+    })
   })
 
   test("notifies session errors once and suppresses the following idle done notification", async () => {

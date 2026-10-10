@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
+import { createHash } from "node:crypto"
 import { copyFile, lstat, mkdir, mkdtemp, readdir, rm, symlink, unlink } from "node:fs/promises"
 import path from "node:path"
 import {
@@ -369,6 +370,27 @@ describe("Windows build isolation", () => {
     }
   })
 
+  test("keeps a large source identity scan deterministic", async () => {
+    const parent = fixtureParent
+    await mkdir(parent, { recursive: true })
+    const root = await mkdtemp(path.join(parent, "identity-large-test-"))
+    try {
+      await execute(["git", "init", "--quiet"], root)
+      for (let index = 0; index < 4096; index++) {
+        await Bun.write(path.join(root, `source-${String(index).padStart(4, "0")}.txt`), `source ${index}`)
+      }
+      const first = await sourceIdentity(root)
+      const second = await sourceIdentity(root)
+      expect(first.sha256).toBe(second.sha256)
+      expect(first.files).toHaveLength(4096)
+      expect(first.files.map((file) => file.file)).toEqual(
+        [...first.files].map((file) => file.file).sort(),
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    }
+  }, 60_000)
+
   test.skipIf(process.platform !== "win32")(
     "repairs only untouched indexed symlink placeholders and keeps Git clean",
     async () => {
@@ -391,7 +413,14 @@ describe("Windows build isolation", () => {
         await repairWindowsLinks(root)
         expect((await lstat(path.join(root, files[0]))).isSymbolicLink()).toBe(true)
         expect(await execute(["git", "diff", "--exit-code"], root)).toBe("")
-        expect((await sourceIdentity(root)).files.find((file) => file.file === files[0])?.kind).toBe("symlink")
+        const identity = await sourceIdentity(root)
+        const link = identity.files.find((file) => file.file === files[0])
+        const target = path.join("..", "..", "ui", "src", "custom-elements.d.ts")
+        expect(link).toMatchObject({
+          kind: "symlink",
+          target,
+          sha256: createHash("sha256").update(target).digest("hex"),
+        })
         await unlink(path.join(root, files[0]))
         await Bun.write(path.join(root, files[0]), "user-edited text")
         await expect(repairWindowsLinks(root)).rejects.toThrow("Refusing to overwrite")

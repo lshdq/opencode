@@ -4,6 +4,8 @@ import path from "node:path"
 
 export const channel = "local"
 
+const sourceIdentityConcurrency = 8
+
 export async function upstreamBaseline(root: string) {
   const commit = await execute(["git", "merge-base", "HEAD", "upstream/v2"], root)
   return { commit, ...(await upstreamAtCommit(root, commit)) }
@@ -161,28 +163,34 @@ export async function sourceIdentity(root: string) {
   const files = (await execute(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], root))
     .split("\0")
     .filter(Boolean)
-  const entries = await Promise.all(
-    [...new Set(files)].sort().map(async (file) => {
-      const absolute = path.join(root, file)
-      const info = await lstat(absolute).catch((error: unknown) => {
-        if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return
-        throw error
-      })
-      const link = info?.isSymbolicLink() ? await readlink(absolute) : undefined
-      return {
-        file,
-        tracked: tracked.has(file),
-        kind: info === undefined ? "deleted" : link === undefined ? "file" : "symlink",
-        ...(link === undefined ? {} : { target: link }),
-        sha256:
-          info === undefined
-            ? "deleted"
-            : link === undefined
-              ? await sha256(absolute)
-              : createHash("sha256").update(link).digest("hex"),
-      }
-    }),
-  )
+  const sortedFiles = [...new Set(files)].sort()
+  const entries = []
+  for (let index = 0; index < sortedFiles.length; index += sourceIdentityConcurrency) {
+    entries.push(
+      ...(await Promise.all(
+        sortedFiles.slice(index, index + sourceIdentityConcurrency).map(async (file) => {
+          const absolute = path.join(root, file)
+          const info = await lstat(absolute).catch((error: unknown) => {
+            if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return
+            throw error
+          })
+          const link = info?.isSymbolicLink() ? await readlink(absolute) : undefined
+          return {
+            file,
+            tracked: tracked.has(file),
+            kind: info === undefined ? "deleted" : link === undefined ? "file" : "symlink",
+            ...(link === undefined ? {} : { target: link }),
+            sha256:
+              info === undefined
+                ? "deleted"
+                : link === undefined
+                  ? await sha256(absolute)
+                  : createHash("sha256").update(link).digest("hex"),
+          }
+        }),
+      )),
+    )
+  }
   return { sha256: createHash("sha256").update(JSON.stringify(entries)).digest("hex"), files: entries }
 }
 
