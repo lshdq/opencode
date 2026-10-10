@@ -288,7 +288,7 @@ test("confirmation fits wrapped answers before offering scroll", async () => {
   }
 })
 
-test("pasting on a custom choice opens its editor without submitting", async () => {
+test("pasting on an inactive custom choice is ignored", async () => {
   await using tmp = await tmpdir()
   const prompt = await mountForm(tmp.path, 80, [
     {
@@ -299,11 +299,11 @@ test("pasting on a custom choice opens its editor without submitting", async () 
     },
   ])
   try {
+    prompt.app.mockInput.pressArrow("down")
     await prompt.app.mockInput.pasteBracketedText("production\nwest")
-    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "production\nwest")
 
-    await prompt.app.waitForFrame((frame) => frame.includes("production"))
-    expect(prompt.app.captureCharFrame()).not.toContain("Type your own answer")
+    expect(prompt.app.renderer.currentFocusedEditor).toBeNull()
+    expect(prompt.app.captureCharFrame()).not.toContain("production")
     expect(prompt.replies).toEqual([])
   } finally {
     prompt.app.renderer.destroy()
@@ -339,7 +339,7 @@ test("pasting in an active custom editor inserts at the cursor", async () => {
   }
 })
 
-test("clipboard shortcut opens a custom choice editor without submitting", async () => {
+test("clipboard paste on an inactive custom choice is ignored", async () => {
   await using tmp = await tmpdir()
   const prompt = await mountForm(
     tmp.path,
@@ -356,11 +356,12 @@ test("clipboard shortcut opens a custom choice editor without submitting", async
     "production\nwest",
   )
   try {
+    prompt.app.mockInput.pressArrow("down")
     prompt.app.mockInput.pressKey("v", { ctrl: true })
-    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "production\nwest")
+    await prompt.app.renderOnce()
 
-    await prompt.app.waitForFrame((frame) => frame.includes("production"))
-    expect(prompt.app.captureCharFrame()).not.toContain("Type your own answer")
+    expect(prompt.app.renderer.currentFocusedEditor).toBeNull()
+    expect(prompt.app.captureCharFrame()).not.toContain("production")
     expect(prompt.replies).toEqual([])
   } finally {
     prompt.app.renderer.destroy()
@@ -423,7 +424,7 @@ test("up leaves a custom editor only from its first visual line", async () => {
   }
 })
 
-test("typing on the highlighted custom option opens it without losing burst input", async () => {
+test("typing on an inactive custom option is ignored until activated", async () => {
   await using tmp = await tmpdir()
   const prompt = await mountForm(tmp.path, 80, [
     {
@@ -435,6 +436,10 @@ test("typing on the highlighted custom option opens it without losing burst inpu
   ])
   try {
     prompt.app.mockInput.pressArrow("down")
+    await prompt.app.mockInput.typeText("p")
+    expect(prompt.app.renderer.currentFocusedEditor).toBeNull()
+    prompt.app.mockInput.pressEnter()
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor !== null)
     await prompt.app.mockInput.typeText("production target")
     await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "production target")
     await prompt.app.waitForFrame((frame) => frame.includes("[✓] production target"))
@@ -579,6 +584,9 @@ test("committing a custom multiselect answer keeps one editable custom row", asy
     },
   ])
   try {
+    prompt.app.mockInput.pressArrow("down")
+    prompt.app.mockInput.pressEnter()
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor !== null)
     await prompt.app.mockInput.pasteBracketedText("production")
     await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor?.plainText === "production")
     prompt.app.mockInput.pressEnter()
@@ -708,6 +716,73 @@ test("space activates the custom multiselect option", async () => {
 
     await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor !== null)
     await prompt.app.waitForFrame((frame) => frame.includes("[✓] Type your own answer"))
+    expect(prompt.replies).toEqual([])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
+
+test("click activates the custom single-select option", async () => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(tmp.path, 80, [
+    {
+      key: "target",
+      type: "string",
+      options: [{ value: "staging", label: "Staging" }],
+      custom: true,
+    },
+  ])
+  try {
+    const row = prompt.app
+      .captureCharFrame()
+      .split("\n")
+      .findIndex((line) => line.includes("2. Type your own answer"))
+    expect(row).toBeGreaterThanOrEqual(0)
+    await prompt.app.mockMouse.click(5, row)
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor !== null)
+    await prompt.app.mockInput.typeText("production")
+    await prompt.app.waitForFrame((frame) => frame.includes("production"))
+    expect(prompt.replies).toEqual([])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
+
+test("space activates the custom single-select option", async () => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(tmp.path, 80, [
+    {
+      key: "target",
+      type: "string",
+      options: [{ value: "staging", label: "Staging" }],
+      custom: true,
+    },
+  ])
+  try {
+    prompt.app.mockInput.pressArrow("down")
+    prompt.app.mockInput.pressKey(" ")
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor !== null)
+    expect(prompt.replies).toEqual([])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
+
+test("the custom option number shortcut activates its editor", async () => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(tmp.path, 80, [
+    {
+      key: "target",
+      type: "string",
+      options: [{ value: "staging", label: "Staging" }],
+      custom: true,
+    },
+  ])
+  try {
+    prompt.app.mockInput.typeText("2")
+    await prompt.app.waitFor(() => prompt.app.renderer.currentFocusedEditor !== null)
+    await prompt.app.mockInput.typeText("production")
+    await prompt.app.waitForFrame((frame) => frame.includes("production"))
     expect(prompt.replies).toEqual([])
   } finally {
     prompt.app.renderer.destroy()

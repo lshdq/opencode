@@ -215,6 +215,8 @@ test("inactive custom forms cannot intercept a peer using the same form mode", a
     pop()
 
     panes.setActive(true)
+    panes.app.mockInput.pressEnter()
+    await panes.app.waitFor(() => panes.app.renderer.currentFocusedEditor?.id !== panes.peer.id)
     await panes.app.mockInput.typeText("production target")
     await panes.app.waitFor(() => panes.app.renderer.currentFocusedEditor?.plainText === "production target")
     panes.setActive(false)

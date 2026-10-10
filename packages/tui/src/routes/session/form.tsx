@@ -243,13 +243,12 @@ export function FormPrompt(props: { form: FormWithLocation }) {
   onCleanup(
     keymap.intercept("key", ({ event, consume }) => {
       if (!active()) return
-      if (textual() || !other() || (store.editing && renderer.currentFocusedEditor === textarea)) return
+      if (textual() || !other() || !store.editing || renderer.currentFocusedEditor === textarea) return
       if (event.ctrl || event.meta || event.option || event.super || event.hyper) return
-      if ((!store.editing && event.sequence === " ") || !/^[^\p{C}\p{Zl}\p{Zp}]$/u.test(event.sequence)) return
+      if (!/^[^\p{C}\p{Zl}\p{Zp}]$/u.test(event.sequence)) return
       const current = answerField()
       if (!current) return
       updateCustom(current, input() + event.sequence)
-      if (!store.editing) setStore("editing", true)
       consume()
     }),
   )
@@ -344,7 +343,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
 
   function pasteCustom(value: string) {
     const current = answerField()
-    if (!current || textual() || !custom() || confirm()) return false
+    if (!current || textual() || !custom() || confirm() || !store.editing) return false
     setStore("selected", rows().length)
     updateCustom(current, input() + value)
     setStore("editing", true)
@@ -750,7 +749,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
                   run: () => setStore("selected", (store.selected + 1) % total),
                 },
                 { bind: "return", title: "Select answer", group: "Form", run: () => selectOption() },
-                ...(multi()
+                ...(multi() || other()
                   ? [{ bind: "space", title: "Toggle answer", group: "Form", run: () => selectOption() }]
                   : []),
                 {
