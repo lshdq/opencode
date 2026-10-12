@@ -7,7 +7,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { Database } from "../src/database/database"
 import { sqliteLayer } from "../src/database/sqlite.bun"
-import { SqlClient } from "effect/unstable/sql"
+import { SqlClient } from "effect/sql"
 import { acl } from "../../util/test/fixture/file-acl"
 import { restrictedReader, windowSecret } from "../../util/test/fixture/restricted-reader"
 

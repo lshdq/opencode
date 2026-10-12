@@ -2,6 +2,7 @@ import { NodeFileSystem } from "@effect/platform-node"
 import { Global } from "@opencode/util/global"
 import { expect, test } from "bun:test"
 import { Effect, FileSystem } from "effect"
+import { NetAddress } from "effect/net"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -44,7 +45,7 @@ test.skipIf(process.platform !== "win32")("service password migration/read/repla
         yield* Effect.promise(() => writeFile(registration, "{}"))
         yield* Effect.promise(() => grantEveryone(registration))
         const remove = yield* ServiceRegistration.register({
-          address: { _tag: "TcpAddress", hostname: "127.0.0.1", port: 12345 },
+          address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 12345),
           password: "registration-fixture-only",
           id: "acl-test",
           file: registration,

@@ -1,7 +1,7 @@
 /// <reference path="./cross-spawn-parse.d.ts" />
 import path from "node:path"
 import parse from "cross-spawn/lib/parse.js"
-import type { ChildProcess } from "effect/unstable/process"
+import type { ChildProcess } from "effect/process"
 import type { SpawnOptions } from "node:child_process"
 
 // A process-local capability, not a command option: remote drivers receive the unchanged command.

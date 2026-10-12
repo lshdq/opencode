@@ -1091,6 +1091,50 @@ describe("ConfigInstructionPlugin.Plugin", () => {
     ),
   )
 
+  it.live("ignores an AGENTS.md directory while loading upward instruction files", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) => {
+        const project = path.join(tmp.path, "repo")
+        const directory = path.join(project, "packages", "core")
+        const ignored = path.join(project, "packages", "AGENTS.md")
+        const projectFile = path.join(project, "AGENTS.md")
+        const packageFile = path.join(directory, "AGENTS.md")
+        return Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(directory, { recursive: true })
+            await fs.mkdir(ignored)
+            await fs.writeFile(projectFile, "project")
+            await fs.writeFile(packageFile, "package")
+          })
+
+          const discovery = yield* start()
+          expect(yield* discovery.list()).toEqual([file(packageFile, "package"), file(projectFile, "project")])
+          expect((yield* readInitial(yield* discovery.load())).text).toBe(
+            [`Instructions from: ${packageFile}\npackage`, `Instructions from: ${projectFile}\nproject`].join("\n\n"),
+          )
+        }).pipe(
+          Effect.provide(
+            instructionLayer({
+              config: path.join(tmp.path, "global"),
+              locationServiceLayer: Layer.succeed(
+                Location.Service,
+                Location.Service.of(
+                  location(
+                    { directory: AbsolutePath.make(directory) },
+                    { projectDirectory: AbsolutePath.make(project) },
+                  ),
+                ),
+              ),
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+
   it.live("keeps an empty AGENTS.md as available context", () =>
     Effect.acquireRelease(
       Effect.promise(() => tmpdir()),

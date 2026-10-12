@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite"
 import path from "node:path"
 import { FileMode } from "@opencode/util/file-mode"
 import { Effect } from "effect"
-import { SqlClient } from "effect/unstable/sql"
+import { SqlClient } from "effect/sql"
 import { sqliteLayer } from "../../src/database/sqlite.node"
 import { acl, grantEveryone } from "../../../util/test/fixture/file-acl"
 

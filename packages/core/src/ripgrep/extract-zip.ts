@@ -1,6 +1,6 @@
 import { Effect, Stream } from "effect"
-import { ChildProcess } from "effect/unstable/process"
-import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
+import { ChildProcess } from "effect/process"
+import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner"
 import { FSUtil } from "@opencode/util/fs-util"
 
 // Kept separate from binary discovery so cold extraction can be exercised without the global rg cache.

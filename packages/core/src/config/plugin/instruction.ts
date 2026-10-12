@@ -9,7 +9,7 @@ import { sameDirectory } from "@opencode/util/path"
 import { isDeepStrictEqual } from "node:util"
 import { createHash } from "node:crypto"
 import { Effect, FiberMap, PubSub, Semaphore, Stream } from "effect"
-import { HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { HttpClient, HttpClientRequest } from "effect/http"
 import { Watcher } from "../../filesystem/watcher.js"
 import { Config } from "../../config.js"
 import { InstructionDiscovery } from "../../instruction-discovery.js"
@@ -89,7 +89,10 @@ export const Plugin = define({
 
       const projectSource = Effect.fn("ConfigInstructionPlugin.projectSource")(function* () {
         if (!project) return []
-        const walked = yield* Effect.forEach(yield* fs.up({ targets: ["AGENTS.md"], start, stop }), fs.resolve)
+        const walked = yield* Effect.forEach(
+          yield* fs.up({ targets: ["AGENTS.md"], start, stop, type: "file" }),
+          fs.resolve,
+        )
         const discovered = new Set(walked.filter((file) => discovery.global || file !== globalFile))
         const files = yield* Effect.forEach(discovered, read, { concurrency: "unbounded" })
         if (files.some((file) => file === undefined)) return Instructions.unavailable

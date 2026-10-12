@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { stat } from "node:fs/promises"
 import path from "node:path"
 import { Effect } from "effect"
-import { SqlClient } from "effect/unstable/sql"
+import { SqlClient } from "effect/sql"
 import { sqliteLayer } from "../../src/database/sqlite.node"
 import { acl } from "../../../util/test/fixture/file-acl"
 
