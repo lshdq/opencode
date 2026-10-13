@@ -9,6 +9,7 @@ import { llmClient } from "@opencode/core/effect/app-node-platform"
 import { Instructions } from "@opencode/core/instructions/index"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { Location } from "@opencode/core/location"
+import { LocationLifecycle } from "@opencode/core/location-lifecycle"
 import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
 import { AbsolutePath } from "@opencode/core/schema"
@@ -25,7 +26,7 @@ import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionSchema } from "@opencode/core/session/schema"
 import { SessionStore } from "@opencode/core/session/store"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { DateTime, Deferred, Effect, Fiber, Schema } from "effect"
+import { DateTime, Deferred, Effect, Exit, Fiber, Schema } from "effect"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
@@ -39,6 +40,7 @@ const it = testEffect(
       SessionCompaction.node,
       SessionModelRequest.node,
       PluginHooks.node,
+      LocationLifecycle.node,
       llmClient,
     ]),
     [
@@ -329,6 +331,32 @@ it.live(
       ).toHaveLength(3)
     }),
   15000,
+)
+
+it.live("stops compaction retry when the location closes", () =>
+  Effect.gen(function* () {
+    const fixture = yield* setup()
+    const lifecycle = yield* LocationLifecycle.Service
+    const retrying = yield* Deferred.make<void>()
+    const interrupted = yield* Deferred.make<void>()
+    yield* fixture.hooks.register("session", "retry", () =>
+      Effect.gen(function* () {
+        yield* Deferred.succeed(retrying, undefined)
+        yield* Effect.never
+      }).pipe(Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined))),
+    )
+
+    yield* fixture.prompt("Retry this compaction")
+    fixture.state.flaky = true
+    const pending = yield* fixture.compact.pipe(Effect.forkScoped)
+    yield* Deferred.await(retrying)
+    yield* lifecycle.shutdown
+    yield* Deferred.await(interrupted).pipe(Effect.timeout("1 second"))
+    const result = yield* Effect.exit(Fiber.join(pending))
+
+    expect(Exit.isFailure(result)).toBe(true)
+    expect(fixture.state.calls).toBe(1)
+  }),
 )
 
 it.live("manual and automatic endpoint compaction keep the provider replacement unchanged", () =>

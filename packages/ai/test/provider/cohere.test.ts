@@ -237,7 +237,7 @@ const errors = [
     tag: "InvalidRequest",
     retry: false,
   },
-  { status: 402, message: "Please add or update your payment method to continue", tag: "QuotaExceeded", retry: false },
+  { status: 402, message: "Please add or update your payment method to continue", tag: "QuotaExceeded", retry: true },
   {
     status: 429,
     message: "You are using a Trial key, which is limited to 40 API calls / minute.",

@@ -1,6 +1,21 @@
 import { describe, expect, test } from "bun:test"
 import { isContextOverflow } from "../src/index.js"
-import { classifyProviderFailure, providerErrorMessage } from "../src/provider-error.js"
+import {
+  AIError,
+  AuthenticationError,
+  ContentPolicyError,
+  HttpContext,
+  InvalidProviderOutputError,
+  InvalidRequestError,
+  ModelID,
+  NoRouteError,
+  ProviderID,
+  ProviderInternalError,
+  TimeoutError,
+  TransportError,
+  UnsupportedOperationError,
+} from "../src/schema/index.js"
+import { classifyProviderFailure, isRetryable, providerErrorMessage } from "../src/provider-error.js"
 
 describe("provider error classification", () => {
   test("classifies provider token limit messages as context overflow", () => {
@@ -39,8 +54,38 @@ describe("provider error classification", () => {
     ]
 
     expect(failures).toEqual(
-      failures.map(() => expect.objectContaining({ _tag: "InvalidRequest", classification: "payload-too-large" })),
+      [
+        expect.objectContaining({ _tag: "InvalidRequest", classification: "payload-too-large" }),
+        expect.objectContaining({ _tag: "ProviderInternal" }),
+      ],
     )
+  })
+
+  test("keeps authentication ahead of overflow in the message and raw body", () => {
+    expect(classifyProviderFailure({ status: 401, message: "Prompt too long" })).toMatchObject({
+      _tag: "Authentication",
+    })
+    expect(
+      classifyProviderFailure({
+        status: 401,
+        message: "Request failed",
+        rawBody: '{"error":{"message":"Prompt exceeds the context window"}}',
+      }),
+    ).toMatchObject({ _tag: "Authentication" })
+  })
+
+  test("keeps transient overflow retryable unless the response forbids retry", () => {
+    expect(classifyProviderFailure({ status: 429, message: "Prompt too long" })).toMatchObject({ _tag: "RateLimit" })
+    expect(
+      classifyProviderFailure({
+        status: 429,
+        message: "Prompt too long",
+        rawBody: '{"error":{"message":"Prompt too long; do not retry"}}',
+      }),
+    ).toMatchObject({ _tag: "InvalidRequest" })
+    expect(
+      classifyProviderFailure({ status: 400, message: "Prompt too long" }),
+    ).toMatchObject({ _tag: "InvalidRequest", classification: "context-overflow" })
   })
 
   test("does not classify rate limits as context overflow", () => {
@@ -80,6 +125,128 @@ describe("provider error classification", () => {
         (message) => classifyProviderFailure({ message })._tag,
       ),
     ).toEqual(["ProviderInternal", "ProviderInternal", "ProviderInternal"])
+  })
+
+  test("keeps bare server codes deterministic on 400 unless the message explicitly requests retry", () => {
+    for (const message of [
+      "resource_exhausted",
+      "ResourceExhausted",
+      "resource-exhausted",
+      "service_unavailable",
+      "server_error",
+      "internal_error",
+    ]) {
+      expect(classifyProviderFailure({ message, status: 400 })._tag).toBe("InvalidRequest")
+      expect(classifyProviderFailure({ message: `${message}: please try again`, status: 400 })._tag).toBe(
+        "ProviderInternal",
+      )
+      for (const status of [408, 429, 500]) {
+        expect(classifyProviderFailure({ message, status })._tag).toBe(
+          status === 429 ? "RateLimit" : "ProviderInternal",
+        )
+      }
+    }
+  })
+
+  test("prioritizes explicit no-retry instructions over retry-shaped wording", () => {
+    const permanent = [
+      { message: "Invalid token. Do not retry." },
+      { message: "Model not found. Never retry this request." },
+      { message: "Invalid value for parameter temperature; don't retry." },
+      { message: "Invalid request: not retryable." },
+      { message: "Invalid parameter temperature. Retry is not allowed." },
+    ]
+
+    expect(permanent.map((failure) => classifyProviderFailure(failure)._tag)).toEqual([
+      "Authentication",
+      "InvalidRequest",
+      "InvalidRequest",
+      "InvalidRequest",
+      "InvalidRequest",
+    ])
+    expect(
+      permanent.every((failure) => !isRetryable(new AIError({ reason: classifyProviderFailure(failure) }))),
+    ).toBe(true)
+
+    expect(
+      ["Invalid token. Please retry.", "Model not found. Try again.", "Invalid request; retry the request."]
+        .map((message) => classifyProviderFailure({ message })._tag),
+    ).toEqual(["ProviderInternal", "ProviderInternal", "ProviderInternal"])
+    expect(classifyProviderFailure({ message: "The overloaded service is not retrying internally.", status: 400 })._tag).toBe(
+      "ProviderInternal",
+    )
+  })
+
+  test("prioritizes explicit no-retry instructions from message and raw body", () => {
+    const failures = [
+      { message: "Rate limit exceeded; do not retry." },
+      { message: "Internal server error; don't retry." },
+      { message: "Service unavailable; never retry this request." },
+      { message: "Too many requests; not retryable." },
+      {
+        message: "Rate limit exceeded; please retry later.",
+        rawBody: '{"error":{"message":"Internal server error; do not retry"}}',
+      },
+      {
+        message: "Internal server error; do not retry.",
+        rawBody: '{"error":{"message":"Please retry later"}}',
+      },
+    ]
+
+    expect(failures.map((failure) => classifyProviderFailure(failure)._tag)).toEqual(
+      Array(failures.length).fill("InvalidRequest"),
+    )
+    expect(
+      failures.every((failure) => !isRetryable(new AIError({ reason: classifyProviderFailure(failure) }))),
+    ).toBe(true)
+    // "not retrying" is ordinary provider prose, not a direct prohibition.
+    expect(classifyProviderFailure({ message: "The overloaded service is not retrying internally." })._tag).toBe(
+      "ProviderInternal",
+    )
+  })
+
+  test("checks explicit no-retry instructions before transient HTTP statuses", () => {
+    const statuses = [undefined, 400, 401, 403, 408, 409, 429, 500, 503]
+    const classify = (status: number | undefined, message: string, rawBody?: string) =>
+      classifyProviderFailure({ message, rawBody, ...(status === undefined ? {} : { status }) })._tag
+
+    expect(statuses.map((status) => classify(status, "Temporary failure; do not retry"))).toEqual([
+      "InvalidRequest",
+      "InvalidRequest",
+      "Authentication",
+      "Authentication",
+      "InvalidRequest",
+      "InvalidRequest",
+      "InvalidRequest",
+      "InvalidRequest",
+      "InvalidRequest",
+    ])
+    expect(
+      statuses.map((status) =>
+        classify(status, "Temporary failure", '{"error":{"message":"Please do not retry"}}'),
+      ),
+    ).toEqual([
+      "InvalidRequest",
+      "InvalidRequest",
+      "Authentication",
+      "Authentication",
+      "InvalidRequest",
+      "InvalidRequest",
+      "InvalidRequest",
+      "InvalidRequest",
+      "InvalidRequest",
+    ])
+
+    expect(classifyProviderFailure({ status: 401, message: "Content policy violation; do not retry" })._tag).toBe(
+      "ContentPolicy",
+    )
+    expect(
+      classifyProviderFailure({ status: 400, message: "Context length exceeded; do not retry" })._tag,
+    ).toBe("InvalidRequest")
+    expect(
+      classifyProviderFailure({ status: 429, message: "Rate limit exceeded; please retry later" })._tag,
+    ).toBe("RateLimit")
+    expect(classifyProviderFailure({ status: 503, message: "Service unavailable" })._tag).toBe("ProviderInternal")
   })
 
   test("classifies retryable server messages as provider internal", () => {
@@ -258,8 +425,217 @@ describe("provider error classification", () => {
     ).toEqual(Array(5).fill("InvalidRequest"))
   })
 
+  test("classifies explicit model and request failures without a status", () => {
+    const messages = [
+      "model not found",
+      "The selected model does not exist",
+      "The model 'missing-model' does not exist",
+      "invalid model",
+      "no such model",
+    ]
+    expect(messages.map((message) => classifyProviderFailure({ message })._tag)).toEqual(
+      Array(messages.length).fill("InvalidRequest"),
+    )
+    expect(isRetryable(new AIError({ reason: classifyProviderFailure({ message: messages[0] }) }))).toBe(false)
+    const unknown = classifyProviderFailure({ message: "provider returned an unrecognized failure" })
+    expect(unknown._tag).toBe("UnknownProvider")
+    expect(isRetryable(new AIError({ reason: unknown }))).toBe(true)
+  })
+
+  test("prioritizes transient statuses over model and generic request text", () => {
+    const messages = ["model not found", "invalid request"]
+    for (const message of messages) {
+      expect([408, 409, 429, 500, 503].map((status) => classifyProviderFailure({ message, status })._tag)).toEqual([
+        "ProviderInternal",
+        "ProviderInternal",
+        "RateLimit",
+        "ProviderInternal",
+        "ProviderInternal",
+      ])
+    }
+    expect(classifyProviderFailure({ message: "invalid request", status: 400 })._tag).toBe("InvalidRequest")
+    expect(classifyProviderFailure({ message: "invalid request", status: 422 })._tag).toBe("InvalidRequest")
+    expect(classifyProviderFailure({ message: "invalid request" })._tag).toBe("InvalidRequest")
+    expect(classifyProviderFailure({ message: "invalid request", status: 200 })._tag).toBe("UnknownProvider")
+  })
+
+  test("classifies deterministic parameter validation text without a status", () => {
+    const messages = [
+      "Bad Request: parameter temperature must be between 0 and 2",
+      "validation failed: unknown parameter foo",
+      "validation error: invalid field response_format",
+      "unexpected parameter tool_choice",
+      "parameter temperature is invalid",
+      "field x is invalid",
+    ]
+
+    expect(messages.map((message) => classifyProviderFailure({ message })._tag)).toEqual(
+      Array(messages.length).fill("InvalidRequest"),
+    )
+    for (const message of messages) {
+      expect([408, 409, 500, 503].map((status) => classifyProviderFailure({ message, status })._tag)).toEqual([
+        "ProviderInternal",
+        "ProviderInternal",
+        "ProviderInternal",
+        "ProviderInternal",
+      ])
+      expect(classifyProviderFailure({ message, status: 429 })._tag).toBe("RateLimit")
+    }
+  })
+
   test("classifies 402 as exhausted quota", () => {
     expect(classifyProviderFailure({ message: "Payment Required", status: 402 })._tag).toBe("QuotaExceeded")
+  })
+
+  test("keeps quota failures retryable and preserves retry-after", () => {
+    const reason = classifyProviderFailure({ message: "Quota exceeded", status: 429, retryAfterMs: 12_000 })
+    expect(reason).toMatchObject({ _tag: "QuotaExceeded", retryAfterMs: 12_000 })
+    expect(isRetryable(new AIError({ reason }))).toBe(true)
+  })
+
+  test("classifies stateless authentication codes and messages", () => {
+    const failures = [
+      { message: "invalid_api_key" },
+      { message: "Invalid API key" },
+      { message: "Invalid token" },
+      { message: "Bearer token expired" },
+      { message: "token has expired" },
+      { message: "credentials have expired" },
+      { message: "bearer token has expired" },
+      { message: "Access denied" },
+      { message: "Authentication failed" },
+      { message: "No API key provided" },
+      { message: "Authentication required" },
+      { message: "Unauthorized" },
+      { message: "API key not valid" },
+      { message: "Request failed", rawBody: '{"error":{"code":"invalid_api_key"}}' },
+      { message: "Request failed", rawBody: '{"error":{"code":"invalid-token"}}' },
+      { message: "Request failed", rawBody: '{"error":{"code":"access_denied"}}' },
+    ]
+
+    expect(failures.map((failure) => classifyProviderFailure(failure)._tag)).toEqual(
+      Array(failures.length).fill("Authentication"),
+    )
+  })
+
+  test("classifies stateless model and parameter rejections", () => {
+    const failures = [
+      { message: "No model found for foo" },
+      { message: "invalid value for parameter temperature" },
+    ]
+
+    expect(failures.map((failure) => classifyProviderFailure(failure)._tag)).toEqual([
+      "InvalidRequest",
+      "InvalidRequest",
+    ])
+    expect(failures.every((failure) => !isRetryable(new AIError({ reason: classifyProviderFailure(failure) })))).toBe(
+      true,
+    )
+  })
+
+  test("classifies deterministic parameter text before conflicting rate-limit wording", () => {
+    expect(classifyProviderFailure({ message: "invalid value for parameter rate_limit" })._tag).toBe("InvalidRequest")
+    expect(
+      classifyProviderFailure({ message: "invalid value for parameter rate_limit, please try again" })._tag,
+    ).toBe("RateLimit")
+  })
+
+  test("keeps transient statuses and explicit retry instructions ahead of auth heuristics", () => {
+    expect(
+      [
+        classifyProviderFailure({ message: "Invalid token: service unavailable", status: 401 }),
+        classifyProviderFailure({ message: "Access denied: service unavailable", status: 403 }),
+        classifyProviderFailure({
+          message: "Service unavailable",
+          rawBody: '{"error":{"code":"invalid_token","message":"Service unavailable"}}',
+        }),
+        classifyProviderFailure({ message: "invalid_api_key", status: 408 }),
+        classifyProviderFailure({ message: "authentication failed", status: 429 }),
+        classifyProviderFailure({ message: "invalid api key", status: 503 }),
+        classifyProviderFailure({ message: "authentication failed: service unavailable" }),
+        classifyProviderFailure({ message: "authentication failed, please try again" }),
+        classifyProviderFailure({ message: "No API key provided: service unavailable" }),
+        classifyProviderFailure({
+          message: "Service unavailable",
+          rawBody: '{"error":{"message":"Authentication required"}}',
+        }),
+      ].map((failure) => failure._tag),
+    ).toEqual([
+      "Authentication",
+      "Authentication",
+      "Authentication",
+      "ProviderInternal",
+      "RateLimit",
+      "ProviderInternal",
+      "Authentication",
+      "ProviderInternal",
+      "Authentication",
+      "Authentication",
+    ])
+
+    expect(
+      classifyProviderFailure({
+        message: "Service unavailable",
+        status: 503,
+        rawBody: '{"error":{"code":"invalid_api_key"}}',
+      })._tag,
+    ).toBe("Authentication")
+  })
+
+  test("does not let retry headers bypass accepted transport write safety", () => {
+    const error = new AIError({
+      reason: new TransportError({
+        message: "accepted write failed",
+        transport: "websocket",
+        operation: "write",
+        delivery: "accepted",
+        http: new HttpContext({ url: "https://example.com", status: 500, headers: { "x-should-retry": "true" } }),
+      }),
+    })
+
+    expect(isRetryable(error)).toBe(false)
+  })
+
+  test("does not let retry headers promote permanent error categories", () => {
+    const http = new HttpContext({ url: "https://example.com", status: 500, headers: { "x-should-retry": "true" } })
+    const reasons = [
+      new AuthenticationError({ message: "Invalid token", http }),
+      new InvalidRequestError({ message: "No model found for foo", http }),
+      new ContentPolicyError({ message: "Blocked", http }),
+      new UnsupportedOperationError({ message: "Unsupported", operation: "compact", http }),
+      new NoRouteError({
+        message: "No route",
+        route: "missing",
+        provider: ProviderID.make("provider"),
+        model: ModelID.make("model"),
+        http,
+      }),
+      new TimeoutError({ message: "Timed out", http }),
+    ]
+
+    expect(reasons.map((reason) => isRetryable(new AIError({ reason })))).toEqual(Array(reasons.length).fill(false))
+  })
+
+  test("does not let retry headers promote non-incomplete provider output", () => {
+    const error = new AIError({
+      reason: new InvalidProviderOutputError({
+        message: "invalid provider output",
+        http: new HttpContext({ url: "https://example.com", status: 500, headers: { "x-should-retry": "true" } }),
+      }),
+    })
+
+    expect(isRetryable(error)).toBe(false)
+  })
+
+  test("allows transient retry headers to veto a retry", () => {
+    const error = new AIError({
+      reason: new ProviderInternalError({
+        message: "temporarily unavailable",
+        http: new HttpContext({ url: "https://example.com", status: 503, headers: { "x-should-retry": "false" } }),
+      }),
+    })
+
+    expect(isRetryable(error)).toBe(false)
   })
 
   test("classifies OpenCode Zen account limits as quota rather than throttling", () => {

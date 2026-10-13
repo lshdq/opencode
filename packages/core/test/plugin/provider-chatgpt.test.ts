@@ -266,7 +266,7 @@ describe("ChatGPTPlugin", () => {
   )
 
   for (const source of ["http", "stream"] as const) {
-    it.effect(`stops retries for ChatGPT usage limits from ${source} failures`, () =>
+    it.effect(`keeps retrying ChatGPT usage limits from ${source} failures`, () =>
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
         yield* credentials.create({
@@ -310,7 +310,7 @@ describe("ChatGPTPlugin", () => {
         }
         expect(input.error.response?.body).toBe(body)
         expect(input.retry).toBe(true)
-        expect(yield* decide(input)).toEqual({ retry: false })
+        expect(yield* decide(input)).toMatchObject({ retry: true })
 
         const other = new AIError({ reason: new RateLimitError({ message: "Rate limit exceeded", body: "{}" }) })
         expect(yield* decide({ ...input, cause: other, error: toSessionError(other) })).toMatchObject({ retry: true })
@@ -378,14 +378,14 @@ describe("ChatGPTPlugin", () => {
             rawBody: JSON.stringify({ type: "response.failed", response: { error: { code } } }),
           }),
         })
-        expect(SessionRunnerRetry.isRetryable(cause)).toBe(true)
+        expect(SessionRunnerRetry.isRetryable(cause)).toBe(retry)
         const decision = yield* decide({
           cause,
           error: toSessionError(cause),
           agent: Agent.ID.make("build"),
           model: Model.Ref.make({ providerID: Provider.ID.openai, id: Model.ID.make("gpt-5.5") }),
           hook: (event) => hooks.trigger("session", "retry", event).pipe(Effect.asVoid),
-          retry: true,
+          retry: SessionRunnerRetry.isRetryable(cause),
         })
         expect(decision.retry).toBe(retry)
       }

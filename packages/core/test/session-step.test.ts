@@ -158,3 +158,47 @@ for (const fixture of [
     }),
   )
 }
+
+it.effect("does not enter the provider stream after the location closes", () =>
+  Effect.gen(function* () {
+    const llm = yield* TestLLM.Test
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    const model = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "closed-model", provider: "test", route: OpenAIChat.route }),
+      {
+        capabilities: { tools: true, input: ["text"], output: ["text"] },
+        limit: { context: 100_000, output: 1_000 },
+        cost: [],
+      },
+    )
+
+    const result = yield* steps
+      .attempt({
+        isLocationClosed: () => true,
+        sessionID: Session.ID.create(),
+        assistantMessageID: SessionMessage.ID.create(),
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: LLM.request({ model: model.model, prompt: "Must not start" }),
+          options: {},
+          executeTool: () => Effect.succeed({ content: [{ type: "text", text: "unused" }] }),
+        },
+        retry: () => Effect.succeed({ retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit)
+
+    expect(Exit.isFailure(result)).toBe(true)
+    expect(yield* llm.requests()).toHaveLength(0)
+  }),
+)

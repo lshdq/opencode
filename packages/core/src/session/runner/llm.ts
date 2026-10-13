@@ -206,7 +206,7 @@ const layer = Layer.effect(
     const runStep = Effect.fn("SessionRunner.runStep")(function* (first: SessionContext.Loaded, step: number) {
       const sessionID = first.session.id
       let assistantMessageID = SessionMessage.ID.create()
-      const retry = yield* SessionRunnerRetry.make(bus, sessionID)
+      const retry = yield* SessionRunnerRetry.make(bus, sessionID, lifecycle)
       let initial: SessionContext.Loaded | undefined = first
       let recoverOverflow = true
       let recoverContinuation = true
@@ -242,38 +242,51 @@ const layer = Layer.effect(
           webSocket: "session",
           inputTokens: SessionCompaction.estimatePrompt(loaded),
         })
-        const outcome = yield* steps.attempt({
-          isLocationClosed: lifecycle.isClosed,
-          sessionID,
-          assistantMessageID,
-          agent: loaded.agent.id,
-          model: loaded.model,
-          prepared,
-          retry: (cause, error, proposed) =>
-            retry.decide({
-              cause,
-              error,
-              agent: loaded.agent.id,
-              model: loaded.model.ref,
-              hook: prepared.retry,
-              retry: proposed,
-            }),
-          recoverContinuation,
-          recoverOverflow: Effect.suspend(() =>
-            recoverOverflow
-              ? compaction
-                  .compact({ reason: "overflow", context: loaded })
-                  .pipe(Effect.map((result) => result.status === "completed"))
-              : Effect.succeed(false),
-          ),
-        })
+        // Do not start a physical attempt after shutdown has already begun.
+        // The step also guards the provider-stream boundary for the close-after-check race.
+        if (lifecycle.isClosed()) return yield* Effect.interrupt
+        const attempt = Effect.suspend(() =>
+          steps.attempt({
+            isLocationClosed: lifecycle.isClosed,
+            sessionID,
+            assistantMessageID,
+            agent: loaded.agent.id,
+            model: loaded.model,
+            prepared,
+            retry: (cause, error, proposed) =>
+              retry.decide({
+                cause,
+                error,
+                agent: loaded.agent.id,
+                model: loaded.model.ref,
+                hook: prepared.retry,
+                retry: proposed,
+              }),
+            recoverContinuation,
+            recoverOverflow: Effect.suspend(() =>
+              recoverOverflow
+                ? compaction
+                    .compact({ reason: "overflow", context: loaded })
+                    .pipe(Effect.map((result) => result.status === "completed"))
+                : Effect.succeed(false),
+            ),
+          }),
+        )
+        const awaitClosed = lifecycle.awaitClosed
+        const runningAttempt = awaitClosed
+          ? Effect.raceFirst(awaitClosed.pipe(Effect.andThen(Effect.interrupt)), attempt)
+          : attempt
+        const outcome = yield* runningAttempt
         const completed = yield* SessionStep.Outcome.$match(outcome, {
           Completed: (outcome) => Effect.succeed(outcome.needsContinuation),
           Retry: (outcome) =>
-            retry.wait({
-              decision: outcome.decision,
-              error: outcome.error,
-              assistantMessageID,
+            Effect.gen(function* () {
+              yield* retry.wait({
+                decision: outcome.decision,
+                error: outcome.error,
+                assistantMessageID,
+              })
+              if (lifecycle.isClosed()) return yield* Effect.interrupt
             }),
           Continue: Effect.fnUntraced(function* (outcome) {
             yield* retry.wait({
@@ -281,6 +294,7 @@ const layer = Layer.effect(
               error: outcome.error,
               assistantMessageID,
             })
+            if (lifecycle.isClosed()) return yield* Effect.interrupt
             yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM })
             assistantMessageID = SessionMessage.ID.create()
           }),

@@ -28,44 +28,43 @@ export interface Decision {
   readonly delay: number
 }
 
-/** Bound provider-requested delays so a hostile or buggy retry-after cannot stall a session for hours. */
-const RETRY_AFTER_MAX = Duration.toMillis("15 minutes")
+/** Bound provider-requested and policy delays so a retry cannot stall a session for longer than five minutes. */
+const RETRY_DELAY_MAX = Duration.toMillis("5 minutes")
+const RETRY_DELAY_MIN = Duration.toMillis("1 second")
 
 const retryAfter = (input: Input) => {
-  if (input.cause.reason._tag === "RateLimit" || input.cause.reason._tag === "ProviderInternal")
-    return input.cause.reason.retryAfterMs === undefined
-      ? undefined
-      : Math.min(input.cause.reason.retryAfterMs, RETRY_AFTER_MAX)
-  return undefined
+  switch (input.cause.reason._tag) {
+    case "RateLimit": {
+      const value = input.cause.reason.retryAfterMs ?? input.cause.reason.rateLimit?.retryAfterMs
+      return value !== undefined && Number.isFinite(value) ? Math.min(Math.max(0, value), RETRY_DELAY_MAX) : undefined
+    }
+    case "QuotaExceeded":
+    case "ProviderInternal": {
+      const value = input.cause.reason.retryAfterMs
+      return value !== undefined && Number.isFinite(value) ? Math.min(Math.max(0, value), RETRY_DELAY_MAX) : undefined
+    }
+    default:
+      return undefined
+  }
 }
 
-// Exponential from 2s capped at 10s per gap, for 10 retries: 2, 4, 8, then 10 × 7, about 84s of
-// waiting when every attempt fails (67–101s with jitter). `min` takes the faster schedule, so the
-// cap applies per gap; `max` with `recurs` bounds the count.
-const schedule = Schedule.max([
-  Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced("10 seconds")]),
-  Schedule.recurs(10),
-]).pipe(
+// Exponential from 2s, capped at five minutes per gap. Both schedules recur forever; the
+// provider and session lifecycle decide when the retry loop ends.
+const schedule = Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced("5 minutes")]).pipe(
   Schedule.jittered,
   Schedule.setInputType<Input>(),
   Schedule.modifyDelay(({ input, duration: delay }) => {
     const minimum = retryAfter(input)
     const duration = minimum === undefined ? delay : Duration.max(delay, Duration.millis(minimum))
-    return Effect.succeed(Duration.millis(Math.ceil(Duration.toMillis(duration))))
+    return Effect.succeed(Duration.millis(Math.min(RETRY_DELAY_MAX, Math.ceil(Duration.toMillis(duration)))))
   }),
 )
-
-// A timed-out attempt already waited minutes before failing, so the general allowance would let a
-// dead provider hold a step for most of an hour. Cap those attempts well below it.
-const MAX_TIMEOUT_RETRIES = 3
-
-const isTimeout = (error: AIError) => error.reason._tag === "Transport" && error.reason.code === "Timeout"
 
 export const policy = (sessionID: SessionSchema.ID) =>
   Effect.gen(function* () {
     const step = yield* Schedule.toStep(schedule)
     let attempt = 1
-    let timeouts = 0
+    let permanentRetryPromotionUsed = false
     return (input: Input) =>
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis
@@ -73,7 +72,6 @@ export const policy = (sessionID: SessionSchema.ID) =>
         if (!next) return { retry: false as const }
         const [, duration] = next
         attempt++
-        if (isTimeout(input.cause)) timeouts++
         const delay = Math.ceil(Duration.toMillis(duration))
         const event: PluginHooks.Domains["session"]["retry"] = {
           sessionID,
@@ -81,17 +79,40 @@ export const policy = (sessionID: SessionSchema.ID) =>
           model: input.model,
           error: input.error,
           attempt,
-          decision: input.retry && timeouts <= MAX_TIMEOUT_RETRIES ? { retry: true, delay } : { retry: false },
+          decision: input.retry ? { retry: true, delay } : { retry: false },
         }
         yield* input.hook(event)
-        if (!event.decision.retry) return event.decision
+        // A provider hook cannot veto a retryable failure, but it may explicitly
+        // promote a normally terminal failure for one recovery attempt (for
+        // example, after refreshing an expired OAuth token). The promotion is
+        // policy state rather than hook state, so a hook that always requests
+        // retry cannot turn a permanent failure into an infinite loop.
+        const acceptedNonReadTransport =
+          input.cause.reason._tag === "Transport" &&
+          input.cause.reason.delivery === "accepted" &&
+          input.cause.reason.operation !== "read"
+        const promoted =
+          !input.retry && !acceptedNonReadTransport && event.decision.retry && !permanentRetryPromotionUsed
+        if (!input.retry && !promoted) return { retry: false as const }
+        if (promoted) permanentRetryPromotionUsed = true
+        const requestedDelay = event.decision.retry ? event.decision.delay : delay
         const normalized =
-          Number.isFinite(event.decision.delay) && event.decision.delay >= 0 ? Math.ceil(event.decision.delay) : delay
-        return { retry: true as const, attempt, delay: normalized }
+          Number.isFinite(requestedDelay) && requestedDelay >= 0 ? Math.ceil(requestedDelay) : delay
+        const minimum = Math.max(RETRY_DELAY_MIN, retryAfter(input) ?? 0)
+        return {
+          retry: true as const,
+          attempt,
+          delay: Math.min(RETRY_DELAY_MAX, Math.max(minimum, normalized)),
+        }
       })
   })
 
-export const make = (bus: Bus.Interface, sessionID: SessionSchema.ID) =>
+interface Lifecycle {
+  readonly isClosed: () => boolean
+  readonly awaitClosed?: Effect.Effect<void>
+}
+
+export const make = (bus: Bus.Interface, sessionID: SessionSchema.ID, lifecycle?: Lifecycle) =>
   Effect.gen(function* () {
     const decide = yield* policy(sessionID)
     const wait = (input: {
@@ -100,6 +121,7 @@ export const make = (bus: Bus.Interface, sessionID: SessionSchema.ID) =>
       readonly error: SessionError.Error
     }) =>
       Effect.gen(function* () {
+        if (lifecycle?.isClosed()) return yield* Effect.interrupt
         const scheduled = yield* Clock.currentTimeMillis
         yield* bus.publish(SessionEvent.RetryScheduled, {
           sessionID,
@@ -109,7 +131,19 @@ export const make = (bus: Bus.Interface, sessionID: SessionSchema.ID) =>
           error: input.error,
         })
         const remaining = Math.max(0, scheduled + input.decision.delay - (yield* Clock.currentTimeMillis))
-        yield* Effect.sleep(Duration.millis(remaining))
+        const awaitClosed = lifecycle?.awaitClosed
+        if (!awaitClosed) {
+          yield* Effect.sleep(Duration.millis(remaining))
+          if (lifecycle?.isClosed()) return yield* Effect.interrupt
+          return
+        }
+        // Propagate shutdown as interruption, preserving execution's recovery
+        // claim rather than terminalizing the drain as successful.
+        yield* Effect.raceFirst(
+          awaitClosed.pipe(Effect.andThen(Effect.interrupt)),
+          Effect.sleep(Duration.millis(remaining)),
+        )
+        if (lifecycle.isClosed()) return yield* Effect.interrupt
       })
     return { decide, wait }
   })

@@ -155,7 +155,9 @@ const READ_RETRY = Schedule.max([
   Schedule.modifyDelay(({ input, duration }) =>
     Effect.succeed(
       Duration.min(
-        input.reason._tag === "RateLimit" || input.reason._tag === "ProviderInternal"
+        input.reason._tag === "RateLimit" ||
+        input.reason._tag === "QuotaExceeded" ||
+        input.reason._tag === "ProviderInternal"
           ? Duration.max(duration, Duration.millis(input.reason.retryAfterMs ?? 0))
           : duration,
         READ_RETRY_MAX_DELAY,
@@ -163,6 +165,15 @@ const READ_RETRY = Schedule.max([
     ),
   ),
 )
+
+// LLM quota failures are intentionally retryable by the session runner, but a
+// queued media GET is a bounded polling operation. Keep the media boundary
+// from inheriting that LLM policy while retaining the existing explicit retry
+// header override for providers that opt a quota response into retrying.
+const isMediaReadRetryable = (error: AIError) =>
+  error.reason._tag !== "QuotaExceeded" || error.reason.http?.headers["x-should-retry"] === "true"
+    ? isRetryable(error)
+    : false
 
 /**
  * Compose a queued media protocol the same way, adding `start`/`resume` handles whose polls reuse the route's auth,
@@ -191,7 +202,7 @@ export const queued = <Request extends MediaRequest, Response, Token>(
       ) => Effect.Effect<A, AIError>
     }) =>
       transport.call("GET", operation.path(token), http, execute).pipe(
-        Effect.retry({ schedule: READ_RETRY, while: isRetryable }),
+        Effect.retry({ schedule: READ_RETRY, while: isMediaReadRetryable }),
         Effect.flatMap((sent) => operation.decode(sent.response, { token, auth: sent.auth, materialize })),
       )
     const status = poll(protocol.status)

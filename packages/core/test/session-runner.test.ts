@@ -75,13 +75,14 @@ import { McpInstructions } from "@opencode/core/mcp/instructions"
 import { SessionSystemPrompt } from "@opencode/core/session/system-prompt"
 import { ID, Model } from "@opencode/core/model"
 import { Location } from "@opencode/core/location"
+import { LocationLifecycle } from "@opencode/core/location-lifecycle"
+import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Provider } from "@opencode/core/provider"
 import { Cause, Context, DateTime, Deferred, Effect, Exit, Fiber, Layer, Queue, Schema, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { asc, desc, eq, sql } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 import { promptLocationNode } from "./fixture/prompt-location"
-import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Expected } from "./lib/session-message"
 import { permissionLayer } from "./lib/permission"
 import { agentHost, modelHost, host, noProviders } from "./plugin/host"
@@ -219,6 +220,7 @@ const makeRunnerState = (compaction?: SessionRunnerModel.Resolved["compaction"])
     authorizations: new Array<Tool.Context>(),
     executions: new Array<string>(),
     closedTransports: new Array<Session.ID>(),
+    locationClosed: false,
     blockTools: (count = 1) =>
       Effect.acquireRelease(
         Effect.all({ started: Deferred.make<void>(), release: Deferred.make<void>() }).pipe(
@@ -424,6 +426,21 @@ const layer = Layer.unwrap(
       PluginSupervisor.node.replace(Layer.empty),
       Plugin.node.replace(Layer.mock(Plugin.Service, { awaitActivation: Effect.void })),
       SessionModelTransport.node.replace(modelTransport),
+      LocationLifecycle.node.replace(
+        Layer.effect(
+          LocationLifecycle.Service,
+          Effect.gen(function* () {
+            const closing = yield* Deferred.make<void>()
+            return LocationLifecycle.Service.of({
+              isClosed: () => state.locationClosed,
+              awaitClosed: Deferred.await(closing),
+              shutdown: Effect.sync(() => {
+                state.locationClosed = true
+              }).pipe(Effect.andThen(Deferred.succeed(closing, undefined)), Effect.asVoid),
+            })
+          }),
+        ),
+      ),
     ]
     const runnerLayer = AppNodeBuilder.build(SessionRunnerLLM.node, [
       ...replacements,
@@ -485,6 +502,7 @@ const layer = Layer.unwrap(
         SessionRunnerLLM.node,
         SessionExecution.node,
         Session.node,
+        LocationLifecycle.node,
       ]),
       [
         ...replacements,
@@ -556,6 +574,7 @@ const setup = Effect.gen(function* () {
   const state = yield* RunnerState
   const session = yield* Session.Service
   const llm = yield* TestLLM.Service
+  const lifecycle = yield* LocationLifecycle.Service
   const admit = (text: string) => session.prompt({ sessionID, text, resume: false })
   const resume = session.resume(sessionID)
   return Object.assign(state, {
@@ -582,6 +601,7 @@ const setup = Effect.gen(function* () {
       yield* gate.started
       return { finish: gate.release.pipe(Effect.andThen(Fiber.join(run))) }
     }),
+    closeLocation: lifecycle.shutdown,
   })
 })
 
@@ -598,11 +618,11 @@ const scenario = (
     }),
   )
 
-// Nominal retry gaps: exponential from 2s capped at 10s, for 10 retries.
-const RETRY_GAPS = [2_000, 4_000, 8_000, ...Array<number>(7).fill(10_000)]
+// Nominal retry gaps: exponential from 2s capped at 5 minutes. The sequence deliberately
+// crosses the old ten-retry allowance so this suite guards the unbounded policy.
+const RETRY_GAPS = [2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 300_000, 300_000, 300_000]
 // Longest possible gap per retry (+20% jitter); advancing the clock by these always fires the retry.
 const RETRY_GAPS_MAX = RETRY_GAPS.map((gap) => gap * 1.2)
-const RETRY_ATTEMPTS = RETRY_GAPS.map((_, index) => index + 2)
 
 // Subscribe before resuming; model requests can arrive before retry backoff is scheduled.
 const subscribeRetries = (s: Scenario) =>
@@ -2656,10 +2676,12 @@ describe("SessionRunnerLLM", () => {
     s.requests.length = 0
     const hooks = yield* PluginHooks.Service
     const retries: PluginHooks.Domains["session"]["retry"][] = []
+    const retryAttempts = yield* Queue.unbounded<number>()
     yield* hooks.register("session", "retry", (event) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         retries.push({ ...event })
         event.decision = { retry: true, delay: 0 }
+        yield* Queue.offer(retryAttempts, event.attempt)
       }),
     )
     const draft = TestLLM.complete(
@@ -2680,8 +2702,13 @@ describe("SessionRunnerLLM", () => {
       Stream.fail(rateLimited(60_000)),
       TestLLM.textWithUsage("## Objective\n- Accepted summary", "accepted", 30),
     )
-    const compaction = yield* s.session.compact({ sessionID })
-    yield* s.resume
+    const admission = yield* s.session.compact({ sessionID }).pipe(Effect.forkChild)
+    for (const delay of [1_000, 1_000, 1_000, 60_000]) {
+      yield* Queue.take(retryAttempts)
+      yield* TestClock.adjust(`${delay} millis`)
+    }
+    yield* s.session.wait(sessionID)
+    const compaction = yield* Fiber.join(admission)
 
     expect(s.requests).toHaveLength(5)
     for (const request of s.requests) expect(request).toEqual(s.requests[0])
@@ -2696,29 +2723,37 @@ describe("SessionRunnerLLM", () => {
     expect((yield* s.session.get(sessionID))?.tokens.input).toBe(50)
   })
 
-  scenario("bounds compaction network retries across a template correction", function* (s) {
+  scenario("keeps compaction network retries beyond the previous allowance", function* (s) {
     yield* s.llm.push(TestLLM.text("Earlier answer", "history"))
     yield* s.runPrompt("Earlier question")
     s.requests.length = 0
     const hooks = yield* PluginHooks.Service
     const attempts: number[] = []
+    const retryAttempts = yield* Queue.unbounded<number>()
     yield* hooks.register("session", "retry", (event) =>
-      Effect.sync(() => {
+      Effect.gen(function* () {
         attempts.push(event.attempt)
-        expect(event.decision).toMatchObject({ retry: true })
-        event.decision = { retry: true, delay: 0 }
+        event.decision = event.error.type === "provider.transport" ? { retry: true, delay: 0 } : { retry: false }
+        yield* Queue.offer(retryAttempts, event.attempt)
       }),
     )
-    yield* s.llm.push(Stream.fail(providerUnavailable()), TestLLM.text("Not a summary", "invalid"))
-    yield* s.llm.always(Stream.fail(providerUnavailable()))
-    const compaction = yield* s.session.compact({ sessionID })
-    yield* s.resume
+    yield* s.llm.push(
+      ...RETRY_GAPS.map(() => Stream.fail(providerUnavailable())),
+      Stream.fail(invalidRequest()),
+    )
+    const admission = yield* s.session.compact({ sessionID }).pipe(Effect.forkChild)
+    for (const _ of RETRY_GAPS) {
+      yield* Queue.take(retryAttempts)
+      yield* TestClock.adjust("1000 millis")
+    }
+    yield* s.session.wait(sessionID)
+    const compaction = yield* Fiber.join(admission)
 
-    expect(attempts).toEqual(RETRY_ATTEMPTS)
-    expect(s.requests).toHaveLength(RETRY_ATTEMPTS.length + 2)
+    expect(attempts.length).toBeGreaterThan(10)
+    expect(s.requests.length).toBeGreaterThan(11)
     expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
       status: "failed",
-      error: { type: "provider.transport", message: "Provider unavailable" },
+      error: { type: "provider.invalid-request", message: "Invalid request" },
     })
     expect((yield* s.context).some((message) => message.type === "user" && message.text === "Earlier question")).toBe(
       true,
@@ -2759,7 +2794,7 @@ describe("SessionRunnerLLM", () => {
       const hooks = yield* PluginHooks.Service
       yield* hooks.register("session", "retry", (event) =>
         Effect.sync(() => {
-          expect(event.decision.retry).toBe(!header)
+          expect(event.decision.retry).toBe(false)
           event.decision = { retry: false }
         }),
       )
@@ -2778,7 +2813,7 @@ describe("SessionRunnerLLM", () => {
                   }),
                 }),
               })
-            : incompleteStream(),
+            : invalidRequest(),
         ),
       )
       const compaction = yield* s.session.compact({ sessionID })
@@ -2787,7 +2822,7 @@ describe("SessionRunnerLLM", () => {
       expect(s.requests).toHaveLength(1)
       expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
         status: "failed",
-        error: { type: header ? "provider.transport" : "provider.invalid-output" },
+        error: { type: header ? "provider.transport" : "provider.invalid-request" },
       })
     })
   }
@@ -5446,6 +5481,22 @@ describe("SessionRunnerLLM", () => {
     expect(events).not.toContain("session.synthetic.1")
   })
 
+  scenario("immediately interrupts retry backoff when the Location closes without advancing the delay", function* (s) {
+    yield* s.admit("Close Location during retry backoff")
+    yield* s.llm.push(Stream.fail(rateLimited(300_000)), TestLLM.text("Must not run", "unused-location-retry"))
+    const scheduled = yield* subscribeRetries(s)
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* Queue.take(scheduled)
+
+    yield* s.closeLocation
+    const exit = yield* Fiber.await(run)
+    expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+    expect(s.requests).toHaveLength(1)
+    const events = yield* recordedEventTypes(sessionID)
+    expect(events.filter((type) => type === "session.retry.scheduled.1")).toHaveLength(1)
+    expect(events).not.toContain("session.synthetic.1")
+  })
+
   scenario("immediately rebuilds once after explicit continuation rejection", function* (s) {
     yield* s.llm.push(Stream.fail(continuationRejected("retry-full")))
     yield* s.llm.push(TestLLM.text("Recovered", "continuation-recovery"))
@@ -5526,7 +5577,7 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests).toHaveLength(2)
   })
 
-  scenario("caps an excessive provider retry-after delay at fifteen minutes", function* (s) {
+  scenario("caps an excessive provider retry-after delay at five minutes", function* (s) {
     yield* s.admit("Retry capped rate limit")
     yield* s.llm.push(Stream.fail(rateLimited(3_600_000)))
     yield* s.llm.push(TestLLM.text("Recovered", "retry-cap-success"))
@@ -5534,7 +5585,7 @@ describe("SessionRunnerLLM", () => {
     const scheduled = yield* subscribeRetries(s)
     const run = yield* s.resume.pipe(Effect.forkChild)
     yield* Queue.take(scheduled)
-    yield* TestClock.adjust("899999 millis")
+    yield* TestClock.adjust("299999 millis")
     expect(s.requests).toHaveLength(1)
     yield* TestClock.adjust("1 millis")
     yield* Fiber.join(run)
@@ -5855,16 +5906,16 @@ describe("SessionRunnerLLM", () => {
         LLMEvent.textStart({ id: "mixed-partial" }),
         LLMEvent.textDelta({ id: "mixed-partial", text: "Partial" }),
       )
-      // Alternate transparent failures and partial continuations until the retry allowance is spent.
+      // Alternate transparent failures and partial continuations beyond the old retry allowance.
       const outcomes = RETRY_GAPS.map((_, index) => (index % 2 === 0 ? Stream.fail(failure) : partial))
-      yield* s.llm.push(...outcomes, partial)
+      yield* s.llm.push(...outcomes, TestLLM.text("Recovered", "mixed-retry-success"))
       const run = yield* s.resume.pipe(Effect.forkChild)
       const identities: SessionMessage.ID[] = []
       for (const delay of RETRY_GAPS_MAX) {
         identities.push(yield* Queue.take(scheduled))
         yield* TestClock.adjust(delay)
       }
-      expect(yield* Fiber.join(run).pipe(Effect.flip)).toBe(failure)
+      yield* Fiber.join(run)
       expect(s.requests).toHaveLength(RETRY_GAPS.length + 1)
       // A transparent retry keeps the assistant identity; a partial continuation starts a new one.
       for (const [index, identity] of identities.entries()) {
@@ -5878,21 +5929,20 @@ describe("SessionRunnerLLM", () => {
       expect(messages.filter((message) => message.type === "synthetic")).toHaveLength(partials)
       const events = yield* recordedEventTypes(sessionID)
       expect(events.filter((type) => type === "session.retry.scheduled.1")).toHaveLength(RETRY_GAPS.length)
-      expect(events.filter((type) => type === "session.step.failed.1")).toHaveLength(partials + 1)
+      expect(events.filter((type) => type === "session.step.failed.1")).toHaveLength(partials)
     },
   )
 
-  scenario("stops incomplete stream continuations once the retry allowance is spent", function* (s) {
-    yield* s.admit("Exhaust partial continuations")
+  scenario("continues incomplete streams beyond the previous retry allowance", function* (s) {
+    yield* s.admit("Continue partial streams")
     const failure = incompleteStream()
-    yield* s.llm.always(
-      TestLLM.failAfter(
-        failure,
-        LLMEvent.stepStart({ index: 0 }),
-        LLMEvent.textStart({ id: "partial-exhaustion" }),
-        LLMEvent.textDelta({ id: "partial-exhaustion", text: "Partial" }),
-      ),
+    const partial = TestLLM.failAfter(
+      failure,
+      LLMEvent.stepStart({ index: 0 }),
+      LLMEvent.textStart({ id: "partial-exhaustion" }),
+      LLMEvent.textDelta({ id: "partial-exhaustion", text: "Partial" }),
     )
+    yield* s.llm.push(...RETRY_GAPS.map(() => partial), TestLLM.text("Recovered", "partial-recovery"))
 
     const scheduled = yield* subscribeRetries(s)
     const run = yield* s.resume.pipe(Effect.forkChild)
@@ -5900,17 +5950,17 @@ describe("SessionRunnerLLM", () => {
       yield* Queue.take(scheduled)
       yield* TestClock.adjust(delay)
     }
-    expect(yield* Fiber.join(run).pipe(Effect.flip)).toBe(failure)
+    yield* Fiber.join(run)
     expect(s.requests).toHaveLength(RETRY_GAPS.length + 1)
     const context = yield* s.context
     expect(context.filter((message) => message.type === "assistant")).toHaveLength(RETRY_GAPS.length + 1)
     expect(context.filter((message) => message.type === "synthetic")).toHaveLength(RETRY_GAPS.length)
   })
 
-  scenario("stops once the retry allowance is spent", function* (s) {
-    yield* s.admit("Exhaust retries")
-    const failure = providerUnavailable()
-    yield* s.llm.always(Stream.fail(failure))
+  scenario("stops on a permanent failure after sustained retries", function* (s) {
+    yield* s.admit("Stop after sustained retries")
+    const terminal = invalidRequest()
+    yield* s.llm.push(...RETRY_GAPS.map(() => Stream.fail(providerUnavailable())), Stream.fail(terminal))
 
     const scheduled = yield* subscribeRetries(s)
     const run = yield* s.resume.pipe(Effect.forkChild)
@@ -5918,7 +5968,7 @@ describe("SessionRunnerLLM", () => {
       yield* Queue.take(scheduled)
       yield* TestClock.adjust(delay)
     }
-    expect(yield* Fiber.join(run).pipe(Effect.flip)).toBe(failure)
+    expect(yield* Fiber.join(run).pipe(Effect.flip)).toBe(terminal)
     expect(s.requests).toHaveLength(RETRY_GAPS.length + 1)
 
     const retries = yield* s.db

@@ -1,6 +1,6 @@
 export * as LocationLifecycle from "./location-lifecycle.js"
 
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Deferred, Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { LocationEvent } from "@opencode/schema/location-event"
 import { Bus } from "./bus.js"
@@ -16,7 +16,12 @@ const isSessionEvent = Schema.is(SessionEvent.Durable)
 
 export class Service extends Context.Service<
   Service,
-  { readonly isClosed: () => boolean; readonly shutdown: Effect.Effect<void> }
+  {
+    readonly isClosed: () => boolean
+    /** Completes when shutdown begins, before interaction cleanup finishes. */
+    readonly awaitClosed?: Effect.Effect<void>
+    readonly shutdown: Effect.Effect<void>
+  }
 >()("@opencode/LocationLifecycle") {}
 
 const layer = Layer.effect(
@@ -38,10 +43,12 @@ const layer = Layer.effect(
       return project.activate(location.project.id).pipe(Effect.forkIn(scope), Effect.asVoid)
     })
     yield* Effect.addFinalizer(() => unsubscribe)
+    const closing = yield* Deferred.make<void>()
     let closed = false
     const shutdown = yield* Effect.cached(
       Effect.gen(function* () {
         closed = true
+        yield* Deferred.succeed(closing, undefined)
         yield* permission.close
         yield* forms.close
         yield* rpc.close
@@ -56,6 +63,7 @@ const layer = Layer.effect(
     )
     return Service.of({
       isClosed: () => closed,
+      awaitClosed: Deferred.await(closing),
       shutdown,
     })
   }),

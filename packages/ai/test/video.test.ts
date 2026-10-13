@@ -1014,6 +1014,36 @@ describe("Video / transient read failures", () => {
     }),
   )
 
+  it.effect("waits for an explicitly retryable quota poll's retry-after", () =>
+    Effect.gen(function* () {
+      const calls: Array<Call> = []
+      const fiber = yield* Effect.forkChild(
+        Video.generate({ model, prompt: "x" }, { poll: { interval: "1 second" } }).pipe(
+          Effect.provide(
+            layer((input) =>
+              Effect.gen(function* () {
+                const { call, nth } = yield* observe(calls, input)
+                if (call.method === "POST") return json(input, { id: "task_1" })
+                if (nth === 1)
+                  return json(
+                    input,
+                    { error: { message: "Quota exceeded" } },
+                    { status: 429, headers: { "retry-after": "10", "x-should-retry": "true" } },
+                  )
+                return json(input, succeeded)
+              }),
+            ),
+          ),
+        ),
+      )
+      yield* TestClock.adjust("9 seconds")
+      expect(methods(calls)).toEqual(["POST", "GET"])
+      yield* TestClock.adjust("1 second")
+      yield* Fiber.join(fiber)
+      expect(methods(calls)).toEqual(["POST", "GET", "GET", "GET"])
+    }),
+  )
+
   it.effect("fails a 400 status poll without retrying", () =>
     Effect.gen(function* () {
       const calls: Array<Call> = []
@@ -1029,6 +1059,27 @@ describe("Video / transient read failures", () => {
         ),
       )
       expect(error.reason._tag).toBe("InvalidRequest")
+      expect(methods(calls)).toEqual(["POST", "GET"])
+    }),
+  )
+
+  it.effect("does not retry a queued status poll for quota exhaustion", () =>
+    Effect.gen(function* () {
+      const calls: Array<Call> = []
+      const error = yield* Video.generate({ model, prompt: "x" }, { poll: { interval: "1 second" } }).pipe(
+        Effect.flip,
+        Effect.provide(
+          layer((input) =>
+            Effect.gen(function* () {
+              const { call } = yield* observe(calls, input)
+              return call.method === "POST"
+                ? json(input, { id: "task_1" })
+                : json(input, { error: { message: "Quota exceeded" } }, { status: 429 })
+            }),
+          ),
+        ),
+      )
+      expect(error.reason._tag).toBe("QuotaExceeded")
       expect(methods(calls)).toEqual(["POST", "GET"])
     }),
   )

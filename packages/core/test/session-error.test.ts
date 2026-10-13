@@ -197,16 +197,16 @@ describe("toSessionError", () => {
     })
   })
 
-  test("retries rate limits, provider-internal, transport, and unrecognized failures", () => {
+  test("retries rate limits, quota, provider-internal, transport, and unrecognized failures", () => {
     const eligible = [
       llm(new RateLimitError({ message: "rate" })),
+      llm(new QuotaExceededError({ message: "quota" })),
       llm(new ProviderInternalError({ message: "internal" })),
       llm(new TransportError({ message: "transport", transport: "http", operation: "request" })),
       llm(new UnknownProviderError({ message: "unknown" })),
     ]
     const ineligible = [
       llm(new AuthenticationError({ message: "auth" })),
-      llm(new QuotaExceededError({ message: "quota" })),
       llm(new ContentPolicyError({ message: "blocked" })),
       llm(new InvalidProviderOutputError({ message: "output" })),
       llm(new InvalidRequestError({ message: "request" })),
@@ -221,8 +221,8 @@ describe("toSessionError", () => {
       ),
     ]
 
-    expect(eligible.map(SessionRunnerRetry.isRetryable)).toEqual([true, true, true, true])
-    expect(ineligible.map(SessionRunnerRetry.isRetryable)).toEqual([false, false, false, false, false, false, false])
+    expect(eligible.map(SessionRunnerRetry.isRetryable)).toEqual([true, true, true, true, true])
+    expect(ineligible.map(SessionRunnerRetry.isRetryable)).toEqual([false, false, false, false, false, false])
   })
 
   test("retries accepted transport reads but not accepted writes or rejected requests", () => {
@@ -268,6 +268,16 @@ describe("toSessionError", () => {
       ),
       llm(
         new TransportError({
+          message: "accepted write override",
+          transport: "websocket",
+          operation: "write",
+          delivery: "accepted",
+          phase: "send",
+          http: new HttpContext({ url: "https://example.com", status: 500, headers: { "x-should-retry": "true" } }),
+        }),
+      ),
+      llm(
+        new TransportError({
           message: "continuation rejected",
           transport: "websocket",
           operation: "read",
@@ -279,10 +289,10 @@ describe("toSessionError", () => {
     ]
 
     expect(retryable.map(SessionRunnerRetry.isRetryable)).toEqual([true, true, true, true])
-    expect(ineligible.map(SessionRunnerRetry.isRetryable)).toEqual([false, false])
+    expect(ineligible.map(SessionRunnerRetry.isRetryable)).toEqual([false, false, false])
   })
 
-  test("honors provider retry header overrides", () => {
+  test("honors provider retry headers without promoting permanent errors", () => {
     const http = (headers: Record<string, string>) =>
       new HttpContext({
         url: "https://example.com",
@@ -304,6 +314,6 @@ describe("toSessionError", () => {
       SessionRunnerRetry.isRetryable(
         llm(new InvalidRequestError({ message: "retry", http: http({ "x-should-retry": "true" }) })),
       ),
-    ).toBeTrue()
+    ).toBeFalse()
   })
 })

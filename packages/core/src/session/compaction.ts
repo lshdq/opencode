@@ -23,6 +23,7 @@ import { Agent } from "../agent.js"
 import { Bus } from "../bus.js"
 import { Database } from "../database/database.js"
 import { llmClient } from "../effect/app-node-platform.js"
+import { LocationLifecycle } from "../location-lifecycle.js"
 import { Model } from "../model.js"
 import { State } from "../state.js"
 import { Token } from "../util/token.js"
@@ -186,11 +187,25 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const agents = yield* Agent.Service
     const bus = yield* Bus.Service
+    const lifecycle = yield* LocationLifecycle.Service
     const llm = yield* LLMClient.Service
     const catalog = yield* Model.Service
     const models = yield* SessionRunnerModel.Service
     const db = (yield* Database.Service).db
     const requests = yield* SessionModelRequest.Service
+
+    const whileOpen = <A, E>(effect: Effect.Effect<A, E>) =>
+      Effect.gen(function* () {
+        if (lifecycle.isClosed()) return yield* Effect.interrupt
+        const awaitClosed = lifecycle.awaitClosed
+        const guarded = Effect.suspend(() => (lifecycle.isClosed() ? Effect.interrupt : effect))
+        if (!awaitClosed) return yield* guarded
+        // Keep the guarded work first so a close interrupts a blocking policy or retry hook as the losing branch.
+        return yield* Effect.raceFirst(
+          guarded,
+          awaitClosed.pipe(Effect.andThen(Effect.interrupt)),
+        )
+      })
 
     const state = State.create<Settings, Editor>({
       name: "session-compaction",
@@ -420,7 +435,7 @@ export const layer = Layer.effect(
           })
         }
 
-        const attempt = yield* Effect.result(send(request))
+        const attempt = yield* Effect.result(whileOpen(send(request)))
         if (Result.isSuccess(attempt)) return attempt.success
         const cause = attempt.failure
         if (!(cause instanceof AIError)) return yield* Effect.fail(cause)
@@ -441,16 +456,18 @@ export const layer = Layer.effect(
           continue
         }
 
-        const decision = yield* policy({
-          cause,
-          error,
-          agent: context.agent.id,
-          model: context.model.ref,
-          hook: prepared.retry,
-          retry: SessionRunnerRetry.isRetryable(cause),
-        })
+        const decision = yield* whileOpen(
+          policy({
+            cause,
+            error,
+            agent: context.agent.id,
+            model: context.model.ref,
+            hook: prepared.retry,
+            retry: SessionRunnerRetry.isRetryable(cause),
+          }),
+        )
         if (!decision.retry) return yield* Effect.fail<Failure>({ error })
-        yield* Effect.sleep(decision.delay)
+        yield* whileOpen(Effect.sleep(decision.delay))
       }
     })
 
@@ -677,7 +694,16 @@ export const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [Agent.node, Bus.node, Database.node, llmClient, Model.node, SessionModelRequest.node, SessionRunnerModel.node],
+  deps: [
+    Agent.node,
+    Bus.node,
+    Database.node,
+    LocationLifecycle.node,
+    llmClient,
+    Model.node,
+    SessionModelRequest.node,
+    SessionRunnerModel.node,
+  ],
 })
 
 /** History loads from the latest completed compaction, so a previous one is always the first message. */

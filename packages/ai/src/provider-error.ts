@@ -75,23 +75,34 @@ export const isContextOverflowFailure = (failure: unknown) =>
     : Schema.is(ProviderErrorEvent)(failure) && failure.classification === "context-overflow"
 
 /**
- * Whether a failed call may succeed when sent again: rate limits, provider-side failures, transport failures that did
- * not deliver an accepted write, and unrecognized failures. Callers decide which calls are safe to repeat.
+ * Whether a failed call may succeed when sent again: rate limits, account quotas, provider-side failures, transport
+ * failures that did not deliver an accepted write, and unrecognized failures. Callers decide which calls are safe to
+ * repeat.
  */
 export const isRetryable = (error: AIError) => {
+  // An acknowledged non-read operation may already have caused provider-side
+  // effects. No provider header is allowed to turn that delivery boundary into
+  // a duplicate write.
+  if (
+    error.reason._tag === "Transport" &&
+    error.reason.delivery === "accepted" &&
+    error.reason.operation !== "read"
+  )
+    return false
   const override = error.reason.http?.headers["x-should-retry"]
-  if (override === "true") return true
   if (override === "false") return false
   switch (error.reason._tag) {
     case "RateLimit":
+    case "QuotaExceeded":
     case "ProviderInternal":
       return true
     // A WebSocket acknowledgment marks delivery accepted before model output may exist.
     // Read failures can still recover; the caller chooses retry versus continuation from durable output.
     case "Transport":
       return (
-        error.reason.delivery !== "rejected" &&
-        (error.reason.delivery !== "accepted" || error.reason.operation === "read")
+        override === "true" ||
+        (error.reason.delivery !== "rejected" &&
+          (error.reason.delivery !== "accepted" || error.reason.operation === "read"))
       )
     case "InvalidProviderOutput":
       return error.reason.classification === "incomplete-stream"
@@ -100,8 +111,9 @@ export const isRetryable = (error: AIError) => {
     // that arrive in shapes no classifier anticipates.
     case "UnknownProvider":
       return true
+    // Retry headers cannot promote a deterministic rejection. Callers may
+    // explicitly allow a bounded recovery (for example, an OAuth refresh).
     case "Authentication":
-    case "QuotaExceeded":
     case "ContentPolicy":
     case "InvalidRequest":
     case "UnsupportedOperation":
@@ -124,10 +136,35 @@ const QUOTA_CODES = new Set([
   "gousagelimiterror",
   "freeusagelimiterror",
   "creditlimitexceeded",
+  "subscription_sharing_usage_limit_exceeded",
 ])
+// ChatGPT token-sharing capability and authorization failures are deterministic;
+// classify them here so retry hooks cannot turn them into an infinite retry loop.
 // Google reports an invalid API key as HTTP 400 INVALID_ARGUMENT with this `details[].reason`.
 // Z.ai's Responses API reports account and plan rejections mid-stream as `permission_denied`.
-const AUTH_CODES = new Set(["authentication_error", "permission_error", "permission_denied", "api_key_invalid"])
+const AUTH_CODES = new Set([
+  "authentication_error",
+  "permission_error",
+  "permission_denied",
+  "api_key_invalid",
+  "invalid_api_key",
+  "invalid_api_key_error",
+  "invalid_credentials",
+  "invalid_token",
+  "invalid-token",
+  "expired_token",
+  "expired-token",
+  "token_expired",
+  "token-expired",
+  "access_denied",
+  "access-denied",
+  "unauthenticated",
+  "unauthorized",
+  "chatpass_v2_scope_not_authorized",
+  "chatpass_v2_invalid_authorization_context",
+  "subscription_sharing_invalid_user",
+  "subscription_sharing_user_not_eligible",
+])
 const SERVER_CODES = new Set([
   "api_error",
   "internal_error",
@@ -138,6 +175,8 @@ const SERVER_CODES = new Set([
   "server_is_overloaded",
   "slow_down",
   "serviceunavailableexception",
+  "subscription_sharing_usage_unavailable",
+  "subscription_sharing_user_unavailable",
 ])
 // `invalid_request` is the Vercel AI Gateway's code for an upstream request rejection.
 const INVALID_REQUEST_CODES = new Set([
@@ -145,6 +184,8 @@ const INVALID_REQUEST_CODES = new Set([
   "invalid_prompt",
   "invalid_request",
   "invalid_request_error",
+  "subscription_sharing_route_not_supported",
+  "subscription_sharing_unsupported_capability",
   "validationexception",
 ])
 // Azure OpenAI reports `content_filter` with `innererror.code` ResponsibleAIPolicyViolation.
@@ -162,8 +203,14 @@ const CONTENT_POLICY_CODES = new Set([
 // as a `[code]` label at the start of the rewritten message.
 const GATEWAY_CODE_LABEL = /^[^:\n]+: \[([A-Za-z0-9_.-]+)\]/
 // xAI reports an invalid API key as HTTP 400 with the generic `invalid-argument` code.
-const AUTH_TEXT = /incorrect api key provided/i
+const AUTH_TEXT =
+  /\b(?:invalid|incorrect|expired|missing)[-_\s]+(?:api[-_\s]?key|credentials?|(?:(?:access|bearer)[-_\s]+)?token)\b|\b(?:api[-_\s]?key|credentials?|(?:(?:access|bearer)[-_\s]+)?token)[-_\s]+(?:(?:is|are|has|have)[-_\s]+)?(?:invalid|incorrect|expired|missing|not[-_\s]+valid)\b|\b(?:no|missing)[-_\s]+(?:an?[-_\s]+)?(?:api[-_\s]?key|credentials?|(?:(?:access|bearer)[-_\s]+)?token)[-_\s]+(?:was[-_\s]+)?(?:provided|supplied|present|found)\b|\b(?:authentication|authorization)[-_\s]+(?:is[-_\s]+)?(?:failed|failure|error|required|needed)\b|\b(?:unauthorized|not[-_\s]+authorized|(?:permission|access)[-_\s]+denied)\b/i
 const RATE_LIMIT_TEXT = /rate increased too quickly|rate[-_\s]?limit|too[_\s]?many[_\s]?requests/i
+// These phrases are affirmative provider-side transient signals. Explicit
+// authentication status/codes and conservative stateless auth wording are
+// classified before this fallback; explicit retry instructions remain transient.
+const DEFINITIVE_TEMPORARY_TEXT =
+  /at capacity|overloaded|temporarily unavailable|service[-_\s]?unavailable|(?:server|internal)[-_\s]?error|server (?:is )?busy|resource[-_\s]?exhausted|rate[-_\s]?limit|too[_\s]?many[_\s]?requests/i
 // Only consulted on 429, where throttles and account caps share a status.
 // Z.ai reports balance, plan expiry, plan limits, and plan model access on 429.
 const QUOTA_TEXT =
@@ -174,8 +221,37 @@ const QUOTA_TEXT =
 // under `invalid_request_error`.
 const CONTENT_POLICY_TEXT =
   /violating our usage policy|blocked by content filtering policy|content[-_\s]?policy|rejected as a result of our safety system|detected potentially unsafe or sensitive content/i
+// Some providers return model/catalog failures without a status or structured
+// code. Keep these deterministic phrases out of the UnknownProvider retry
+// path, while leaving genuinely unrecognized failures retryable.
+const MODEL_REQUEST_TEXT =
+  /\b(?:model(?:\s+["'`(]?[A-Za-z0-9._:/-]+["'`)]?)?\s+(?:not found|was not found|does not exist|doesn't exist|is invalid)|(?:invalid|malformed|no such|unknown)\s+model|no\s+model\s+(?:was\s+)?found)\b/i
+const INVALID_REQUEST_TEXT = /\b(?:invalid request|request\s+is\s+invalid)\b/i
+// Parameter/schema rejections are deterministic even when a provider omits
+// both an HTTP status and a structured error code. Keep the patterns narrow so
+// an otherwise unrecognized provider failure remains retryable.
+const PARAMETER_ERROR_TEXT =
+  /\b(?:bad request|(?:unknown|invalid|unexpected|unsupported|unrecognized)\s+(?:request\s+)?(?:parameter|field|argument|option|property)|(?:invalid|unsupported|unexpected)\s+value\s+(?:for|of)\s+(?:parameter|field|argument|option|property)|(?:parameter|field|argument|option|property)\b[^.\n]*(?:must be|should be|is required|is not allowed|is invalid|between\b|expected\b))\b/i
+// The broader server pattern also contains transport wording such as
+// "upstream request". Only these affirmative phrases override a conflicting
+// non-temporary client status. Code-like spellings alone are not retry signals.
+const EXPLICIT_SERVER_RETRY_TEXT =
+  /\b(?:try again|retry\b|at capacity|overloaded|temporarily unavailable|service\s+unavailable|server (?:is )?busy|(?:server|internal)\s+error|resource\s+exhausted)\b/i
+// A provider may include a retry-shaped word while explicitly declaring that
+// retrying is unsafe. Keep this deliberately limited to direct retry
+// instructions; broad negation matching would misclassify ordinary prose.
+const EXPLICIT_SERVER_NO_RETRY_TEXT =
+  /\b(?:do\s+not|don['’]t|never|cannot|can['’]t)\s+(?:retry|retrying|try\s+again)\b|\b(?:not|no)\s+(?:to\s+)?retry(?:able)?\b|\bretr(?:y|ies|ying)\s+(?:(?:is|are)\s+)?(?:not|never)\s+(?:allowed|permitted|possible|safe|recommended|supported|advised|forbidden)\b/i
+const EXPLICIT_RETRY_INSTRUCTION_TEXT =
+  /\b(?:try\s+again|(?:please\s+|you\s+can\s+)?retry\b|try\s+(?:the|this|your)\s+request\s+again)\b/i
 const SERVER_ERROR_TEXT =
-  /\b(?:try again|(?:please |you can )?retry (?:the |this |your )?request|try (?:the |this |your )?request again|(?:currently |temporarily )?at capacity|overloaded|temporarily unavailable|service[-_\s]?unavailable|(?:server|internal)[-_\s]?error|server (?:is )?busy|provider returned (?:an )?error|resource[-_\s]?exhausted|upstream (?:connect|connection|request)|request buffer limit while retrying upstream)\b/i
+  /\b(?:try again|(?:please |you can )?retry\b|try (?:the |this |your )?request again|(?:currently |temporarily )?at capacity|overloaded|temporarily unavailable|service[-_\s]?unavailable|(?:server|internal)[-_\s]?error|server (?:is )?busy|provider returned (?:an )?error|resource[-_\s]?exhausted|upstream (?:connect|connection|request)|request buffer limit while retrying upstream)\b/i
+
+const hasExplicitServerRetry = (text: string) =>
+  EXPLICIT_SERVER_RETRY_TEXT.test(text) && !EXPLICIT_SERVER_NO_RETRY_TEXT.test(text)
+
+const hasExplicitRetryInstruction = (text: string) =>
+  EXPLICIT_RETRY_INSTRUCTION_TEXT.test(text) && !EXPLICIT_SERVER_NO_RETRY_TEXT.test(text)
 
 const Message = Schema.String.check(Schema.isPattern(/\S/))
 
@@ -245,34 +321,80 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
   // (e.g. overflow phrases nested in a JSON error body) still classify.
   const text = [input.message, body].filter((value) => value.length > 0).join("\n")
   const clientScoped = input.status === undefined || (input.status >= 400 && input.status < 500)
+  const hasAuthCode = codes.some((code) => AUTH_CODES.has(code))
+  const hasExplicitNoRetry = EXPLICIT_SERVER_NO_RETRY_TEXT.test(text)
+
+  if (codes.some((code) => CONTENT_POLICY_CODES.has(code)) || (clientScoped && CONTENT_POLICY_TEXT.test(input.message)))
+    return new ContentPolicyError(details)
+
+  // Explicit authentication signals and statuses are permanent. They must
+  // win over a misleading context-overflow phrase in the same response.
+  if (input.status === 401 || input.status === 403 || hasAuthCode) return new AuthenticationError(details)
+
+  // Authentication text is deterministic when no transient HTTP status
+  // contradicts it. This covers stream failures that have no status or code.
+  if (isExplicitClientStatus(input.status) && AUTH_TEXT.test(text) && !hasExplicitRetryInstruction(text))
+    return new AuthenticationError(details)
+
+  // A direct prohibition on retrying is deterministic evidence even when the
+  // response also contains an overflow or transient-status signal.
+  if (hasExplicitNoRetry) return new InvalidRequestError(details)
 
   if (
-    clientScoped &&
+    isExplicitClientStatus(input.status) &&
     (codes.includes("context_length_exceeded") ||
       codes.includes("model_context_window_exceeded") ||
       codes.includes("request_too_large") ||
       isContextOverflow(text))
   )
     return new InvalidRequestError({ ...details, classification: "context-overflow" })
-  if (input.status === 413 || isPayloadTooLarge(text))
+  if (!isTransientStatus(input.status) && (input.status === 413 || isPayloadTooLarge(text)))
     return new InvalidRequestError({ ...details, classification: "payload-too-large" })
-  if (codes.some((code) => CONTENT_POLICY_CODES.has(code)) || (clientScoped && CONTENT_POLICY_TEXT.test(input.message)))
-    return new ContentPolicyError(details)
+
   if (
-    input.status === 402 ||
-    codes.some((code) => QUOTA_CODES.has(code)) ||
-    (input.status === 429 && QUOTA_TEXT.test(text))
+    isExplicitClientStatus(input.status) &&
+    (MODEL_REQUEST_TEXT.test(text) || INVALID_REQUEST_TEXT.test(text) || PARAMETER_ERROR_TEXT.test(text)) &&
+    !hasExplicitServerRetry(text)
   )
-    return new QuotaExceededError(details)
+    return new InvalidRequestError(details)
+
+  if (input.status === 402 || codes.some((code) => QUOTA_CODES.has(code)))
+    return new QuotaExceededError({ ...details, retryAfterMs: input.retryAfterMs })
+
+  // An HTTP signal for a transient failure is stronger than an auth-like text
+  // copied into a proxy envelope, unless the provider explicitly forbids retry.
+  if (input.status === 408 || input.status === 409 || (input.status !== undefined && input.status >= 500))
+    return new ProviderInternalError({
+      ...details,
+      retryAfterMs: input.retryAfterMs,
+    })
+  if (input.status === 429) {
+    if (codes.some((code) => QUOTA_CODES.has(code)) || QUOTA_TEXT.test(text))
+      return new QuotaExceededError({ ...details, retryAfterMs: input.retryAfterMs })
+    return new RateLimitError({
+      ...details,
+      retryAfterMs: input.retryAfterMs,
+      rateLimit: input.rateLimit,
+    })
+  }
+
   if (
-    input.status === 401 ||
-    input.status === 403 ||
-    codes.some((code) => AUTH_CODES.has(code)) ||
-    (input.status === 400 && AUTH_TEXT.test(text))
-  )
-    return new AuthenticationError(details)
+    (input.status === undefined || input.status < 400 || hasExplicitServerRetry(text)) &&
+    DEFINITIVE_TEMPORARY_TEXT.test(text)
+  ) {
+    if (RATE_LIMIT_TEXT.test(text))
+      return new RateLimitError({
+        ...details,
+        retryAfterMs: input.retryAfterMs,
+        rateLimit: input.rateLimit,
+      })
+    return new ProviderInternalError({
+      ...details,
+      retryAfterMs: input.retryAfterMs,
+    })
+  }
+
   if (
-    input.status === 429 ||
     codes.some(
       (code) => code.includes("rate_limit") || code === "too_many_requests" || code === "throttlingexception",
     ) ||
@@ -284,14 +406,14 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
       rateLimit: input.rateLimit,
     })
   if (
-    input.status === 408 ||
-    input.status === 409 ||
-    (input.status !== undefined && input.status >= 500) ||
     // Server codes and phrasing only decide when no HTTP status contradicts them:
     // gateways such as OpenCode Zen substitute `server_error` for codes they do
-    // not forward, so a 4xx with a server code is still a rejected request.
-    ((input.status === undefined || input.status < 400) &&
-      ((!codes.some((code) => INVALID_REQUEST_CODES.has(code)) && SERVER_ERROR_TEXT.test(text)) ||
+    // not forward, so a 4xx with only a substituted server code is still a
+    // rejected request. An affirmative retry phrase still wins.
+    !hasExplicitNoRetry &&
+    ((input.status === undefined || input.status < 400 || hasExplicitServerRetry(text)) &&
+      (((!codes.some((code) => INVALID_REQUEST_CODES.has(code)) || hasExplicitServerRetry(text)) &&
+        SERVER_ERROR_TEXT.test(text)) ||
         codes.some((code) => SERVER_CODES.has(code) || code.includes("exhausted") || code.includes("unavailable"))))
   )
     return new ProviderInternalError({
@@ -302,6 +424,14 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
   // Any remaining 4xx is a deterministic rejection of this request.
   if (input.status !== undefined && input.status >= 400 && input.status < 500) return new InvalidRequestError(details)
   return new UnknownProviderError(details)
+}
+
+function isTransientStatus(status: number | undefined) {
+  return status === 408 || status === 409 || status === 429 || (status !== undefined && status >= 500)
+}
+
+function isExplicitClientStatus(status: number | undefined) {
+  return status === undefined || (status >= 400 && status < 500 && !isTransientStatus(status))
 }
 
 function providerCodes(value: unknown) {

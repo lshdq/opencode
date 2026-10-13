@@ -5048,7 +5048,7 @@ describe("OpenAI Responses route", () => {
         Effect.flip,
       )
 
-      expect(error).toMatchObject({ reason: { _tag: "RateLimit", http: { status: 429 }, body } })
+      expect(error).toMatchObject({ reason: { _tag: "QuotaExceeded", http: { status: 429 }, body } })
     }),
   )
 
@@ -5069,7 +5069,7 @@ describe("OpenAI Responses route", () => {
         Effect.flip,
       )
 
-      expect(error).toMatchObject({ reason: { _tag: "RateLimit" } })
+      expect(error).toMatchObject({ reason: { _tag: "QuotaExceeded" } })
       expect(error.reason.body).toContain("subscription_sharing_usage_limit_exceeded")
     }),
   )
