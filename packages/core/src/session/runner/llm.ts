@@ -5,6 +5,7 @@ import { and, desc, eq, sql } from "drizzle-orm"
 import { Cause, Effect, Exit, FiberMap, Layer } from "effect"
 import { Database } from "../../database/database.js"
 import { Bus } from "../../bus.js"
+import { Config } from "../../config.js"
 import { LocationLifecycle } from "../../location-lifecycle.js"
 import { InstructionState } from "../instruction-state.js"
 import { SessionCompaction } from "../compaction.js"
@@ -39,6 +40,7 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
+    const config = yield* Config.Service
     const lifecycle = yield* LocationLifecycle.Service
     const store = yield* SessionStore.Service
     const context = yield* SessionContext.Service
@@ -206,7 +208,7 @@ const layer = Layer.effect(
     const runStep = Effect.fn("SessionRunner.runStep")(function* (first: SessionContext.Loaded, step: number) {
       const sessionID = first.session.id
       let assistantMessageID = SessionMessage.ID.create()
-      const retry = yield* SessionRunnerRetry.make(bus, sessionID, lifecycle)
+      const retry = yield* SessionRunnerRetry.make(bus, sessionID, lifecycle, () => SessionRunnerRetry.maxDelay(config))
       let initial: SessionContext.Loaded | undefined = first
       let recoverOverflow = true
       let recoverContinuation = true
@@ -373,6 +375,7 @@ export const node = makeLocationNode({
   service: Service,
   layer,
   deps: [
+    Config.node,
     Bus.node,
     LocationLifecycle.node,
     llmClient,

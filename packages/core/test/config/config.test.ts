@@ -22,6 +22,7 @@ import { Provider } from "@opencode/core/provider"
 import { AbsolutePath } from "@opencode/core/schema"
 import { WellKnown } from "@opencode/core/wellknown"
 import { KV } from "@opencode/core/kv"
+import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
 import { Integration } from "@opencode/schema/integration"
 import { emptyCredentialNode, emptyWellknownNode } from "../fixture/config-nodes"
 import { location } from "../fixture/location"
@@ -852,6 +853,36 @@ describe("Config", () => {
       diagnostics: [],
     })
   })
+
+  test("normalizes the retry backoff configuration", () => {
+    expect(migrateV1({ retry: { max_delay: 45 } }).retry?.max_delay).toBe(45)
+    for (const value of [-1, 1.5, "45", null, {}, Number.NaN, Number.MAX_SAFE_INTEGER + 1]) {
+      const result = ConfigNormalize.normalize({ retry: { max_delay: value } })
+      expect(result).toMatchObject({
+        type: "normalized",
+        encoded: {},
+        diagnostics: [{ kind: "invalid", path: ["retry"], message: expect.any(String) }],
+      })
+    }
+  })
+
+  it.effect("reads the latest retry backoff configuration", () =>
+    Effect.gen(function* () {
+      const config = yield* Config.Service
+      const testConfig = yield* Config.Test
+      expect(yield* SessionRunnerRetry.maxDelay(config)).toBe(30_000)
+
+      yield* testConfig.setEntries([
+        new Document({ type: "document", info: new Info({ retry: { max_delay: 45 } }) }),
+      ])
+      expect(yield* SessionRunnerRetry.maxDelay(config)).toBe(45_000)
+
+      yield* testConfig.setEntries([
+        new Document({ type: "document", info: new Info({ retry: { max_delay: 0 } }) }),
+      ])
+      expect(yield* SessionRunnerRetry.maxDelay(config)).toBe(0)
+    }).pipe(Effect.provide(Config.testLayer())),
+  )
 
   test("migrates v1 provider lists to policies", () => {
     expect(

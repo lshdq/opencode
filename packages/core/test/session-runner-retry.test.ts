@@ -14,7 +14,7 @@ import type { PluginHooks } from "@opencode/core/plugin/hooks"
 import { SessionSchema } from "@opencode/core/session/schema"
 import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
 import { toSessionError } from "@opencode/core/session/to-session-error"
-import { Effect } from "effect"
+import { Effect, Ref } from "effect"
 import { it } from "./lib/effect"
 
 const timeout = new AIError({
@@ -73,6 +73,99 @@ describe("SessionRunnerRetry.policy", () => {
       }
       expect(delays.every((delay) => delay <= 300_000)).toBe(true)
       expect(delays.every((delay) => delay >= 300_000)).toBe(true)
+    }),
+  )
+
+  it.effect("uses the default thirty-second cap for local backoff", () =>
+    Effect.gen(function* () {
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_retry_default_max"))
+      const delays: number[] = []
+      for (let i = 0; i < 12; i++) {
+        const result = yield* policy(input(internal))
+        if (!result.retry) throw new Error("expected retry")
+        delays.push(result.delay)
+      }
+      expect(delays.every((delay) => delay <= 30_000)).toBe(true)
+    }),
+  )
+
+  it.effect("uses a configured cap and honors provider retry-after first", () =>
+    Effect.gen(function* () {
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_retry_configured_max"), () =>
+        Effect.succeed(1_000),
+      )
+      const local = yield* policy(input(internal))
+      if (!local.retry) throw new Error("expected retry")
+      expect(local.delay).toBeLessThanOrEqual(1_000)
+
+      const provider = new AIError({
+        reason: new ProviderInternalError({ message: "internal", retryAfterMs: 10_000 }),
+      })
+      const providerResult = yield* policy(input(provider))
+      if (!providerResult.retry) throw new Error("expected retry")
+      expect(providerResult.delay).toBe(10_000)
+    }),
+  )
+
+  it.effect("allows zero to disable local backoff and reads updates on later decisions", () =>
+    Effect.gen(function* () {
+      const maxDelay = yield* Ref.make(1_000)
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_retry_hot_update"), () =>
+        Ref.get(maxDelay),
+      )
+      const initial = yield* policy(input(internal))
+      if (!initial.retry) throw new Error("expected retry")
+      expect(initial.delay).toBeLessThanOrEqual(1_000)
+
+      yield* Ref.set(maxDelay, 0)
+      const updated = yield* policy(input(internal))
+      if (!updated.retry) throw new Error("expected retry")
+      expect(updated.delay).toBe(0)
+    }),
+  )
+
+  it.effect("allows a configured cap above the provider hard max", () =>
+    Effect.gen(function* () {
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_retry_above_hard"), () =>
+        Effect.succeed(600_000),
+      )
+      const delays: number[] = []
+      for (let i = 0; i < 12; i++) {
+        const result = yield* policy(input(internal))
+        if (!result.retry) throw new Error("expected retry")
+        delays.push(result.delay)
+      }
+      expect(delays).toHaveLength(12)
+      // Jittered exponential gaps grow past the five-minute hard max until the configured cap clamps them.
+      for (const [index, delay] of delays.entries()) {
+        if (index < 9) expect(delay).toBeGreaterThanOrEqual(2_000 * 2 ** index * 0.8)
+        else expect(delay).toBe(600_000)
+      }
+    }),
+  )
+
+  it.effect("shows hooks finite capped delays on the provider retry-after path", () =>
+    Effect.gen(function* () {
+      const proposed: number[] = []
+      const cause = new AIError({
+        reason: new ProviderInternalError({ message: "internal", retryAfterMs: 1_000 }),
+      })
+      const hook = (event: PluginHooks.Domains["session"]["retry"]) => {
+        proposed.push(event.decision.retry ? event.decision.delay : 0)
+        return Effect.void
+      }
+      const decide = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_retry_hook_cap"))
+      for (let i = 0; i < 24; i++) {
+        const result = yield* decide({ ...input(cause), hook })
+        if (!result.retry) throw new Error("expected retry")
+      }
+      // After ~19 attempts the raw exponential schedule exceeds the hard max; the hook must
+      // still observe finite values capped at five minutes.
+      expect(proposed).toHaveLength(24)
+      for (const delay of proposed) {
+        expect(Number.isFinite(delay)).toBe(true)
+        expect(delay).toBeLessThanOrEqual(300_000)
+      }
     }),
   )
 

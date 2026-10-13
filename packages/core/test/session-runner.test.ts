@@ -60,6 +60,7 @@ import { QuestionTool } from "@opencode/core/tool/plugin/question"
 import { Agent } from "@opencode/core/agent"
 import { Config } from "@opencode/core/config"
 import { Document, Info } from "@opencode/schema/config"
+import { ConfigRetry } from "@opencode/schema/config/retry"
 import { ConfigCompaction } from "@opencode/schema/config/compaction"
 import { Tool } from "@opencode/core/tool"
 import type { Info as ToolInfo } from "@opencode/schema/tool"
@@ -476,7 +477,7 @@ const layer = Layer.unwrap(
         })
       }),
     ).pipe(Layer.provide(runnerLayer), Layer.orDie)
-    return AppNodeBuilder.build(
+    const built = AppNodeBuilder.build(
       LayerNode.group([
         Database.node,
         Bus.node,
@@ -512,6 +513,8 @@ const layer = Layer.unwrap(
         SessionExecution.node.replace(execution),
       ],
     )
+    // Merge the config layer by reference so Config.Test resolves to the same memoized instance.
+    return Layer.merge(built, config)
   }),
 ).pipe(Layer.provideMerge(Layer.sync(RunnerState, makeRunnerState)), Layer.provideMerge(testLLM))
 const it = testEffect(layer)
@@ -575,6 +578,7 @@ const setup = Effect.gen(function* () {
   const session = yield* Session.Service
   const llm = yield* TestLLM.Service
   const lifecycle = yield* LocationLifecycle.Service
+  const configTest = yield* Config.Test
   const admit = (text: string) => session.prompt({ sessionID, text, resume: false })
   const resume = session.resume(sessionID)
   return Object.assign(state, {
@@ -583,6 +587,7 @@ const setup = Effect.gen(function* () {
     sessionInbox,
     session,
     llm,
+    configTest,
     requests: llm.requests,
     admit,
     resume,
@@ -618,9 +623,9 @@ const scenario = (
     }),
   )
 
-// Nominal retry gaps: exponential from 2s capped at 5 minutes. The sequence deliberately
+// Nominal retry gaps: exponential from 2s capped at the default 30 seconds. The sequence deliberately
 // crosses the old ten-retry allowance so this suite guards the unbounded policy.
-const RETRY_GAPS = [2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 300_000, 300_000, 300_000]
+const RETRY_GAPS = [2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000, 30_000, 30_000]
 // Longest possible gap per retry (+20% jitter); advancing the clock by these always fires the retry.
 const RETRY_GAPS_MAX = RETRY_GAPS.map((gap) => gap * 1.2)
 
@@ -5995,6 +6000,41 @@ describe("SessionRunnerLLM", () => {
       { type: "session.step.started.1" },
       { type: "session.step.failed.1" },
     ])
+  })
+
+  scenario("bounds model retry gaps with the configured retry max delay", function* (s) {
+    yield* s.configTest.setEntries([
+      new Document({
+        type: "document",
+        info: new Info({ retry: new ConfigRetry.Info({ max_delay: 1 }) }),
+      }),
+    ])
+    yield* s.admit("Retry with a configured cap")
+    const failure = providerUnavailable()
+    yield* s.llm.push(...Array.from({ length: 3 }, () => Stream.fail(failure)), TestLLM.text("Recovered", "configured-cap"))
+
+    const scheduled = yield* subscribeRetries(s)
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    for (const _ of [0, 1, 2]) {
+      yield* Queue.take(scheduled)
+      yield* TestClock.adjust("1200 millis")
+    }
+    yield* Fiber.join(run)
+
+    const retries = yield* s.db
+      .select({ data: EventTable.data })
+      .from(EventTable)
+      .where(eq(EventTable.type, "session.retry.scheduled.1"))
+      .orderBy(asc(EventTable.seq))
+      .all()
+      .pipe(Effect.orDie)
+    expect(retries).toHaveLength(3)
+    // Every gap is pinned to the configured 1s cap instead of the exponential floor or the 30s default.
+    for (const [index, retry] of retries.entries()) {
+      if (index === 0) continue
+      const gap = Number(retry.data.at) - Number(retries[index - 1]?.data.at ?? 0)
+      expect(gap).toBe(1_000)
+    }
   })
 
   scenario("retries a model call without consuming the logical agent step", function* (s) {

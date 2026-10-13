@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { LanguageModel, LLMClient, LLMEvent } from "@opencode/ai"
+import { AIError, LanguageModel, LLMClient, LLMEvent, ProviderInternalError } from "@opencode/ai"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
@@ -17,6 +17,7 @@ import { Location } from "@opencode/core/location"
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { ConfigCompaction } from "@opencode/schema/config/compaction"
+import { ConfigRetry } from "@opencode/schema/config/retry"
 import { Document, Event, Info } from "@opencode/schema/config"
 import { Money } from "@opencode/schema/money"
 import { LayerNode } from "@opencode/util/effect/layer-node"
@@ -35,6 +36,9 @@ const resolved = SessionRunnerModel.resolved(model, {
   cost: [],
   limit,
 })
+const defaultStream = () => Stream.make(LLMEvent.textDelta({ id: "summary", text: "## Objective\n- summary" }))
+// Per-test override for the mocked provider stream; the default restores after each test.
+let streamBehavior: () => Stream.Stream<LLMEvent, AIError> = defaultStream
 const config = Config.testLayer()
 const it = testEffect(
   Layer.merge(
@@ -42,7 +46,7 @@ const it = testEffect(
     AppNodeBuilder.build(LayerNode.group([SessionCompaction.node, SessionModelRequest.node, Config.node, Bus.node]), [
       llmClient.replace(
         Layer.mock(LLMClient.Service)({
-          stream: () => Stream.make(LLMEvent.textDelta({ id: "summary", text: "## Objective\n- summary" })),
+          stream: () => streamBehavior(),
         }),
       ),
       Config.node.replace(config),
@@ -137,6 +141,62 @@ describe("ConfigCompactionPlugin.Plugin", () => {
         yield* Effect.sleep("10 millis")
       }
       yield* Effect.die(new Error("Timed out waiting for compaction config reload"))
+    }),
+  )
+})
+
+describe("SessionCompaction retry policy", () => {
+  it.effect("bounds compaction retry gaps with the configured retry max delay", () =>
+    Effect.gen(function* () {
+      const compaction = yield* SessionCompaction.Service
+      const configTest = yield* Config.Test
+      yield* configTest.setEntries([
+        new Document({
+          type: "document",
+          info: new Info({ retry: new ConfigRetry.Info({ max_delay: 0 }) }),
+        }),
+      ])
+      let attempts = 0
+      streamBehavior = () => {
+        attempts++
+        if (attempts > 1) return defaultStream()
+        return Stream.fail(
+          new AIError({ reason: new ProviderInternalError({ message: "compaction provider failed" }) }),
+        )
+      }
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          streamBehavior = defaultStream
+        }),
+      )
+      // With max_delay 0 the retry gap is zero; if the compaction path ignored the configured
+      // cap the first exponential gap would suspend this branch past the deadline below.
+      const messages = [
+        SessionMessage.User.make({
+          id: SessionMessage.ID.create(),
+          type: "user",
+          text: "Older context",
+          time: { created: DateTime.makeUnsafe(0) },
+        }),
+        SessionMessage.User.make({
+          id: SessionMessage.ID.create(),
+          type: "user",
+          text: "Recent context",
+          time: { created: DateTime.makeUnsafe(1) },
+        }),
+      ]
+      const outcome = yield* Effect.raceFirst(
+        compaction.compact({
+          reason: "manual",
+          context: { ...nearInput.context, messages },
+          inputID: SessionMessage.ID.make("msg_compaction_retry"),
+        }),
+        Effect.sleep("500 millis").pipe(
+          Effect.andThen(Effect.die(new Error("compaction retry gap was not bounded by the configured cap"))),
+        ),
+      )
+      expect(outcome).toEqual({ status: "completed" })
+      expect(attempts).toBe(2)
     }),
   )
 })

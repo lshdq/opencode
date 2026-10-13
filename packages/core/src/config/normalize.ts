@@ -16,6 +16,7 @@ import { ConfigPlugin } from "@opencode/schema/config/plugin"
 import { ConfigPolicy } from "@opencode/schema/config/policy"
 import { ConfigProvider } from "@opencode/schema/config/provider"
 import { ConfigReference } from "@opencode/schema/config/reference"
+import { ConfigRetry } from "@opencode/schema/config/retry"
 import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { Permission } from "@opencode/schema/permission"
 import { ConfigAgentV1 } from "../v1/config/agent.js"
@@ -192,6 +193,10 @@ export function normalize(input: unknown): Result {
   normalizeSkills(input, encoded, diagnostics)
   normalizeMcp(input, encoded, diagnostics)
   normalizeCompaction(input, encoded, diagnostics)
+  const retry = own(input, "retry")
+    ? decodeEncoded(ConfigRetry.Info, input.retry, ["retry"], diagnostics)
+    : undefined
+  if (retry !== undefined) encoded.retry = retry
   normalizeExperimental(input, encoded, diagnostics)
   normalizeWatcher(input, encoded, diagnostics)
   normalizeFormatter(input, encoded, diagnostics)

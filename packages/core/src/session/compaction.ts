@@ -21,6 +21,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Context, Effect, Layer, Result, Stream } from "effect"
 import { Agent } from "../agent.js"
 import { Bus } from "../bus.js"
+import { Config } from "../config.js"
 import { Database } from "../database/database.js"
 import { llmClient } from "../effect/app-node-platform.js"
 import { LocationLifecycle } from "../location-lifecycle.js"
@@ -187,6 +188,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const agents = yield* Agent.Service
     const bus = yield* Bus.Service
+    const config = yield* Config.Service
     const lifecycle = yield* LocationLifecycle.Service
     const llm = yield* LLMClient.Service
     const catalog = yield* Model.Service
@@ -410,7 +412,7 @@ export const layer = Layer.effect(
       }
       if (prepared.event.result) return yield* fromHook(context, prepared.event.result, recent)
 
-      const policy = yield* SessionRunnerRetry.policy(context.session.id)
+      const policy = yield* SessionRunnerRetry.policy(context.session.id, () => SessionRunnerRetry.maxDelay(config))
       let rejections = 0
       let rejected: number | undefined
       let asText = false
@@ -697,6 +699,7 @@ export const node = makeLocationNode({
   deps: [
     Agent.node,
     Bus.node,
+    Config.node,
     Database.node,
     LocationLifecycle.node,
     llmClient,

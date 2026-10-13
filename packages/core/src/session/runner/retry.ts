@@ -6,6 +6,7 @@ import { Model } from "@opencode/schema/model"
 import { SessionError } from "@opencode/schema/session-error"
 import { Clock, Duration, Effect, Pull, Schedule } from "effect"
 import { Bus } from "../../bus.js"
+import { Config } from "../../config.js"
 import type { PluginHooks } from "../../plugin/hooks.js"
 import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
@@ -28,51 +29,80 @@ export interface Decision {
   readonly delay: number
 }
 
-/** Bound provider-requested and policy delays so a retry cannot stall a session for longer than five minutes. */
-const RETRY_DELAY_MAX = Duration.toMillis("5 minutes")
+/** Bound provider-requested delays so a retry cannot stall a session for longer than five minutes. */
+const RETRY_DELAY_HARD_MAX = Duration.toMillis("5 minutes")
+const DEFAULT_RETRY_DELAY_MAX = Duration.toMillis("30 seconds")
 const RETRY_DELAY_MIN = Duration.toMillis("1 second")
+
+type MaxDelay = () => Effect.Effect<number>
 
 const retryAfter = (input: Input) => {
   switch (input.cause.reason._tag) {
     case "RateLimit": {
       const value = input.cause.reason.retryAfterMs ?? input.cause.reason.rateLimit?.retryAfterMs
-      return value !== undefined && Number.isFinite(value) ? Math.min(Math.max(0, value), RETRY_DELAY_MAX) : undefined
+      return value !== undefined && Number.isFinite(value)
+        ? Math.min(Math.max(0, value), RETRY_DELAY_HARD_MAX)
+        : undefined
     }
     case "QuotaExceeded":
     case "ProviderInternal": {
       const value = input.cause.reason.retryAfterMs
-      return value !== undefined && Number.isFinite(value) ? Math.min(Math.max(0, value), RETRY_DELAY_MAX) : undefined
+      return value !== undefined && Number.isFinite(value)
+        ? Math.min(Math.max(0, value), RETRY_DELAY_HARD_MAX)
+        : undefined
     }
     default:
       return undefined
   }
 }
 
-// Exponential from 2s, capped at five minutes per gap. Both schedules recur forever; the
-// provider and session lifecycle decide when the retry loop ends.
-const schedule = Schedule.min([Schedule.exponential("2 seconds"), Schedule.spaced("5 minutes")]).pipe(
+// Exponential from 2s with no fixed gap cap: the configured max bounds local gaps below, and a
+// provider retry-after raises the gap. The schedule recurs forever; the provider and session
+// lifecycle decide when the retry loop ends.
+const schedule = Schedule.exponential("2 seconds").pipe(
   Schedule.jittered,
   Schedule.setInputType<Input>(),
   Schedule.modifyDelay(({ input, duration: delay }) => {
     const minimum = retryAfter(input)
-    const duration = minimum === undefined ? delay : Duration.max(delay, Duration.millis(minimum))
-    return Effect.succeed(Duration.millis(Math.min(RETRY_DELAY_MAX, Math.ceil(Duration.toMillis(duration)))))
+    if (minimum === undefined) return Effect.succeed(delay)
+    return Effect.succeed(Duration.max(delay, Duration.millis(minimum)))
   }),
 )
 
-export const policy = (sessionID: SessionSchema.ID) =>
+export const maxDelay = (config: Config.Interface): Effect.Effect<number> =>
+  Effect.gen(function* () {
+    const seconds = Config.latest(yield* config.entries(), "retry")?.max_delay
+    if (seconds === undefined) return DEFAULT_RETRY_DELAY_MAX
+    if (!Number.isSafeInteger(seconds) || seconds < 0) return DEFAULT_RETRY_DELAY_MAX
+    return seconds * 1000
+  })
+
+const defaultMaxDelay: MaxDelay = () => Effect.succeed(DEFAULT_RETRY_DELAY_MAX)
+
+export const policy = (sessionID: SessionSchema.ID, getMaxDelay: MaxDelay = defaultMaxDelay) =>
   Effect.gen(function* () {
     const step = yield* Schedule.toStep(schedule)
     let attempt = 1
     let permanentRetryPromotionUsed = false
     return (input: Input) =>
       Effect.gen(function* () {
+        const configuredMaxDelay = yield* getMaxDelay()
+        const maxDelay =
+          Number.isFinite(configuredMaxDelay) && configuredMaxDelay >= 0
+            ? configuredMaxDelay
+            : DEFAULT_RETRY_DELAY_MAX
         const now = yield* Clock.currentTimeMillis
         const next = yield* step(now, input).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
         if (!next) return { retry: false as const }
         const [, duration] = next
         attempt++
-        const delay = Math.ceil(Duration.toMillis(duration))
+        const providerDelay = retryAfter(input)
+        // Clamp the proposed delay before the hook so plugins always observe a finite value that
+        // matches what the policy can actually schedule on both the local and provider paths.
+        const delay =
+          providerDelay === undefined
+            ? Math.min(maxDelay, Math.ceil(Duration.toMillis(duration)))
+            : Math.min(RETRY_DELAY_HARD_MAX, Math.ceil(Duration.toMillis(duration)))
         const event: PluginHooks.Domains["session"]["retry"] = {
           sessionID,
           agent: input.agent,
@@ -98,11 +128,12 @@ export const policy = (sessionID: SessionSchema.ID) =>
         const requestedDelay = event.decision.retry ? event.decision.delay : delay
         const normalized =
           Number.isFinite(requestedDelay) && requestedDelay >= 0 ? Math.ceil(requestedDelay) : delay
-        const minimum = Math.max(RETRY_DELAY_MIN, retryAfter(input) ?? 0)
+        const minimum = providerDelay ?? (maxDelay > 0 ? RETRY_DELAY_MIN : 0)
+        const maximum = providerDelay === undefined ? maxDelay : RETRY_DELAY_HARD_MAX
         return {
           retry: true as const,
           attempt,
-          delay: Math.min(RETRY_DELAY_MAX, Math.max(minimum, normalized)),
+          delay: Math.min(maximum, Math.max(minimum, normalized)),
         }
       })
   })
@@ -112,9 +143,14 @@ interface Lifecycle {
   readonly awaitClosed?: Effect.Effect<void>
 }
 
-export const make = (bus: Bus.Interface, sessionID: SessionSchema.ID, lifecycle?: Lifecycle) =>
+export const make = (
+  bus: Bus.Interface,
+  sessionID: SessionSchema.ID,
+  lifecycle?: Lifecycle,
+  getMaxDelay: MaxDelay = defaultMaxDelay,
+) =>
   Effect.gen(function* () {
-    const decide = yield* policy(sessionID)
+    const decide = yield* policy(sessionID, getMaxDelay)
     const wait = (input: {
       readonly decision: Decision
       readonly assistantMessageID: SessionMessage.ID
