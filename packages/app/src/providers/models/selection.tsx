@@ -1,7 +1,7 @@
 import { createSimpleContext } from "@opencode/ui/context"
 import { base64Encode } from "@opencode/util/encode"
 import { useParams } from "@solidjs/router"
-import { batch, createEffect, createMemo, onCleanup } from "solid-js"
+import { batch, createEffect, createMemo, on, onCleanup } from "solid-js"
 import { createStore } from "solid-js/store"
 import { Schema, SchemaGetter } from "effect"
 import { useModels } from "@/providers/models/models"
@@ -9,7 +9,7 @@ import { useSettings } from "@/settings/model"
 import { useProviders } from "@/providers/catalog/providers"
 import { Persist, persisted } from "@/runtime/persistence/storage"
 import { Persistence } from "@/runtime/persistence/schema"
-import { hasCustomAgent, resolveAgent } from "./agent"
+import { hasCustomAgent, resolveAgent, resolveDraftAgent, type DraftAgentSelection } from "./agent"
 import { cycleModelVariant, getConfiguredAgentVariant, resolveModelVariant } from "./variant"
 import { useWorkspaceLocation } from "@/workspaces/location"
 import { useData } from "@/runtime/server/current"
@@ -17,6 +17,7 @@ import { normalizeAgentList } from "@/runtime/server/global-sync/utils"
 import { useServerSDK } from "@/runtime/server/client"
 import { ScopedKey, type ServerScope } from "@/runtime/server/scope"
 import { useConfiguredModel } from "./configured"
+import { useCurrentRoute } from "@/shell/state/layout"
 
 const ModelKeySchema = Schema.Struct({
   providerID: Schema.String,
@@ -85,12 +86,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const sdk = useWorkspaceLocation()
     const data = useData()
     const serverSDK = useServerSDK()
+    const currentRoute = useCurrentRoute()
     const providers = useProviders(() => sdk().directory)
     const models = useModels()
     const settings = useSettings()
     const configuredModel = useConfiguredModel()
 
     const id = createMemo(() => params.id || undefined)
+    const draftID = createMemo(() => {
+      const route = currentRoute()
+
+      return route.type === "draft" ? route.draftID : undefined
+    })
 
     const list = createMemo(() =>
       normalizeAgentList(data.location.agent.list({ directory: sdk().directory }) ?? []).filter(
@@ -111,6 +118,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       current?: string
       draft?: State
       promoting?: State
+      draftAgent?: DraftAgentSelection
     }>({
       current: list()[0]?.name,
       draft: undefined,
@@ -138,6 +146,21 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     createEffect(() => {
       const items = list()
+      const activeDraftID = draftID()
+
+      if (activeDraftID) {
+        const next = resolveDraftAgent(items, activeDraftID, store.draftAgent)
+
+        if (
+          store.draftAgent?.draftID !== next.selection.draftID ||
+          store.draftAgent?.name !== next.selection.name
+        )
+          setStore("draftAgent", { ...next.selection, name: next.selection.name })
+
+        if (store.current !== next.item?.name) setStore("current", next.item?.name)
+
+        return
+      }
 
       if (items.length === 0) {
         if (store.current !== undefined) setStore("current", undefined)
@@ -148,6 +171,25 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       if (items.some((item) => item.name === store.current)) return
       setStore("current", items[0]?.name)
     })
+
+    createEffect(
+      on(
+        draftID,
+        (next, previous) => {
+          if (!next || next === previous) return
+
+          batch(() => {
+            setStore({
+              current: list()[0]?.name,
+              draft: undefined,
+              promoting: undefined,
+              draftAgent: { draftID: next, name: undefined },
+            })
+          })
+        },
+        { defer: true },
+      ),
+    )
 
     const scope = createMemo<State | undefined>(() => {
       const session = id()
@@ -208,18 +250,28 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       list,
       visible: agentsVisible,
       current() {
-        return pickAgent(scope()?.agent ?? durable()?.agent ?? (agentsVisible() ? store.current : "build"))
+        const requested = scope()?.agent ?? durable()?.agent
+
+        if (requested && (!draftID() || store.draftAgent?.name)) return pickAgent(requested)
+        if (draftID()) return pickAgent(store.current)
+
+        return pickAgent(agentsVisible() ? store.current : "build")
       },
       set(name: string | undefined) {
         const item = pickAgent(name)
+        const activeDraftID = draftID()
 
         if (!item) {
-          setStore("current", undefined)
+          batch(() => {
+            if (activeDraftID) setStore("draftAgent", { draftID: activeDraftID, name: undefined })
+            setStore("current", undefined)
+          })
 
           return
         }
 
         batch(() => {
+          if (activeDraftID) setStore("draftAgent", { draftID: activeDraftID, name: item.name })
           const previous = snapshot()
 
           if (previous.agent === item.name) return

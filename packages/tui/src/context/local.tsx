@@ -1,7 +1,7 @@
 import { createStore } from "solid-js/store"
 import { dedupeWith } from "effect/Array"
 import { createSimpleContext } from "./helper"
-import { batch, createMemo, onCleanup } from "solid-js"
+import { batch, createEffect, createMemo, createSignal, on, onCleanup } from "solid-js"
 import { useEvent } from "./event"
 import path from "path"
 import { useTuiPaths } from "./runtime"
@@ -25,6 +25,7 @@ import { useData } from "./data"
 import { usePermission } from "./permission"
 import { useLocation } from "./location"
 import { parse } from "../util/model"
+import type { LocationRef } from "@opencode/client"
 
 export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
   name: "Local",
@@ -54,16 +55,73 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     }
 
     function createAgent() {
-      const agents = createMemo(() =>
-        (data.location.agent.list(location.ref) ?? []).filter((agent) => agent.mode !== "subagent" && !agent.hidden),
+      const locationRouteKey = (value: LocationRef) => JSON.stringify([value.directory, value.workspaceID])
+      const homeLocation = createMemo(() =>
+        route.data.type === "home" ? (route.data.location ?? data.location.default()) : undefined,
       )
-      const visibleAgents = createMemo(() =>
-        (data.location.agent.list(location.ref) ?? []).filter((agent) => !agent.hidden),
-      )
+      const homeRouteKey = createMemo(() => {
+        const value = homeLocation()
+        return value ? locationRouteKey(value) : undefined
+      })
+      const [homeLocationReady, setHomeLocationReady] = createSignal(false)
       const [agentStore, setAgentStore] = createStore({
         current: undefined as string | undefined,
         draftBySession: {} as Record<string, { agent?: string } | undefined>,
+        newSession: undefined as { location: LocationRef; routeKey: string; agent?: string } | undefined,
       })
+      const routeLocation = createMemo(() =>
+        route.data.type === "home"
+          ? (agentStore.newSession?.routeKey === homeRouteKey()
+              ? (agentStore.newSession?.location ?? homeLocation() ?? data.location.default())
+              : (homeLocation() ?? data.location.default()))
+          : location.ref,
+      )
+      const agents = createMemo(() =>
+        (data.location.agent.list(routeLocation()) ?? []).filter((agent) => agent.mode !== "subagent" && !agent.hidden),
+      )
+      const visibleAgents = createMemo(() =>
+        (data.location.agent.list(routeLocation()) ?? []).filter((agent) => !agent.hidden),
+      )
+      createEffect(
+        on(
+          homeRouteKey,
+          () => {
+            setHomeLocationReady(false)
+            const target = homeLocation()
+            const routeKey = homeRouteKey()
+            if (target && routeKey)
+              setAgentStore("newSession", {
+                location: target,
+                routeKey,
+                agent: args.agent,
+              })
+          },
+          { defer: true },
+        ),
+      )
+      createEffect(
+        on(
+          () => JSON.stringify(location.ref),
+          () => {
+            const ref = location.ref
+            if (route.data.type !== "home" || !ref) return
+            const routeKey = homeRouteKey()
+            if (!routeKey) return
+            // Ignore a stale session location until Home has applied its route location;
+            // subsequent changes are explicit Home overrides such as /cd.
+            if (!homeLocationReady()) {
+              if (routeKey !== locationRouteKey(ref)) return
+              setHomeLocationReady(true)
+            }
+            setAgentStore("newSession", {
+              location: ref,
+              routeKey,
+              agent: agentStore.newSession?.agent ?? args.agent,
+            })
+          },
+          { defer: true },
+        ),
+      )
       onCleanup(event.on("session.deleted", (evt) => setAgentStore("draftBySession", evt.data.sessionID, undefined)))
       onCleanup(
         event.on("session.agent.selected", (evt) => {
@@ -91,7 +149,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
                 (draft ? undefined : args.agent) ??
                 data.session.get(route.data.sessionID)?.agent ??
                 agentStore.current)
-              : agentStore.current
+              : (agentStore.newSession ? agentStore.newSession.agent : agentStore.current)
           return agents().find((agent) => agent.id === selected) ?? agents().at(0)
         },
         set(id: string) {
@@ -106,9 +164,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             if (changed) model.remember()
             setAgentStore("current", id)
             if (route.data.type === "session") setAgentStore("draftBySession", route.data.sessionID, { agent: id })
+            if (route.data.type === "home" && agentStore.newSession)
+              setAgentStore("newSession", "agent", id)
             // Retain both selections while agent and model commits arrive separately.
             const selected = changed && route.data.type === "session" ? model.current() : undefined
             if (selected) model.set(selected)
+          })
+        },
+        resetNewSession(target: LocationRef) {
+          setAgentStore("newSession", {
+            location: target,
+            routeKey: locationRouteKey(target),
+            agent: args.agent,
           })
         },
         move(direction: 1 | -1) {

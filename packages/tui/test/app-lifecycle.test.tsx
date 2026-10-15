@@ -4,7 +4,7 @@ import { createTestRenderer } from "@opentui/core/testing"
 import { Effect, FileSystem } from "effect"
 import { Global } from "@opencode/util/global"
 import path from "node:path"
-import { createEventStream, createFetch, directory, json } from "./fixture/tui-client"
+import { createEventStream, createFetch, directory, json, worktree } from "./fixture/tui-client"
 import { tmpdir } from "./fixture/fixture"
 import { createAppFixture } from "./fixture/app"
 import type { PluginInfo } from "@opencode/client"
@@ -1204,6 +1204,165 @@ test("new session inherits the active session model", async () => {
   await setup.renderOnce()
   const frame = setup.captureCharFrame()
   expect(frame).toContain("Session Model")
+})
+
+async function launchNewSessionFixture(
+  options: { activeAgent?: string; activeLocation?: { directory: string }; newLocation?: "launch" | "inherit" } = {},
+) {
+  const activeLocation = options.activeLocation ?? { directory }
+  const active = {
+    id: "dummy",
+    title: "Demo session",
+    projectID: "project",
+    location: activeLocation,
+    agent: options.activeAgent ?? "build",
+    model: { providerID: "provider", id: "session-model" },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: 0, updated: 0 },
+  }
+  const created: Array<Record<string, unknown>> = []
+  const prompts: unknown[] = []
+  const sessions = new Map<string, typeof active>()
+
+  const setup = await createAppFixture({
+    width: 100,
+    height: 30,
+    config: {
+      animations: false,
+      keybinds: { "session.new": "f6", "agent.cycle": "f7" },
+      session: { new_location: options.newLocation ?? "launch" },
+      tabs: { mode: "off" },
+    },
+    args: { sessionID: active.id },
+    fetch: async (url, request) => {
+      const requestedDirectory = url.searchParams.get("location[directory]") === worktree ? worktree : directory
+      const location = {
+        directory: requestedDirectory,
+        project: { id: "project", directory: worktree, canonical: worktree },
+      }
+
+      if (url.pathname === "/api/location") return json(location)
+      if (url.pathname === "/api/fs/list") return json({ location, data: [] })
+      if (url.pathname === "/api/agent")
+        return json({
+          location,
+          data: [
+            { id: "reviewer", mode: "primary", hidden: false, permissions: [] },
+            { id: "build", mode: "primary", hidden: false, permissions: [] },
+          ],
+        })
+      if (url.pathname === "/api/provider") return json({ location, data: [{ id: "provider", name: "Provider" }] })
+      if (url.pathname === "/api/model")
+        return json({
+          location,
+          data: [
+            { id: "session-model", providerID: "provider", name: "Session Model", variants: [] },
+          ],
+        })
+      if (url.pathname === "/api/session" && request.method === "POST") {
+        const input = (await request.json()) as Record<string, unknown>
+        const id = String(input.id)
+        const postedLocation = input.location as { directory?: string } | undefined
+        const session = {
+          ...active,
+          ...input,
+          id,
+          title: "New session",
+          projectID: "project",
+          location: postedLocation?.directory === worktree ? { directory: worktree } : { directory },
+        } as typeof active
+        created.push(input)
+        sessions.set(id, session)
+        return json({ data: session })
+      }
+      if (url.pathname === "/api/session") return json({ data: [active, ...sessions.values()], cursor: {} })
+      if (/^\/api\/session\/[^/]+\/prompt$/.test(url.pathname)) {
+        prompts.push(await request.json())
+        return json({ data: {} })
+      }
+      if (/^\/api\/session\/[^/]+\/(message|inbox|permission)$/.test(url.pathname))
+        return json({ data: [], cursor: {} })
+      if (/^\/api\/session\/[^/]+\/(agent|model)$/.test(url.pathname)) return new Response(null, { status: 204 })
+      if (/^\/api\/session\/[^/]+$/.test(url.pathname)) {
+        const id = url.pathname.split("/").at(-1) ?? ""
+        const session = id === active.id ? active : sessions.get(id)
+        return session ? json({ data: session }) : json({ message: "not found" }, { status: 404 })
+      }
+      return undefined
+    },
+  })
+
+  return { setup, created, prompts }
+}
+
+test("new-session entry posts the catalog default", async () => {
+  const run = await launchNewSessionFixture()
+  await using setup = run.setup
+
+  await setup.waitForFrame((frame) => frame.includes("Build · Session Model Provider"))
+  await setup.mockInput.typeText("/new")
+  setup.mockInput.pressEnter()
+  await setup.waitForFrame((frame) => frame.includes("Reviewer · Session Model Provider"))
+  await setup.mockInput.typeText("catalog default")
+  setup.mockInput.pressEnter()
+  await setup.waitFor(() => run.created.length === 1)
+  await setup.waitFor(() => run.prompts.length === 1)
+
+  expect(run.created[0]).toMatchObject({
+    agent: "reviewer",
+    location: { directory },
+    model: { providerID: "provider", id: "session-model" },
+  })
+  expect(run.prompts[0]).toMatchObject({ text: "catalog default" })
+})
+
+test("new-session draft manual agent choice posts the manual selection", async () => {
+  const run = await launchNewSessionFixture()
+  await using setup = run.setup
+
+  await setup.waitForFrame((frame) => frame.includes("Build · Session Model Provider"))
+  await setup.mockInput.typeText("/new")
+  setup.mockInput.pressEnter()
+  await setup.waitForFrame((frame) => frame.includes("Reviewer · Session Model Provider"))
+  setup.mockInput.pressKey("F7")
+  await setup.waitForFrame((frame) => frame.includes("Build · Session Model Provider"))
+  await setup.mockInput.typeText("manual choice")
+  setup.mockInput.pressEnter()
+  await setup.waitFor(() => run.created.length === 1)
+  await setup.waitFor(() => run.prompts.length === 1)
+
+  expect(run.created[0]).toMatchObject({
+    agent: "build",
+    location: { directory },
+    model: { providerID: "provider", id: "session-model" },
+  })
+  expect(run.prompts[0]).toMatchObject({ text: "manual choice" })
+})
+
+test("new-session in a different location ignores the previous session agent", async () => {
+  const run = await launchNewSessionFixture({
+    activeAgent: "reviewer",
+    activeLocation: { directory: worktree },
+    newLocation: "inherit",
+  })
+  await using setup = run.setup
+
+  await setup.waitForFrame((frame) => frame.includes("Reviewer · Session Model Provider"))
+  setup.mockInput.pressKey("F7")
+  await setup.waitForFrame((frame) => frame.includes("Build · Session Model Provider"))
+  await setup.mockInput.typeText("/new")
+  setup.mockInput.pressEnter()
+  await setup.waitForFrame((frame) => frame.includes("Reviewer · Session Model Provider"))
+  await setup.mockInput.typeText("different location")
+  setup.mockInput.pressEnter()
+  await setup.waitFor(() => run.created.length === 1)
+  await setup.waitFor(() => run.prompts.length === 1)
+
+  expect(run.created[0]).toMatchObject({
+    agent: "reviewer",
+    location: { directory: worktree },
+  })
 })
 
 test("keeps the prompt display stable while a new location catalog loads", async () => {

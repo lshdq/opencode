@@ -407,14 +407,15 @@ export const { use: useSessionTabs, provider: SessionTabsProvider } = createSimp
         if (!enabled()) return
         const sessionID = current()
         const currentLocation = (sessionID ? data.session.get(sessionID)?.location : undefined) ?? location.ref
+        const target = newSessionLocation(
+          config.session.new_location,
+          data.location.default().directory,
+          currentLocation,
+          location.error?.location,
+        )
         route.navigate({
           type: "home",
-          location: newSessionLocation(
-            config.session.new_location,
-            data.location.default().directory,
-            currentLocation,
-            location.error?.location,
-          ),
+          location: target,
         })
       },
       close(sessionID?: string) {

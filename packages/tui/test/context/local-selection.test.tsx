@@ -1,6 +1,125 @@
 import { expect, test } from "bun:test"
 import { agent, model, renderLocal, session } from "../fixture/local"
-import { json } from "../fixture/tui-client"
+import { directory, json } from "../fixture/tui-client"
+
+test("new home drafts use the catalog default without changing existing session choices", async () => {
+  await using setup = await renderLocal({
+    agents: [agent("reviewer"), agent("build"), agent("plan")],
+    sessions: [session("ses_first"), session("ses_second", undefined, "plan")],
+  })
+  await Promise.all([setup.data.session.sync("ses_first"), setup.data.session.sync("ses_second")])
+  setup.route.navigate({ type: "session", sessionID: "ses_first" })
+  setup.local.agent.set("plan")
+  setup.local.agent.resetNewSession({ directory: setup.location.ref?.directory ?? "" })
+  setup.route.navigate({ type: "home" })
+  expect(setup.local.agent.current()?.id).toBe("reviewer")
+  setup.local.agent.set("build")
+  expect(setup.local.agent.current()?.id).toBe("build")
+  await setup.data.location.sync()
+  expect(setup.local.agent.current()?.id).toBe("build")
+  setup.local.agent.resetNewSession({ directory: setup.location.ref?.directory ?? "" })
+  setup.route.navigate({ type: "home" })
+  expect(setup.local.agent.current()?.id).toBe("reviewer")
+  setup.route.navigate({ type: "session", sessionID: "ses_first" })
+  expect(setup.local.agent.current()?.id).toBe("plan")
+  setup.route.navigate({ type: "session", sessionID: "ses_second" })
+  expect(setup.local.agent.current()?.id).toBe("plan")
+})
+
+test("a home draft resolves its location default after a delayed catalog instead of retaining the previous agent", async () => {
+  const catalog = Promise.withResolvers<Response>()
+  const target = { directory: "/other" }
+  await using setup = await renderLocal({
+    agents: [agent("build"), agent("reviewer")],
+    fetch: (url) => {
+      if (url.pathname === "/api/agent" && url.searchParams.get("location[directory]") === target.directory)
+        return catalog.promise
+    },
+  })
+  setup.local.agent.set("build")
+  setup.local.agent.resetNewSession(target)
+  setup.location.set(target)
+  setup.route.navigate({ type: "home", location: target })
+  const loaded = setup.data.location.sync(target)
+  try {
+    expect(setup.local.agent.current()).toBeUndefined()
+    catalog.resolve(json({ location: target, data: [agent("reviewer"), agent("build")] }))
+    await loaded
+    expect(setup.local.agent.current()?.id).toBe("reviewer")
+    setup.local.agent.set("build")
+    expect(setup.local.agent.current()?.id).toBe("build")
+  } finally {
+    catalog.resolve(json({ location: target, data: [] }))
+    await loaded
+  }
+})
+
+test("a home /cd location override uses that location's catalog default agent", async () => {
+  const source = directory
+  const target = { directory: "/other" }
+  await using setup = await renderLocal({
+    agents: [agent("build")],
+    fetch: (url) => {
+      if (url.pathname === "/api/agent" && url.searchParams.get("location[directory]") === target.directory)
+        return json({ location: target, data: [agent("reviewer"), agent("build")] })
+      if (url.pathname === "/api/agent" && url.searchParams.get("location[directory]") === source)
+        return json({ location: { directory: source }, data: [agent("build")] })
+    },
+  })
+  setup.location.set({ directory: source })
+  await setup.data.location.sync({ directory: source })
+  setup.route.navigate({ type: "home", location: { directory: source } })
+
+  // This is the same boundary as Home's /cd handler after location.get succeeds:
+  // LocationProvider is updated first, without changing the route location.
+  setup.location.set(target)
+  await setup.data.location.sync(target)
+
+  expect(setup.local.agent.current()?.id).toBe("reviewer")
+  setup.local.agent.set("build")
+  expect(setup.local.agent.current()?.id).toBe("build")
+})
+
+test("a new home route does not read the previous location while its LocationProvider catches up", async () => {
+  const source = directory
+  const target = { directory: "/other" }
+  await using setup = await renderLocal({
+    agents: [agent("build")],
+    fetch: (url) => {
+      if (url.pathname === "/api/agent" && url.searchParams.get("location[directory]") === target.directory)
+        return json({ location: target, data: [agent("reviewer")] })
+    },
+  })
+  setup.location.set({ directory: source })
+  await setup.data.location.sync({ directory: source })
+  await setup.data.location.sync(target)
+  setup.route.navigate({ type: "session", sessionID: "ses_previous" })
+  setup.route.navigate({ type: "home", location: target })
+
+  expect(setup.local.agent.current()?.id).toBe("reviewer")
+})
+
+test("a new location does not reuse an agent selected in the previous session", async () => {
+  const target = { directory: "/other" }
+  await using setup = await renderLocal({
+    agents: [agent("reviewer"), agent("build")],
+    sessions: [session("ses_previous", undefined, "reviewer")],
+    fetch: (url) => {
+      if (url.pathname === "/api/agent" && url.searchParams.get("location[directory]") === target.directory)
+        return json({ location: target, data: [agent("reviewer"), agent("build")] })
+    },
+  })
+  await setup.data.session.sync("ses_previous")
+  setup.route.navigate({ type: "session", sessionID: "ses_previous" })
+  setup.local.agent.set("build")
+  expect(setup.local.agent.current()?.id).toBe("build")
+  setup.local.agent.resetNewSession(target)
+  setup.route.navigate({ type: "home", location: target })
+  setup.location.set(target)
+  await setup.data.location.sync(target)
+
+  expect(setup.local.agent.current()?.id).toBe("reviewer")
+})
 
 test("cycles all recent models in a stable order in both directions", async () => {
   await using setup = await renderLocal({
