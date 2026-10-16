@@ -2237,6 +2237,7 @@ export type ConfigEntry =
           }
         }
         compaction?: { auto?: boolean; keep?: { tokens?: number }; buffer?: number }
+        retry?: { max_delay?: number }
         skills?: Array<string>
         commands?: {
           [x: string]: {
