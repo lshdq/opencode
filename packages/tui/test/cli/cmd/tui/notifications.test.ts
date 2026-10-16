@@ -9,6 +9,9 @@ async function setup(
   route: Route = { type: "session", sessionID: "session" },
   initialStatuses: Partial<Record<string, "idle" | "running">> = {},
   temporarilyHiddenSessions: string[] = [],
+  withListBySession = true,
+  childrenToHydrate: Record<string, string[]> = {},
+  blockReconnect = false,
 ) {
   const notifications: AttentionNotifyOptions[] = []
   const toasts: ToastOptions[] = []
@@ -28,14 +31,51 @@ async function setup(
     abort: session("abort", "Abort session"),
     timeout: session("timeout", "Timeout session"),
   }
+  const shells: Record<
+    string,
+    { id: string; status: "running" | "exited"; metadata: { sessionID: string }; location: { directory: string }
+  }
+  > = {}
+  const staleShells = new Set<string>()
+  const syncLocations: { directory: string }[] = []
+  const invalidatedLocations: { directory: string }[] = []
+  const sessionSyncs: { sessionID: string; children?: boolean }[] = []
+  const invalidatedSessions: string[] = []
+  const operations: string[] = []
+  const reconnectWaiters: (() => void)[] = []
   const statuses: Record<string, "idle" | "running"> = Object.fromEntries(Object.keys(sessions).map((id) => [id, "idle"]))
   Object.assign(statuses, initialStatuses)
 
-  await Notifications.setup({
+  const listBySession = (sessionID: string) =>
+    Object.values(shells).filter((shell) => shell.metadata.sessionID === sessionID)
+  const shellData = {
+    list: (location?: { directory: string }) =>
+      Object.values(shells).filter((shell) => !location || shell.location.directory === location.directory),
+    get: (id: string) => shells[id],
+    sync: async (location: { directory: string }) => {
+      operations.push(`shell.sync:${location.directory}`)
+      syncLocations.push(location)
+      for (const shellID of staleShells) {
+        if (shells[shellID]?.location.directory !== location.directory) continue
+        delete shells[shellID]
+        staleShells.delete(shellID)
+      }
+    },
+    invalidate: (location?: { directory: string }) => {
+      if (location) {
+        operations.push(`shell.invalidate:${location.directory}`)
+        invalidatedLocations.push(location)
+      }
+    },
+  }
+  const shell = withListBySession ? { ...shellData, listBySession } : shellData
+
+  const cleanup = await Notifications.setup({
     ui: {
       router: { current: () => route },
       toast: { show: (toast: ToastOptions) => toasts.push(toast) },
     },
+    location: { directory: "/current" },
     attention: {
       async notify(input: AttentionNotifyOptions) {
         notifications.push(input)
@@ -69,7 +109,19 @@ async function setup(
         },
         list: () => Object.values(sessions).filter((candidate) => !hiddenSessions.has(candidate.id)),
         status: (sessionID: string) => statuses[sessionID],
+        sync: async (sessionID: string, options?: { children?: boolean }) => {
+          operations.push(`session.sync:${sessionID}`)
+          sessionSyncs.push({ sessionID, children: options?.children })
+          if (blockReconnect) await new Promise<void>((resolve) => reconnectWaiters.push(resolve))
+          if (!options?.children) return
+          for (const childID of childrenToHydrate[sessionID] ?? []) hiddenSessions.delete(childID)
+        },
+        invalidate: (sessionID: string) => {
+          operations.push(`session.invalidate:${sessionID}`)
+          invalidatedSessions.push(sessionID)
+        },
       },
+      shell,
     },
   } as unknown as Context)
 
@@ -85,6 +137,15 @@ async function setup(
         )
       }
       if (event.type === "session.deleted") delete sessions[event.data.sessionID]
+      if (event.type === "shell.created") {
+        shells[event.data.info.id] = {
+          id: event.data.info.id,
+          status: event.data.info.status === "running" ? "running" : "exited",
+          metadata: { sessionID: String(event.data.info.metadata.sessionID) },
+          location: { directory: event.location?.directory ?? "/current" },
+        }
+      }
+      if (event.type === "shell.exited" || event.type === "shell.deleted") delete shells[event.data.id]
       if (event.type === "session.execution.started") statuses[event.data.sessionID] = "running"
       if (
         event.type === "session.execution.succeeded" ||
@@ -107,7 +168,32 @@ async function setup(
     revealSession(sessionID: string) {
       hiddenSessions.delete(sessionID)
     },
+    dropShell(shellID: string) {
+      staleShells.add(shellID)
+    },
+    addShell(shellID: string, sessionID: string, directory = "/other") {
+      shells[shellID] = {
+        id: shellID,
+        status: "running",
+        metadata: { sessionID },
+        location: { directory },
+      }
+    },
+    syncLocations,
+    invalidatedLocations,
+    sessionSyncs,
+    invalidatedSessions,
+    operations,
+    dispose: async () => cleanup?.(),
+    releaseReconnect() {
+      reconnectWaiters.splice(0).forEach((resolve) => resolve())
+    },
   }
+}
+
+async function settle() {
+  await Promise.resolve()
+  await Promise.resolve()
 }
 
 function form(id: string, sessionID = "session"): Extract<OpenCodeEvent, { type: "form.created" }>["data"]["form"] {
@@ -201,6 +287,40 @@ function sessionDeleted(id: string, sessionID: string): OpenCodeEvent {
     type: "session.deleted",
     durable: { aggregateID: sessionID, seq: 0, version: 2 },
     data: { sessionID },
+  }
+}
+
+function shellCreated(id: string, sessionID: string): OpenCodeEvent {
+  return shellCreatedAt(id, sessionID, "/current")
+}
+
+function shellCreatedAt(id: string, sessionID: string, directory: string): OpenCodeEvent {
+  return {
+    id,
+    created: 0,
+    type: "shell.created",
+    location: { directory },
+    data: {
+      info: {
+        id,
+        status: "running",
+        command: "sleep 1",
+        cwd: "/tmp/project",
+        shell: "sh",
+        file: "/tmp/shell.log",
+        metadata: { sessionID },
+        time: { started: 0 },
+      },
+    },
+  }
+}
+
+function shellExited(id: string): OpenCodeEvent {
+  return {
+    id,
+    created: 0,
+    type: "shell.exited",
+    data: { id, status: "exited", exit: 0 },
   }
 }
 
@@ -387,6 +507,206 @@ describe("internal notifications TUI plugin", () => {
     ])
   })
 
+  test("waits for a running background shell before notifying the main session", async () => {
+    const harness = await setup()
+    harness.emit(shellCreated("shell-created", "session"))
+    harness.emit(executionSucceeded("event-1"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(shellExited("shell-created"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+
+    harness.emit(shellExited("shell-created"))
+    expect(harness.notifications).toHaveLength(1)
+  })
+
+  test("retains observed shell ownership after its child session is deleted", async () => {
+    const harness = await setup()
+    harness.emit(executionStarted("child-started", "subagent"))
+    harness.emit(shellCreated("shell-created", "subagent"))
+    harness.emit(executionSucceeded("main-done"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(sessionDeleted("child-deleted", "subagent"))
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(shellExited("shell-created"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+  })
+
+  test("waits for an observed shell in another location", async () => {
+    const harness = await setup()
+    harness.emit(shellCreatedAt("shell-created", "session", "/other"))
+    harness.emit(executionSucceeded("main-done"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(shellExited("shell-created"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+  })
+
+  test("waits for an unobserved shell found by cross-location session lookup", async () => {
+    const harness = await setup()
+    harness.addShell("shell-unobserved", "session")
+    harness.emit(executionSucceeded("main-done"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(shellExited("shell-unobserved"))
+    expect(harness.notifications).toEqual([
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+  })
+
+  test("falls back to the current-location shell snapshot when listBySession is unavailable", async () => {
+    const harness = await setup({ type: "session", sessionID: "session" }, {}, [], false)
+    harness.addShell("shell-current", "session", "/current")
+    harness.emit(executionSucceeded("main-done"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(shellExited("shell-current"))
+    expect(harness.notifications).toHaveLength(1)
+  })
+
+  test("rechecks observed shells after reconnect when the exit event was missed", async () => {
+    const harness = await setup()
+    harness.emit(shellCreatedAt("shell-created", "session", "/other"))
+    harness.emit(executionSucceeded("main-done"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.dropShell("shell-created")
+    harness.emit({ id: "connected", type: "server.connected", data: {} })
+    await settle()
+    expect(harness.syncLocations).toEqual([{ directory: "/other" }])
+    expect(harness.notifications).toEqual([
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+  })
+
+  test("does not notify after disposal while the reconnect barrier is pending", async () => {
+    const harness = await setup({ type: "session", sessionID: "session" }, {}, [], true, {}, true)
+
+    harness.emit({ id: "connected", type: "server.connected", data: {} })
+    harness.emit(executionSucceeded("done"))
+    expect(harness.notifications).toEqual([])
+
+    await harness.dispose()
+    harness.releaseReconnect()
+    await settle()
+    expect(harness.notifications).toEqual([])
+  })
+
+  test("queues every execution lifecycle event across reconnect and defers the parent behind its child", async () => {
+    const harness = await setup({ type: "session", sessionID: "session" }, {}, [], true, {}, true)
+    harness.emit(shellCreated("shell-created", "session"))
+    harness.dropShell("shell-created")
+    harness.emit({ id: "connected", type: "server.connected", data: {} })
+    harness.emit(executionStarted("child-started", "subagent"))
+    harness.emit(executionSucceeded("parent-done", "session"))
+    harness.emit(executionSucceeded("child-done", "subagent"))
+    await settle()
+
+    expect(harness.notifications).toEqual([])
+    const firstSync = harness.operations.findIndex((operation) => operation.includes(".sync:"))
+    expect(firstSync).toBeGreaterThanOrEqual(0)
+    expect(harness.operations.slice(0, firstSync).every((operation) => operation.includes(".invalidate:"))).toBe(true)
+
+    harness.releaseReconnect()
+    await settle()
+    expect(harness.notifications).toEqual([
+      {
+        title: "Subagent session",
+        message: "Session done",
+        notification: false,
+        sound: { name: "subagent_done", when: "always" },
+      },
+      {
+        title: "Demo session",
+        message: "Session done",
+        notification: { when: "blurred" },
+        sound: { name: "done", when: "always" },
+      },
+    ])
+
+    harness.emit(executionSucceeded("parent-duplicate", "session"))
+    harness.emit(executionSucceeded("child-duplicate", "subagent"))
+    expect(harness.notifications).toHaveLength(2)
+  })
+
+  test("hydrates known children before reconnect releases deferred background work", async () => {
+    const harness = await setup(
+      { type: "session", sessionID: "session" },
+      { subagent: "running" },
+      ["subagent"],
+      true,
+      { session: ["subagent"] },
+    )
+    harness.emit(sessionCreated("subagent", "session"))
+    harness.emit(shellCreated("shell-created", "subagent"))
+    harness.emit(executionSucceeded("main-done"))
+    expect(harness.notifications).toEqual([])
+
+    harness.dropShell("shell-created")
+    harness.emit({ id: "connected", type: "server.connected", data: {} })
+    await settle()
+    expect(harness.sessionSyncs).toContainEqual({ sessionID: "session", children: true })
+    expect(harness.notifications).toEqual([])
+
+    harness.setStatus("subagent", "idle")
+    harness.emit(executionSucceeded("subagent-done", "subagent"))
+    expect(harness.notifications).toHaveLength(2)
+  })
+
+  test("refreshes observed shell ancestors after delayed session hydration", async () => {
+    const harness = await setup()
+    harness.emit(shellCreatedAt("shell-created", "late-nested", "/other"))
+    harness.emit(sessionCreated("late-nested", "late-parent"))
+    harness.emit(sessionCreated("late-parent", "session"))
+    harness.emit(executionSucceeded("main-done"))
+
+    expect(harness.notifications).toEqual([])
+
+    harness.dropShell("shell-created")
+    harness.emit({ id: "connected", type: "server.connected", data: {} })
+    await settle()
+    expect(harness.notifications).toHaveLength(1)
+  })
+
   test("TC-006: restores a subagent after reconnect when its next execution has no started event", async () => {
     const harness = await setup()
     harness.emit(executionSucceeded("event-1", "subagent"))
@@ -422,6 +742,21 @@ describe("internal notifications TUI plugin", () => {
         sound: { name: "done", when: "always" },
       },
     ])
+  })
+
+  test("clears a deferred completion when reconnect restores the session as running", async () => {
+    const harness = await setup({ type: "session", sessionID: "session" }, { subagent: "running" })
+    harness.emit(executionSucceeded("old-main-done"))
+    expect(harness.notifications).toEqual([])
+
+    harness.setStatus("subagent", "idle")
+    harness.setStatus("session", "running")
+    harness.emit({ id: "connected", type: "server.connected", data: {} })
+    await settle()
+    expect(harness.notifications).toEqual([])
+
+    harness.emit(executionSucceeded("new-main-done"))
+    expect(harness.notifications).toHaveLength(1)
   })
 
   test("notifies the main session once after multiple subagents finish", async () => {

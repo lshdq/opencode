@@ -1649,6 +1649,7 @@ export function createData(config: CreateDataInput) {
       },
       invalidate(sessionID: string) {
         sync.invalidate(`session:${sessionID}`)
+        sync.invalidate(`session.family:${sessionID}`)
       },
       message: {
         list(sessionID: string) {
