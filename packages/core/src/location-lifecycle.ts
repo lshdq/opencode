@@ -44,10 +44,12 @@ const layer = Layer.effect(
     })
     yield* Effect.addFinalizer(() => unsubscribe)
     const closing = yield* Deferred.make<void>()
+    const done = yield* Deferred.make<void>()
     let closed = false
-    const shutdown = yield* Effect.cached(
-      Effect.gen(function* () {
-        closed = true
+    const shutdown = Effect.suspend(() => {
+      if (closed) return Deferred.await(done)
+      closed = true
+      return Effect.gen(function* () {
         yield* Deferred.succeed(closing, undefined)
         yield* permission.close
         yield* forms.close
@@ -59,8 +61,8 @@ const layer = Layer.effect(
             location: Location.Ref.make({ directory: location.directory, workspaceID: location.workspaceID }),
           },
         )
-      }).pipe(Effect.uninterruptible),
-    )
+      }).pipe(Effect.ensuring(Deferred.succeed(done, undefined)))
+    }).pipe(Effect.uninterruptible)
     return Service.of({
       isClosed: () => closed,
       awaitClosed: Deferred.await(closing),
