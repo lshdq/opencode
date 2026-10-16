@@ -6,7 +6,7 @@ slash: true
 
 # merge-upstream
 
-把官方上游 `upstream/v2` 合并进 fork 的长期分支 `v2`，定期执行以保持与上游同步。此技能专门用于合并；普通开发不自动合并上游。遵守项目 `AGENTS.md` 的默认分支、验证及提交规则。
+把官方上游 `upstream/dev` 合并进 fork 的长期分支 `v2`，定期执行以保持与上游同步。此技能专门用于合并；普通开发不自动合并上游。遵守项目 `AGENTS.md` 的默认分支、验证及提交规则。
 
 ## 前置（每次必查）
 
@@ -21,28 +21,28 @@ slash: true
 
 1. 拉取上游：`git fetch upstream --tags --prune`
 2. 评估差异并向用户汇报：
-   - `git log --oneline v2..upstream/v2`（将并入的提交）
-   - `git rev-list --left-right --count v2...upstream/v2`（领先 / 落后数）
-3. **安全审查（强制，合并前）**：审查待合并代码 `git diff v2...upstream/v2`，排查危险代码：
+   - `git log --oneline v2..upstream/dev`（将并入的提交）
+   - `git rev-list --left-right --count v2...upstream/dev`（领先 / 落后数）
+3. **安全审查（强制，合并前）**：审查待合并代码 `git diff v2...upstream/dev`，排查危险代码：
    - 窃取隐私 / 外传数据：向陌生域名 POST、上报 token / 密钥 / 凭据 / 环境变量、可疑 telemetry。
    - 危害数据：删除 / 篡改 / 加密用户文件、破坏性 shell、`rm -rf` 类操作。
    - 混淆 / 可疑下载执行：eval、base64 解码后执行、远程脚本下载即运行、新增可疑二进制。
    - 擅动敏感文件：auth / credential / 密钥 / 钱包相关文件。
-   数据量大时重点扫 `git diff v2...upstream/v2 --stat` 中的高敏路径（auth、credential、install、postinstall、网络 / 进程相关）+ 关键词。
+   数据量大时重点扫 `git diff v2...upstream/dev --stat` 中的高敏路径（auth、credential、install、postinstall、网络 / 进程相关）+ 关键词。
    **发现可疑项 → 停下，向用户逐条报告（file:line + 说明），经用户判定安全前绝不合并。**
 4. **变更说明 + 用户确认（强制，合并前）**：合并前先生成一份待合并变更说明交给用户，**等用户明确确认后才合并**：
-   - 提交清单（`git log --oneline v2..upstream/v2`）。
-   - 按模块 / 目录归纳的主要变更（`git diff v2...upstream/v2 --stat` 摘要）。
+   - 提交清单（`git log --oneline v2..upstream/dev`）。
+   - 按模块 / 目录归纳的主要变更（`git diff v2...upstream/dev --stat` 摘要）。
    - 安全审查结论（第 3 步）。
    - 潜在影响 / 风险点（如触及你已有补丁的文件、构建 / 依赖变更）。
    **未获用户明确确认，不得执行合并。**
 5. 合并（默认 merge）：
-   - `git merge upstream/v2`（保留默认合并信息）
+   - `git merge upstream/dev`（保留默认合并信息）
    - 无冲突 → 进入验证。
-   - 用户显式要求 rebase 时才考虑 `git rebase upstream/v2`（提醒：rebase 后需 force push，仅单人分支且获用户知情同意时可用）。
+   - 用户显式要求 rebase 时才考虑 `git rebase upstream/dev`（提醒：rebase 后需 force push，仅单人分支且获用户知情同意时可用）。
 6. 冲突处理（如有）：
    - `git diff --name-only --diff-filter=U` 列出冲突文件。
-   - **优先自行解决**：先理解本 fork 的改造意图——查 `v2` 相对 `upstream/v2` 的自有提交（`git log upstream/v2..v2`）及相关实现，按“保留本 fork 改造 + 吸收上游变更”的原则解决，**不盲目取一边**。
+   - **优先自行解决**：先理解本 fork 的改造意图——查 `v2` 相对 `upstream/dev` 的自有提交（`git log upstream/dev..v2`）及相关实现，按“保留本 fork 改造 + 吸收上游变更”的原则解决，**不盲目取一边**。
    - **仅当确实难以判断**（改造意图与上游变更语义冲突、无法确定取舍）时，才停下请用户决策该处。
    - 解决后 `git add <files>` + `git merge --continue`（rebase 用 `git rebase --continue`）。
    - 用户要放弃 → `git merge --abort`（或 `git rebase --abort`）。
