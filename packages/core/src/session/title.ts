@@ -20,6 +20,7 @@ import { SessionStore } from "./store.js"
 const MAX_LENGTH = 100
 const MAX_CONTEXT_LENGTH = 8_000
 const MAX_FIRST_MESSAGE_LENGTH = 2_000
+const MAX_RENAME_ATTEMPTS = 3
 const titleChanged = Symbol("Session title changed")
 
 export interface Interface {
@@ -132,19 +133,29 @@ export const layer = Layer.effect(
           ? yield* attempt({ session, agent: selection.agent, text, model: selection.primary })
           : undefined)
       if (!title) return
-      const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
-      const current = yield* store.get(sessionID)
-      if (!current || current.title !== session.title || current.title === truncate(title)) return
-      yield* bus
-        .publish(
-          SessionEvent.Renamed,
-          {
-            sessionID: session.id,
-            title: truncate(title),
-          },
-          { commit: (sequence) => (sequence === expectedSequence ? Effect.void : Effect.die(titleChanged)) },
-        )
-        .pipe(Effect.catchDefect((defect) => (defect === titleChanged ? Effect.void : Effect.die(defect))))
+      const renamed = truncate(title)
+      const rename = (remaining: number): Effect.Effect<void> =>
+        Effect.gen(function* () {
+          if (remaining === 0) return
+          const expectedSequence = (yield* Bus.latestSequence(db, sessionID)) + 1
+          const current = yield* store.get(sessionID)
+          if (!current || current.title !== session.title || current.title === renamed) return
+          const conflicted = yield* bus
+            .publish(
+              SessionEvent.Renamed,
+              {
+                sessionID: session.id,
+                title: renamed,
+              },
+              { commit: (sequence) => (sequence === expectedSequence ? Effect.void : Effect.die(titleChanged)) },
+            )
+            .pipe(
+              Effect.as(false),
+              Effect.catchDefect((defect) => (defect === titleChanged ? Effect.succeed(true) : Effect.die(defect))),
+            )
+          if (conflicted) yield* rename(remaining - 1)
+        })
+      yield* rename(MAX_RENAME_ATTEMPTS)
     })
     return Service.of({ generate })
   }),

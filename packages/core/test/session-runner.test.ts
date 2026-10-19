@@ -1003,6 +1003,35 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
   )
 })
 
+// The title service keeps the real Bus service by reference. Intercepting this test instance at the
+// publish boundary lets the competing event commit after the title captured its expected sequence,
+// without adding a production seam or relying on scheduler timing.
+const forceTitleRenameConflicts = (s: Scenario, count: number) =>
+  Effect.gen(function* () {
+    const committed = yield* Effect.forEach(Array.from({ length: count }), () => Deferred.make<void>())
+    const completed = yield* Effect.forEach(Array.from({ length: count }), () => Deferred.make<void>())
+    const original = s.bus.publish
+    let next = 0
+    const publish: typeof s.bus.publish = (definition, data, options) => {
+      if (definition.type === SessionEvent.Renamed.type) {
+        const renamed = data as Event.Data<typeof SessionEvent.Renamed>
+        if (renamed.sessionID === sessionID && renamed.title === "Generated title" && next < committed.length) {
+          const index = next++
+          return Effect.gen(function* () {
+            yield* original(SessionEvent.Viewed, { sessionID, idle: 0 })
+            yield* Deferred.succeed(committed[index]!, undefined)
+            return yield* original(definition, data, options).pipe(
+              Effect.ensuring(Deferred.succeed(completed[index]!, undefined)),
+            )
+          })
+        }
+      }
+      return original(definition, data, options)
+    }
+    Object.assign(s.bus, { publish })
+    return { committed, completed }
+  })
+
 describe("SessionRunnerLLM", () => {
   scenario("generates the title while the first model step is still running", function* (s) {
     yield* prepareTitleGeneration
@@ -1016,6 +1045,80 @@ describe("SessionRunnerLLM", () => {
 
     expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
     yield* Fiber.interrupt(fiber)
+  })
+
+  scenario("retries the title after a first rename sequence conflict", function* (s) {
+    yield* prepareTitleGeneration
+    yield* s.admit("First prompt")
+
+    let renameAttempts = 0
+    yield* s.bus.project(SessionEvent.Renamed, (event) =>
+      Effect.sync(() => {
+        if (event.data.sessionID === sessionID && event.data.title === "Generated title") renameAttempts++
+      }),
+    )
+    const conflicts = yield* forceTitleRenameConflicts(s, 1)
+    yield* s.llm.push(
+      TestLLM.text("Generated title", "text-title"),
+      TestLLM.text("First response", "text-first"),
+    )
+    const gate = yield* s.llm.gate
+    const renamed = yield* watchRename(sessionID)
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* gate.started
+    expect(s.requests[0]?.system.map((part) => part.text)).toContain("Generate a title.")
+    yield* gate.release
+    yield* Fiber.join(run)
+    yield* Deferred.await(conflicts.committed[0]!)
+    yield* Fiber.join(renamed)
+    yield* Deferred.await(conflicts.completed[0]!)
+
+    expect(s.requests.filter((request) => request.system.some((part) => part.text === "Generate a title.")).length).toBe(1)
+    expect(renameAttempts).toBe(2)
+    expect((yield* s.session.get(sessionID)).title).toBe("Generated title")
+  })
+
+  scenario("bounds repeated title rename sequence conflicts", function* (s) {
+    yield* prepareTitleGeneration
+    yield* s.admit("First prompt")
+
+    let renameAttempts = 0
+    yield* s.bus.project(SessionEvent.Renamed, (event) =>
+      Effect.sync(() => {
+        if (event.data.sessionID === sessionID && event.data.title === "Generated title") renameAttempts++
+      }),
+    )
+    const conflicts = yield* forceTitleRenameConflicts(s, 3)
+
+    yield* s.llm.push(TestLLM.text("Generated title", "text-title"), TestLLM.text("First response", "text-first"))
+    const gate = yield* s.llm.gate
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* gate.started
+    yield* gate.release
+    yield* Fiber.join(run)
+    yield* Effect.forEach(conflicts.committed, Deferred.await, { discard: true })
+    yield* Deferred.await(conflicts.completed[2]!)
+
+    expect(renameAttempts).toBe(3)
+    expect(s.requests.filter((request) => request.system.some((part) => part.text === "Generate a title.")).length).toBe(1)
+    expect((yield* s.session.get(sessionID)).title).toBeUndefined()
+  })
+
+  scenario("preserves a manual rename made while runner title generation is in flight", function* (s) {
+    yield* prepareTitleGeneration
+    yield* s.admit("First prompt")
+    yield* s.llm.push(TestLLM.text("Generated title", "text-title"), TestLLM.text("First response", "text-first"))
+
+    const gate = yield* s.llm.gate
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* gate.started
+    expect(s.requests[0]?.system.map((part) => part.text)).toContain("Generate a title.")
+    yield* s.session.rename({ sessionID, title: "Manual title" })
+    yield* gate.release
+    yield* Fiber.join(run)
+
+    expect(s.requests).toHaveLength(2)
+    expect((yield* s.session.get(sessionID)).title).toBe("Manual title")
   })
 
   scenario("does not automatically replace an existing session title", function* (s) {
