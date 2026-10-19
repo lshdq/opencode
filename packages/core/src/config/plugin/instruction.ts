@@ -24,9 +24,6 @@ export const Plugin = define({
   id: "opencode.config.instruction",
   effect: Effect.fn(function* (ctx) {
     const discovery = yield* InstructionDiscovery.Service
-    // Nothing this plugin watches or loads can contribute when both scopes
-    // are disabled; skip the resolves, the watcher fiber, and the transform.
-    if (!discovery.project && !discovery.global) return
     yield* Effect.gen(function* () {
       const config = yield* Config.Service
       const fs = yield* FSUtil.Service
@@ -70,10 +67,18 @@ export const Plugin = define({
         yield* watch(path, "file", fixed)
       }
 
-      const read = Effect.fn("ConfigInstructionPlugin.read")(function* (path: string) {
-        const content = yield* fs.readFileStringSafe(path)
-        if (content !== undefined) return new InstructionDiscovery.File({ path, content })
-        yield* Effect.logDebug("instruction file skipped", { path, reason: "unavailable" })
+      // A missing file may be mid-save and is transient; a denied file (e.g. outside a sandbox grant) stays absent.
+      const read = Effect.fn("ConfigInstructionPlugin.read")(function* (filepath: string) {
+        return yield* fs.readFileString(filepath).pipe(
+          Effect.map((content) => new InstructionDiscovery.File({ path: filepath, content })),
+          Effect.catchIf(
+            (error) => error.reason._tag === "NotFound" || FSUtil.isAccessDenied(error),
+            (error) =>
+              Effect.logDebug("instruction file skipped", { path: filepath, reason: error.reason._tag }).pipe(
+                Effect.as(error.reason._tag === "NotFound" ? undefined : ("denied" as const)),
+              ),
+          ),
+        )
       })
 
       const globalSource = Effect.fn("ConfigInstructionPlugin.globalSource")(function* () {
@@ -84,7 +89,7 @@ export const Plugin = define({
         )
         if (!present) return []
         const file = yield* read(globalFile)
-        return file ? [file] : Instructions.unavailable
+        return file instanceof InstructionDiscovery.File ? [file] : []
       })
 
       const projectSource = Effect.fn("ConfigInstructionPlugin.projectSource")(function* () {
@@ -96,7 +101,7 @@ export const Plugin = define({
         const discovered = new Set(walked.filter((file) => discovery.global || file !== globalFile))
         const files = yield* Effect.forEach(discovered, read, { concurrency: "unbounded" })
         if (files.some((file) => file === undefined)) return Instructions.unavailable
-        return files.filter((file): file is InstructionDiscovery.File => file !== undefined)
+        return files.filter((file) => file instanceof InstructionDiscovery.File)
       })
 
       const configSource = Effect.fn("ConfigInstructionPlugin.configSource")(function* () {
@@ -200,7 +205,7 @@ export const Plugin = define({
             nextMatched.set(bucket, paths)
             for (const path of paths) {
               const file = yield* read(path)
-              if (!file) return Instructions.unavailable
+              if (!(file instanceof InstructionDiscovery.File)) return Instructions.unavailable
               files.push(file)
             }
           }

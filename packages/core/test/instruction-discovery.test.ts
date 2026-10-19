@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Context, Deferred, Effect, Fiber, Layer, Logger, PubSub, Stream } from "effect"
+import { Context, Deferred, Effect, Fiber, Layer, Logger, PlatformError, PubSub, Stream } from "effect"
 import fs from "fs/promises"
 import { readdir } from "node:fs"
 import path from "path"
@@ -83,6 +83,16 @@ const start = Effect.fnUntraced(function* () {
 
 const file = (path: string, content: string) =>
   new InstructionDiscovery.File({ path: AbsolutePath.make(path), content })
+
+const readFailure = (tag: "NotFound" | "Unknown", code: string, file: string) =>
+  PlatformError.systemError({
+    _tag: tag,
+    module: "FileSystem",
+    method: "readFile",
+    pathOrDescriptor: file,
+    cause: Object.assign(new Error(code), { code }),
+  })
+
 
 function emitAndWait(update: Watcher.Update) {
   return Effect.gen(function* () {
@@ -1335,7 +1345,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
           FSUtil.Service.of({
             ...fs,
             up: () => Effect.succeed([discovered]),
-            readFileStringSafe: () => Effect.undefined,
+            readFileString: (file) => Effect.fail(readFailure("NotFound", "ENOENT", file)),
           }),
         ),
       ),
@@ -1370,7 +1380,8 @@ describe("ConfigInstructionPlugin.Plugin", () => {
           FSUtil.Service.of({
             ...fs,
             scanChecked: () => Effect.succeed([configured]),
-            readFileStringSafe: () => Effect.undefined,
+            readFileString: (file) =>
+              file === configured ? Effect.fail(readFailure("Unknown", "EPERM", file)) : Effect.succeed("package"),
           }),
         ),
       ),
@@ -1389,6 +1400,38 @@ describe("ConfigInstructionPlugin.Plugin", () => {
           locationServiceLayer: Layer.succeed(
             Location.Service,
             Location.Service.of(location({ directory: AbsolutePath.make("/repo") })),
+          ),
+        }),
+      ),
+    )
+  })
+
+  it.effect("skips discovered files a sandbox denies and keeps the rest available", () => {
+    const denied = path.resolve("/repo/AGENTS.md")
+    const readable = path.resolve("/repo/packages/AGENTS.md")
+    const sandboxedFS = Layer.effect(
+      FSUtil.Service,
+      FSUtil.Service.pipe(
+        Effect.map((fs) =>
+          FSUtil.Service.of({
+            ...fs,
+            up: () => Effect.succeed([readable, denied]),
+            readFileString: (file) =>
+              file === denied ? Effect.fail(readFailure("Unknown", "EPERM", file)) : Effect.succeed("package"),
+          }),
+        ),
+      ),
+    ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+    return Effect.gen(function* () {
+      const discovery = yield* start()
+      expect((yield* readInitial(yield* discovery.load())).text).toBe(`Instructions from: ${readable}\npackage`)
+    }).pipe(
+      Effect.provide(
+        instructionLayer({
+          filesystemLayer: sandboxedFS,
+          locationServiceLayer: Layer.succeed(
+            Location.Service,
+            Location.Service.of(location({ directory: AbsolutePath.make("/repo/packages") })),
           ),
         }),
       ),
