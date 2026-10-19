@@ -22,6 +22,12 @@ import { repairWindowsLinks } from "./repair-windows-links"
 describe("Windows build isolation", () => {
   const fixtureParent = process.env.OPENCODE_WINDOWS_TEST_TMP ?? path.resolve(import.meta.dir, "../dist")
 
+  test("uses the approved default Bun path in the Windows build script", async () => {
+    const script = await Bun.file(path.join(import.meta.dir, "build-win.ps1")).text()
+    expect(script).toMatch(/\[string\]\$Bun\s*=\s*['"]D:\\Program\\bun\\bin\\bun\.exe['"]/
+    )
+  })
+
   test("pins the version to the merged upstream commit, not fork HEAD or newer unmerged upstream", async () => {
     const parent = fixtureParent
     await mkdir(parent, { recursive: true })
