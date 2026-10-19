@@ -13,6 +13,7 @@ import {
   prepareIsolatedDatabaseDirectory,
   sha256,
   upstreamAtCommit,
+  workspacePackageMetadata,
 } from "./windows-runtime"
 import { stopOwned, waitForInfo } from "../test/fixture/service-lifecycle"
 
@@ -21,7 +22,8 @@ if (process.platform !== "win32" || !process.argv[2])
 const output = await realpath(process.argv[2])
 const metadata = await Bun.file(path.join(output, "build-metadata.json")).json()
 const repo = path.resolve(import.meta.dir, "../../..")
-assert.equal(metadata.version, (await upstreamAtCommit(repo, metadata.upstream)).version)
+await upstreamAtCommit(repo, metadata.upstream)
+assert.equal(metadata.version, (await workspacePackageMetadata(repo)).version)
 assert.equal(metadata.channel, "local")
 const binary = await realpath(path.join(output, "compiled/cli-windows-x64/bin/opencode.exe"))
 assert.equal(await sha256(binary), metadata.binarySha256)

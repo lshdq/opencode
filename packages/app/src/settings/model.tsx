@@ -204,7 +204,7 @@ function storedTimelineCategory(category: TimelineCategory) {
                         ? "grouped"
                         : undefined,
             details: value === "expanded" ? "expanded" : "collapsed",
-          }
+          } as const
         }),
         encode: SchemaGetter.passthrough(),
       }),

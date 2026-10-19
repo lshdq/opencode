@@ -5,6 +5,12 @@ import path from "node:path"
 export const channel = "local"
 
 const sourceIdentityConcurrency = 8
+const packageVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+
+export async function workspacePackageMetadata(root: string) {
+  const packageJSON: unknown = JSON.parse(await Bun.file(path.join(root, "package.json")).text())
+  return validatePackageMetadata(packageJSON, "Unexpected workspace package metadata")
+}
 
 export async function upstreamBaseline(root: string) {
   const commit = await execute(["git", "merge-base", "HEAD", "upstream/v2"], root)
@@ -14,17 +20,21 @@ export async function upstreamBaseline(root: string) {
 export async function upstreamAtCommit(root: string, commit: string) {
   if (!/^[0-9a-f]{40,64}$/.test(commit)) throw new Error("Invalid upstream baseline commit")
   const packageJSON: unknown = JSON.parse(await execute(["git", "show", `${commit}:package.json`], root))
+  return validatePackageMetadata(packageJSON, "Unexpected upstream baseline package metadata")
+}
+
+function validatePackageMetadata(value: unknown, message: string) {
   if (
-    typeof packageJSON !== "object" ||
-    packageJSON === null ||
-    !("version" in packageJSON) ||
-    typeof packageJSON.version !== "string" ||
-    !/^\d+\.\d+\.\d+$/.test(packageJSON.version) ||
-    !("packageManager" in packageJSON) ||
-    packageJSON.packageManager !== "bun@1.4.2"
+    typeof value !== "object" ||
+    value === null ||
+    !("version" in value) ||
+    typeof value.version !== "string" ||
+    !packageVersion.test(value.version) ||
+    !("packageManager" in value) ||
+    value.packageManager !== "bun@1.4.2"
   )
-    throw new Error("Unexpected upstream baseline package metadata")
-  return { version: packageJSON.version }
+    throw new Error(message)
+  return { version: value.version }
 }
 
 export async function deployWindowsBinary(

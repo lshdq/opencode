@@ -16,6 +16,7 @@ import {
   sourceIdentity,
   upstreamAtCommit,
   upstreamBaseline,
+  workspacePackageMetadata,
 } from "./windows-runtime"
 import { repairWindowsLinks } from "./repair-windows-links"
 
@@ -28,7 +29,7 @@ describe("Windows build isolation", () => {
     )
   })
 
-  test("pins the version to the merged upstream commit, not fork HEAD or newer unmerged upstream", async () => {
+  test("uses the workspace version while retaining the merged upstream baseline", async () => {
     const parent = fixtureParent
     await mkdir(parent, { recursive: true })
     const root = await mkdtemp(path.join(parent, "upstream-baseline-test-"))
@@ -45,6 +46,7 @@ describe("Windows build isolation", () => {
       await execute(["git", "add", "package.json"], root)
       await execute([...commit, "fork changes"], root)
       expect(await upstreamBaseline(root)).toEqual({ commit: base, version: "3.4.0" })
+      expect(await workspacePackageMetadata(root)).toEqual({ version: "9.9.9" })
       await execute(["git", "switch", "--quiet", "-c", "upstream-next", base], root)
       await Bun.write(path.join(root, "package.json"), JSON.stringify({ version: "3.5.0", packageManager: "bun@1.4.2" }))
       await execute(["git", "add", "package.json"], root)
@@ -53,9 +55,30 @@ describe("Windows build isolation", () => {
       await execute(["git", "switch", "--quiet", fork], root)
       expect(await upstreamBaseline(root)).toEqual({ commit: base, version: "3.4.0" })
       expect(await upstreamAtCommit(root, base)).toEqual({ version: "3.4.0" })
+      expect(await workspacePackageMetadata(root)).toEqual({ version: "9.9.9" })
       await execute(["git", "update-ref", "-d", "refs/remotes/upstream/v2"], root)
       await expect(upstreamBaseline(root)).rejects.toThrow()
       await expect(upstreamAtCommit(root, "--invalid")).rejects.toThrow("Invalid upstream baseline commit")
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    }
+  })
+
+  test.each([
+    { name: "missing package metadata", packageJSON: undefined },
+    { name: "invalid version", packageJSON: { version: "9.9", packageManager: "bun@1.4.2" } },
+    { name: "leading zero major version", packageJSON: { version: "01.2.3", packageManager: "bun@1.4.2" } },
+    { name: "leading zero minor version", packageJSON: { version: "1.02.3", packageManager: "bun@1.4.2" } },
+    { name: "invalid package manager", packageJSON: { version: "9.9.9", packageManager: "npm@11" } },
+    { name: "invalid JSON", packageJSON: "{ invalid json" },
+  ])("rejects $name for the workspace package metadata", async ({ packageJSON }) => {
+    const parent = fixtureParent
+    await mkdir(parent, { recursive: true })
+    const root = await mkdtemp(path.join(parent, "workspace-metadata-test-"))
+    try {
+      if (packageJSON !== undefined)
+        await Bun.write(path.join(root, "package.json"), typeof packageJSON === "string" ? packageJSON : JSON.stringify(packageJSON))
+      await expect(workspacePackageMetadata(root)).rejects.toThrow()
     } finally {
       await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
     }
@@ -403,34 +426,67 @@ describe("Windows build isolation", () => {
       const parent = fixtureParent
       await mkdir(parent, { recursive: true })
       const root = await mkdtemp(path.join(parent, "symlink-test-"))
-      const files = ["packages/app/src/custom-elements.d.ts", "packages/enterprise/src/custom-elements.d.ts"]
+      const file = "packages/app/src/custom-elements.d.ts"
+      const optionalFile = "packages/enterprise/src/custom-elements.d.ts"
       try {
         await execute(["git", "init", "--quiet"], root)
         await Bun.write(path.join(root, "packages/ui/src/custom-elements.d.ts"), "export {}\n")
-        for (const file of files) {
-          await mkdir(path.dirname(path.join(root, file)), { recursive: true })
-          await symlink("../../ui/src/custom-elements.d.ts", path.join(root, file))
-        }
-        await execute(["git", "-c", "core.symlinks=true", "add", "--", "packages"], root)
-        for (const file of files) {
-          await unlink(path.join(root, file))
-          await Bun.write(path.join(root, file), "../../ui/src/custom-elements.d.ts")
-        }
+        await mkdir(path.dirname(path.join(root, file)), { recursive: true })
+        await symlink("../../ui/src/custom-elements.d.ts", path.join(root, file))
+        await execute(["git", "-c", "core.symlinks=true", "add", "--", "packages/ui", "packages/app"], root)
+        await unlink(path.join(root, file))
+        await Bun.write(path.join(root, file), "../../ui/src/custom-elements.d.ts")
         await repairWindowsLinks(root)
-        expect((await lstat(path.join(root, files[0]))).isSymbolicLink()).toBe(true)
+        expect((await lstat(path.join(root, file))).isSymbolicLink()).toBe(true)
+        expect(await Bun.file(path.join(root, optionalFile)).exists()).toBe(false)
         expect(await execute(["git", "diff", "--exit-code"], root)).toBe("")
+        await mkdir(path.dirname(path.join(root, optionalFile)), { recursive: true })
+        await Bun.write(path.join(root, optionalFile), "user-owned enterprise file")
+        await repairWindowsLinks(root)
+        expect((await lstat(path.join(root, optionalFile))).isSymbolicLink()).toBe(false)
+        expect(await Bun.file(path.join(root, optionalFile)).text()).toBe("user-owned enterprise file")
         const identity = await sourceIdentity(root)
-        const link = identity.files.find((file) => file.file === files[0])
+        const link = identity.files.find((file) => file.file === "packages/app/src/custom-elements.d.ts")
         const target = path.join("..", "..", "ui", "src", "custom-elements.d.ts")
         expect(link).toMatchObject({
           kind: "symlink",
           target,
           sha256: createHash("sha256").update(target).digest("hex"),
         })
-        await unlink(path.join(root, files[0]))
-        await Bun.write(path.join(root, files[0]), "user-edited text")
+        await unlink(path.join(root, file))
+        await Bun.write(path.join(root, file), "user-edited text")
         await expect(repairWindowsLinks(root)).rejects.toThrow("Refusing to overwrite")
-        expect(await Bun.file(path.join(root, files[0])).text()).toBe("user-edited text")
+        expect(await Bun.file(path.join(root, file)).text()).toBe("user-edited text")
+      } finally {
+        await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+      }
+    },
+  )
+
+  test.skipIf(process.platform !== "win32")(
+    "repairs an untouched tracked enterprise symlink and preserves user edits",
+    async () => {
+      const parent = fixtureParent
+      await mkdir(parent, { recursive: true })
+      const root = await mkdtemp(path.join(parent, "enterprise-symlink-test-"))
+      const file = "packages/enterprise/src/custom-elements.d.ts"
+      try {
+        await execute(["git", "init", "--quiet"], root)
+        await Bun.write(path.join(root, "packages/ui/src/custom-elements.d.ts"), "export {}\n")
+        await mkdir(path.dirname(path.join(root, file)), { recursive: true })
+        await symlink("../../ui/src/custom-elements.d.ts", path.join(root, file))
+        await execute(["git", "-c", "core.symlinks=true", "add", "--", "packages/ui", "packages/enterprise"], root)
+        await unlink(path.join(root, file))
+        await Bun.write(path.join(root, file), "../../ui/src/custom-elements.d.ts")
+
+        await repairWindowsLinks(root)
+        expect((await lstat(path.join(root, file))).isSymbolicLink()).toBe(true)
+        expect(await execute(["git", "diff", "--exit-code"], root)).toBe("")
+
+        await unlink(path.join(root, file))
+        await Bun.write(path.join(root, file), "user-edited text")
+        await expect(repairWindowsLinks(root)).rejects.toThrow("Refusing to overwrite")
+        expect(await Bun.file(path.join(root, file)).text()).toBe("user-edited text")
       } finally {
         await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
       }

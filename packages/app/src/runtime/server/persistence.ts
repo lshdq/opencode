@@ -19,11 +19,11 @@ export const ServerHttp = Persistence.struct({
 const StoredServer = Schema.Union([ServerHttp, ServerHttpBase, Schema.String]).pipe(
   Schema.decodeTo(ServerHttp, {
     decode: SchemaGetter.transform((value) => {
-      if (Predicate.isString(value)) return { type: "http", http: { url: value } }
+      if (Predicate.isString(value)) return { type: "http" as const, http: { url: value } }
 
       if ("http" in value) return value
 
-      return { type: "http", http: value }
+      return { type: "http" as const, http: value }
     }),
     encode: SchemaGetter.transform((value) => value),
   }),

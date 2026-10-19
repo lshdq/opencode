@@ -6,6 +6,7 @@ export async function repairWindowsLinks(root: string) {
   if (process.platform !== "win32") return
   for (const file of ["packages/app/src/custom-elements.d.ts", "packages/enterprise/src/custom-elements.d.ts"]) {
     const indexed = await execute(["git", "ls-files", "--stage", "--", file], root)
+    if (!indexed) continue
     if (!indexed.startsWith("120000 ")) throw new Error(`Expected tracked symlink: ${file}`)
     if ((await lstat(path.join(root, file))).isSymbolicLink()) continue
     const target = await execute(["git", "show", `:${file}`], root)

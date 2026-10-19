@@ -10,6 +10,7 @@ import {
   prepareIsolatedDatabaseDirectory,
   sha256,
   upstreamAtCommit,
+  workspacePackageMetadata,
 } from "./windows-runtime"
 
 if (process.platform !== "win32") throw new Error("Windows smoke requires Windows")
@@ -18,7 +19,12 @@ const output = await realpath(process.argv[2])
 await rm(path.join(output, "smoke-result.json"), { force: true })
 const metadata = await Bun.file(path.join(output, "build-metadata.json")).json()
 const repo = path.resolve(import.meta.dir, "../../..")
-if (metadata.channel !== channel || metadata.version !== (await upstreamAtCommit(repo, metadata.upstream)).version)
+const workspace = await workspacePackageMetadata(repo)
+await upstreamAtCommit(repo, metadata.upstream)
+if (
+  metadata.channel !== channel ||
+  metadata.version !== workspace.version
+)
   throw new Error("Unexpected build identity")
 const binary = await realpath(path.join(output, "compiled", "cli-windows-x64", "bin", "opencode.exe"))
 if ((await sha256(binary)) !== metadata.binarySha256) throw new Error("Binary differs from build metadata")

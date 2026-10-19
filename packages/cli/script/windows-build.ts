@@ -8,6 +8,7 @@ import {
   sha256,
   sourceIdentity,
   upstreamBaseline,
+  workspacePackageMetadata,
 } from "./windows-runtime"
 import { repairWindowsLinks } from "./repair-windows-links"
 
@@ -15,7 +16,8 @@ if (process.platform !== "win32" || process.arch !== "x64") throw new Error("Win
 if (Bun.version !== "1.4.2") throw new Error("Bun 1.4.2 is required")
 const root = path.resolve(import.meta.dir, "../../..")
 await repairWindowsLinks(root)
-const base = await upstreamBaseline(root)
+const upstream = await upstreamBaseline(root)
+const workspace = await workspacePackageMetadata(root)
 const lock = await sha256(path.join(root, "bun.lock"))
 const env = {
   ...process.env,
@@ -24,7 +26,7 @@ const env = {
   ELECTRON_CACHE: process.env.ELECTRON_CACHE ?? "D:\\Program\\bun\\electron-cache",
   HUSKY: "0",
   OPENCODE_CHANNEL: channel,
-  OPENCODE_VERSION: base.version,
+  OPENCODE_VERSION: workspace.version,
   OPENCODE_RELEASE: undefined,
   OPENCODE_BUMP: undefined,
   BUN_COMPILE_RELEASE: undefined,
@@ -42,7 +44,7 @@ const identity = await sourceIdentity(root)
 const commit = await execute(["git", "rev-parse", "HEAD"], root)
 const status = await execute(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], root)
 const diff = await executeRaw(["git", "diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD"], root)
-const id = `v2-${base.version}-${identity.sha256.slice(0, 12)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
+const id = `v2-${workspace.version}-${identity.sha256.slice(0, 12)}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`
 const parent = path.join(root, "packages", "cli", "dist", "windows")
 await mkdir(parent, { recursive: true })
 const output = path.join(parent, id)
@@ -67,8 +69,8 @@ if ((await sourceIdentity(root)).sha256 !== identity.sha256)
 const binary = path.join(output, "compiled", "cli-windows-x64", "bin", "opencode.exe")
 const metadata = {
   id,
-  upstream: base.commit,
-  version: base.version,
+  upstream: upstream.commit,
+  version: workspace.version,
   channel,
   forkCommit: commit,
   dirty: status.length > 0,
@@ -98,7 +100,7 @@ const deploy = path.resolve(
 )
 const checkRoot = await mkdtemp(path.join(output, "deploy-check-"))
 try {
-  const destination = await deployVerifiedWindowsBinary(binary, deploy, base.version, metadata.binarySha256, checkRoot)
+  const destination = await deployVerifiedWindowsBinary(binary, deploy, workspace.version, metadata.binarySha256, checkRoot)
   console.log(`Versioned deployment (NOT activated): ${destination}`)
 } finally {
   await rm(checkRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
