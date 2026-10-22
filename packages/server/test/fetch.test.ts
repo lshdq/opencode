@@ -5,7 +5,7 @@ import path from "node:path"
 import { Agent } from "@opencode/schema/agent"
 import { Integration } from "@opencode/schema/integration"
 import { ServerInfo } from "@opencode/protocol/groups/server"
-import { Effect, Schedule, Schema } from "effect"
+import { Cause, Effect, Exit, Schedule, Schema } from "effect"
 import { Session } from "@opencode/schema/session"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
@@ -166,6 +166,15 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     expect(body.version).toBe("test-version")
     expect(body.paths.tmp).toEndWith("opencode")
     expect(body.capabilities?.persistentPty).toBe(process.platform !== "win32")
+  }),
+)
+
+it.effect("rejects auto-login for embedded fetch handlers", () =>
+  Effect.gen(function* () {
+    const result = yield* ServerFetch.make({ ...options, password: "secret", autoLogin: true }).pipe(Effect.exit)
+    expect(Exit.isFailure(result)).toBe(true)
+    if (Exit.isFailure(result))
+      expect(Cause.squash(result.cause)).toMatchObject({ message: "ServerFetch does not support auto-login" })
   }),
 )
 

@@ -15,8 +15,5 @@ export function databasePath(data: string) {
 export function databaseOptions(data: string) {
   return {
     path: databasePath(data),
-    // Only the default location is application-owned. An explicit override
-    // must already be private; its parent is never permission-modified.
-    privateDirectory: process.env.OPENCODE_DB === undefined,
   }
 }

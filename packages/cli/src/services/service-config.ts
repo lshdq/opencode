@@ -1,6 +1,4 @@
 import { Global } from "@opencode/util/global"
-import { FileMode } from "@opencode/util/file-mode"
-import { FileModeEffect } from "@opencode/util/file-mode-effect"
 import { OPENCODE_CHANNEL, OPENCODE_VERSION } from "../version"
 import { Hash } from "@opencode/util/hash"
 import { Service } from "@opencode/client/effect/service"
@@ -25,12 +23,13 @@ export const Info = Schema.Struct({
   hostname: Schema.optional(Schema.String),
   port: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(65_535))),
   password: Schema.optional(Schema.String),
+  autoLogin: Schema.optional(Schema.Boolean),
   cors: Schema.optional(Schema.Array(Schema.String)),
   env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 })
 export type Info = typeof Info.Type
 
-const keys = ["disabled", "remote", "hostname", "port", "password", "cors", "env"] as const
+const keys = ["disabled", "remote", "hostname", "port", "password", "auto-login", "cors", "env"] as const
 type Key = (typeof keys)[number]
 
 const decodeInfo = Schema.decodeUnknownEffect(Schema.fromJsonString(Info))
@@ -89,7 +88,6 @@ export const migrateRegistration = Effect.fnUntraced(function* (
   const registration = yield* decodeRegistration(text.value).pipe(Effect.option)
   if (Option.isNone(registration)) return
   if (!versionBelongsToChannel(registration.value.version, channel, installedVersion)) return
-  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(legacy, { create: false, signal }))
   yield* migrateWrite(file, text.value)
 })
 
@@ -98,7 +96,6 @@ export const migrateConfig = Effect.fnUntraced(function* (legacy: string, file: 
   const text = yield* fs.readFileString(legacy).pipe(Effect.option)
   if (Option.isNone(text)) return
   if (Option.isNone(yield* decodeInfo(text.value).pipe(Effect.option))) return
-  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(legacy, { create: false, signal }))
   yield* migrateWrite(file, text.value)
 })
 
@@ -110,13 +107,11 @@ const migrateWrite = Effect.fnUntraced(function* (file: string, text: string) {
   }
   if (yield* fs.exists(file)) return
   // A hard link publishes the complete inode atomically without replacing a
-  // concurrent winner. mkdtemp gives the scope ownership even if private file
-  // preparation is interrupted before it can report whether it created a file.
+  // concurrent winner. mkdtemp keeps the retry window scoped to this attempt.
   yield* Effect.gen(function* () {
     const directory = yield* fs.makeTempDirectoryScoped({ directory: path.dirname(file), prefix: ".migration-" })
     const temp = path.join(directory, "content")
-    yield* FileModeEffect.run((signal) => FileMode.prepare(temp, { exclusive: true, signal }))
-    yield* fs.writeFileString(temp, text)
+    yield* fs.writeFileString(temp, text, { mode: 0o600 })
     yield* fs.link(temp, file).pipe(Effect.catchReason("PlatformError", "AlreadyExists", () => Effect.void))
   }).pipe(Effect.scoped)
 })
@@ -128,6 +123,7 @@ function configKey(key: string): Key {
     key === "hostname" ||
     key === "port" ||
     key === "password" ||
+    key === "auto-login" ||
     key === "cors" ||
     key === "env"
   )
@@ -156,7 +152,6 @@ const paths = Effect.gen(function* () {
 export const options = Effect.fnUntraced(function* (input: { readonly checkVersion?: boolean } = {}) {
   const { file, legacyRegistrationFiles } = yield* paths
   yield* Effect.forEach(legacyRegistrationFiles, (legacy) => migrateRegistration(legacy, file))
-  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(file, { create: false, signal }))
   return {
     file,
     version: input.checkVersion ? OPENCODE_VERSION : undefined,
@@ -172,7 +167,6 @@ export const options = Effect.fnUntraced(function* (input: { readonly checkVersi
 export const read = Effect.fn("cli.service-config.read")(function* () {
   const { fs, configFile, legacyConfigFile } = yield* paths
   if (legacyConfigFile) yield* migrateConfig(legacyConfigFile, configFile)
-  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(configFile, { create: false, signal }))
   const text = yield* fs.readFileString(configFile).pipe(Effect.option)
   if (Option.isNone(text)) return {} as Info
   const info = yield* decodeInfo(text.value).pipe(Effect.option)
@@ -193,9 +187,8 @@ function route() {
 
 const write = Effect.fn("cli.service-config.write")(function* (value: Info) {
   const { fs, configFile } = yield* paths
-  const temp = configFile + ".tmp"
+  const temp = `${configFile}.${randomBytes(8).toString("hex")}.tmp`
   yield* fs.makeDirectory(path.dirname(configFile), { recursive: true })
-  if (process.platform === "win32") yield* FileModeEffect.run((signal) => FileMode.prepare(temp, { signal }))
   yield* fs.writeFileString(temp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 })
   yield* fs.rename(temp, configFile)
 })
@@ -256,6 +249,9 @@ export const get = Effect.fn("cli.service-config.get")(function* (key?: string, 
     case "password": {
       return yield* password()
     }
+    case "auto-login": {
+      return String((yield* read()).autoLogin ?? false)
+    }
     case "cors": {
       return JSON.stringify((yield* read()).cors ?? [], null, 2)
     }
@@ -305,6 +301,12 @@ export const set = Effect.fn("cli.service-config.set")(function* (key: string, v
     case "password": {
       yield* Service.stop(yield* options())
       yield* password(value)
+      return
+    }
+    case "auto-login": {
+      if (value !== "true" && value !== "false") throw new Error("Auto-login must be true or false")
+      yield* Service.stop(yield* options())
+      yield* write({ ...(yield* read()), autoLogin: value === "true" })
       return
     }
     case "env": {
@@ -359,6 +361,12 @@ export const unset = Effect.fn("cli.service-config.unset")(function* (key: strin
     case "password": {
       yield* Service.stop(yield* options())
       const { password: _password, ...next } = yield* read()
+      yield* write(next)
+      return
+    }
+    case "auto-login": {
+      yield* Service.stop(yield* options())
+      const { autoLogin: _autoLogin, ...next } = yield* read()
       yield* write(next)
       return
     }

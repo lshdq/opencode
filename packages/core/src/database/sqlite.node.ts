@@ -4,8 +4,6 @@ import { Reactivity } from "effect/reactivity"
 import { SqlClient } from "effect/sql"
 import { classifySqliteError, SqlError } from "effect/sql/SqlError"
 import { Sqlite } from "./sqlite.js"
-import { prepareDatabase } from "./sqlite-permissions.js"
-import { FileModeEffect } from "@opencode/util/file-mode-effect"
 
 const TypeId = "~@opencode/core/database/SqliteNode" as const
 
@@ -81,12 +79,6 @@ const nativeLayer = (config: Config) =>
   Layer.effect(
     Sqlite.Native,
     Effect.gen(function* () {
-      const privateFile = process.platform === "win32" && config.filename !== ":memory:" && config.filename !== ""
-      if (privateFile) {
-        yield* FileModeEffect.run((signal) =>
-          prepareDatabase(config.filename, config.readonly !== true, config.privateDirectory === true, signal),
-        ).pipe(Effect.orDie)
-      }
       const native = new DatabaseSync(config.filename, {
         readOnly: config.readonly,
         timeout: config.timeout,

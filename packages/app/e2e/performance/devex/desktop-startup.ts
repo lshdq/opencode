@@ -170,11 +170,6 @@ export async function initializeColdProfile(root: string) {
       mkdir(join(root, dir), { recursive: true }),
     ),
   )
-  // createColdProfile owns this mkdtemp root; OPENCODE_DB remains verify-only in the child CLI.
-  if (process.platform === "win32") {
-    const { FileMode } = await import("@opencode/util/file-mode")
-    await FileMode.directory(join(root, "data"), { owned: true })
-  }
   await Promise.all([
     writeFile(join(root, "desktop", "opencode.settings"), JSON.stringify({ firstLaunchOnboardingComplete: true })),
     writeFile(join(root, "desktop", "opencode.global.dat"), JSON.stringify({ language: '{"locale":"en"}' })),

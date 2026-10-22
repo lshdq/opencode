@@ -11,13 +11,14 @@ export type DecodedCredentials = {
 export type Info = {
   readonly password: Option.Option<string>
   readonly username: string
+  readonly autoLogin?: boolean
 }
 
 export const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 
 export class Config extends Context.Service<Config, Info>()("@opencode/ServerAuthConfig") {
-  static configLayer(input: Pick<Info, "password">) {
-    return Layer.succeed(this, this.of({ ...input, username: "opencode" }))
+  static configLayer(input: Pick<Info, "password" | "autoLogin">) {
+    return Layer.succeed(this, this.of({ ...input, autoLogin: input.autoLogin === true, username: "opencode" }))
   }
 
   static get layer() {
@@ -26,11 +27,13 @@ export class Config extends Context.Service<Config, Info>()("@opencode/ServerAut
 }
 
 export function required(config: Info) {
-  return Option.isSome(config.password) && config.password.value !== ""
+  return config.autoLogin !== true && Option.isSome(config.password) && config.password.value !== ""
 }
 
 // Session tokens issued by pairing links are accepted anywhere the password is.
 export function authorized(credentials: DecodedCredentials, config: Info) {
+  // ServerProcess validates the loopback and remote-access boundary before binding.
+  if (config.autoLogin === true) return true
   if (Option.isNone(config.password) || credentials.username !== config.username) return false
   const password = Redacted.value(credentials.password)
   return password === config.password.value || verifySession(password, config)

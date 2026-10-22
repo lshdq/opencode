@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test"
-import { FileMode } from "@opencode/util/file-mode"
 import path from "node:path"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { isolatedEnv } from "./fixture/environment"
@@ -8,7 +7,6 @@ import { startupTimeout, stopOwned } from "./fixture/service-lifecycle"
 test("standalone server exits when its owner is killed", async () => {
   // Windows can hold the server's files briefly after it exits; the fixture retries removal on EBUSY.
   await using root = await tmpdir("opencode-cli-standalone-")
-  await FileMode.directory(root.path, { owned: true })
   const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixture/standalone-owner.ts")], {
     cwd: path.join(import.meta.dir, ".."),
     env: isolatedEnv(root.path, { OPENCODE_SERVER_USERNAME: "custom" }),

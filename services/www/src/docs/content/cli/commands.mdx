@@ -354,6 +354,16 @@ Allow a browser client from another origin.
 $ opencode serve --cors https://app.example.com
 ```
 
+Enable unauthenticated access only for a service bound to the local loopback
+address:
+
+```bash
+$ opencode serve --auto-login --hostname 127.0.0.1
+```
+
+`--auto-login` fails when the hostname is not exactly `127.0.0.1` or when
+OpenTunnel remote access is enabled. See [Automatic local login](/cli/web#automatic-local-login).
+
 View all subcommands and flags.
 
 ```bash
@@ -432,6 +442,16 @@ Set a setting.
 ```bash
 $ opencode service set hostname 0.0.0.0
 ```
+
+Persist automatic local login for the shared service:
+
+```bash
+$ opencode service set auto-login true
+```
+
+This setting is accepted only at startup when the service remains bound to
+exactly `127.0.0.1` with remote access disabled. Use
+`opencode service unset auto-login` to restore password and pairing authentication.
 
 Allow an extra CORS origin.
 

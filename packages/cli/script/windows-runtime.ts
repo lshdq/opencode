@@ -132,12 +132,9 @@ export function isolatedEnvironment(root: string, inherited = process.env) {
   }
 }
 
-// The caller owns this fresh mkdtemp root. Never derive an owned directory from a user DB override.
 export async function prepareIsolatedDatabaseDirectory(root: string) {
   const directory = path.join(root, "data")
   await mkdir(directory, { recursive: true })
-  const { FileMode } = await import("@opencode/util/file-mode")
-  await FileMode.directory(directory, { owned: true })
   return directory
 }
 

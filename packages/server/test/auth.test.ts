@@ -8,6 +8,13 @@ test("accepts only the fixed opencode username", () => {
   expect(ServerAuth.authorized({ username: "custom", password: Redacted.make("secret") }, config)).toBe(false)
 })
 
+test("auto-login bypasses credentials without removing the server password", () => {
+  const config = { password: Option.some("secret"), username: "opencode", autoLogin: true }
+  expect(ServerAuth.required(config)).toBe(false)
+  expect(ServerAuth.authorized({ username: "custom", password: Redacted.make("wrong") }, config)).toBe(true)
+  expect(ServerAuth.issueSession(config)).toMatch(/^\d+\.[\w-]+$/)
+})
+
 test("session tokens expire, resist tampering, and are revoked by changing the password", () => {
   const config = { password: Option.some("secret"), username: "opencode" }
   const now = Date.now()

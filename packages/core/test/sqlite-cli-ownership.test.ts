@@ -2,30 +2,29 @@ import { expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { FileMode } from "@opencode/util/file-mode"
 import { acl } from "../../util/test/fixture/file-acl"
 
-// TC-008 / R-01: use the real CLI entrypoint, not Database.layer({ privateDirectory: true }).
-// This covers database-path -> CLI ServerProcess -> Server routes/graph -> Database -> native driver.
-for (const mode of ["default", "unsafe-custom", "private-custom"] as const) {
-  test.skipIf(process.platform !== "win32")(`CLI graph preserves directory ownership: ${mode}`, async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "opencode-cli-db-ownership-"))
+// Multi-user sharing: the CLI graph must never tighten Windows ACLs. Both the
+// default data root and a custom shared OPENCODE_DB directory keep inheriting
+// their parent's ACL while the server runs. Covers database-path -> CLI
+// ServerProcess -> Server routes/graph -> Database -> native driver.
+for (const mode of ["default", "shared-custom"] as const) {
+  test.skipIf(process.platform !== "win32")(`CLI graph leaves shared database ACLs inherited: ${mode}`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "opencode-cli-db-shared-"))
     const data = path.join(root, "data", "opencode")
-    const custom = path.join(root, "custom")
+    const custom = path.join(root, "shared")
     const directory = mode === "default" ? data : custom
     const filename = path.join(directory, "opencode.db")
     try {
       await mkdir(directory, { recursive: true })
-      // Only this opt-in custom fixture prepares its own directory. The default case must
-      // succeed solely through production ownership wiring; the unsafe case must not mutate it.
-      if (mode === "private-custom") await FileMode.directory(custom, { owned: true })
       await writeFile(path.join(root, "unrelated"), "outside-app-data")
       await writeFile(path.join(directory, "sibling"), "preserved-sibling")
       const outside = await Promise.all([root, path.join(root, "unrelated")].map(acl))
       const before = await Promise.all([directory, path.join(directory, "sibling")].map(acl))
-      if (mode !== "private-custom") expect(before[0].protected).toBe(false)
+      expect(before[0].protected).toBe(false)
 
       for (const reopen of mode === "default" ? [false, true] : [false]) {
+        const existing = reopen ? await acl(filename) : undefined
         const env = {
           ...Object.fromEntries(Object.entries(process.env).filter(([key]) =>
             ["path", "systemroot", "windir", "comspec", "pathext", "systemdrive"].includes(key.toLowerCase()),
@@ -47,7 +46,7 @@ for (const mode of ["default", "unsafe-custom", "private-custom"] as const) {
           OPENCODE_DISABLE_MODELS_FETCH: "1",
           OPENCODE_DISABLE_FFF: "1",
           OPENCODE_FILEWATCHER_DISABLE: "1",
-          OPENCODE_SERVER_PASSWORD: "ownership-fixture-only",
+          OPENCODE_SERVER_PASSWORD: "shared-fixture-only",
           ...(mode === "default" ? {} : { OPENCODE_DB: filename }),
         }
         const child = Bun.spawn([
@@ -64,31 +63,23 @@ for (const mode of ["default", "unsafe-custom", "private-custom"] as const) {
         try {
           const deadline = Date.now() + 60_000
           while (!output.text.includes('"url":') && child.exitCode === null && Date.now() < deadline) await Bun.sleep(25)
-          if (mode === "unsafe-custom") {
-            expect(child.exitCode).not.toBe(null)
-            expect(child.exitCode).not.toBe(0)
-            expect(await stderr).toContain("Unsafe custom SQLite directory")
-            expect(output.text).not.toContain('"url":')
-            for (const suffix of ["", "-wal", "-shm"]) await expect(stat(filename + suffix)).rejects.toThrow()
-            expect((await Promise.all([directory, path.join(directory, "sibling")].map(acl))).map((item) => item.sddl))
-              .toEqual(before.map((item) => item.sddl))
-            continue
-          }
           expect(child.exitCode, child.exitCode === null ? "server exited before ready" : await stderr).toBe(null)
           const line = output.text.split(/\r?\n/).find((line) => line.startsWith('{"url":'))
           expect(line, `No ready URL on ${reopen ? "reopen" : "first open"}`).toBeDefined()
           const address = JSON.parse(line ?? "{}") as { url: string }
           const response = await fetch(new URL("/api/info", address.url), {
-            headers: { authorization: "Basic " + btoa("opencode:ownership-fixture-only") },
+            headers: { authorization: "Basic " + btoa("opencode:shared-fixture-only") },
             signal: AbortSignal.timeout(5000),
           })
           expect(response.status).toBe(200)
           expect(await response.json()).toMatchObject({ pid: child.pid })
+          // The open database and its sidecars keep inheriting the parent ACL.
           for (const suffix of ["", "-wal", "-shm"]) {
             const found = await acl(filename + suffix)
-            expect(found.rules.map((rule) => rule.sid)).toEqual([found.current])
+            expect(found.protected).toBe(false)
+            if (existing && suffix === "") expect(found.sddl).toBe(existing.sddl)
           }
-          expect((await acl(directory)).protected).toBe(true)
+          expect((await acl(directory)).protected).toBe(false)
           child.stdin.end()
           expect(await Promise.race([child.exited, Bun.sleep(10_000).then(() => "shutdown-timeout")])).toBe(0)
           expect(() => process.kill(child.pid, 0)).toThrow()
@@ -107,11 +98,9 @@ for (const mode of ["default", "unsafe-custom", "private-custom"] as const) {
       }
       expect((await Promise.all([root, path.join(root, "unrelated")].map(acl))).map((item) => item.sddl))
         .toEqual(outside.map((item) => item.sddl))
+      expect((await Promise.all([directory, path.join(directory, "sibling")].map(acl))).map((item) => item.sddl))
+        .toEqual(before.map((item) => item.sddl))
       expect(await readFile(path.join(directory, "sibling"), "utf8")).toBe("preserved-sibling")
-      if (mode === "private-custom") {
-        expect((await Promise.all([directory, path.join(directory, "sibling")].map(acl))).map((item) => item.sddl))
-          .toEqual(before.map((item) => item.sddl))
-      }
     } finally {
       await rm(root, { recursive: true, force: true })
     }

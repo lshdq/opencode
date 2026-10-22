@@ -83,14 +83,19 @@ export function createRoutes(
   serviceURLs: () => ReadonlyArray<string> = () => [],
   overrides: LayerNode.Replacements = [],
 ) {
-  return makeRoutes(
-    options.password
-      ? ServerAuth.Config.configLayer({ password: Option.some(options.password) })
-      : ServerAuth.Config.layer,
-    options,
-    serviceURLs,
-    overrides,
-  )
+  return makeRoutes(authLayer(options), options, serviceURLs, overrides)
+}
+
+/**
+ * Builds the Node server routes and validates the listener boundary for auto-login.
+ * Embedded runtimes must use createRoutes, which deliberately does not honor autoLogin.
+ */
+export function createNodeRoutes(
+  options: ServerOptions = {},
+  serviceURLs: () => ReadonlyArray<string> = () => [],
+  overrides: LayerNode.Replacements = [],
+) {
+  return makeRoutes(authLayer(options, options.autoLogin), options, serviceURLs, overrides)
 }
 
 type InstanceNode = (
@@ -103,6 +108,25 @@ export function createEmbeddedRoutes(
   instances?: InstanceNode,
 ) {
   return makeRoutes(ServerAuth.Config.configLayer({ password: Option.none() }), options, () => [], overrides, instances)
+}
+
+function authLayer(options: ServerOptions, autoLogin = false) {
+  if (autoLogin === true && options.hostname !== "127.0.0.1")
+    return Layer.effect(
+      ServerAuth.Config,
+      Effect.fail(new Error("Auto-login requires the server hostname to be exactly 127.0.0.1")),
+    )
+  if (autoLogin === true && options.remote === true)
+    return Layer.effect(
+      ServerAuth.Config,
+      Effect.fail(new Error("Auto-login cannot be enabled while remote access is enabled")),
+    )
+  return options.password
+    ? ServerAuth.Config.configLayer({
+        password: Option.some(options.password),
+        autoLogin,
+      })
+    : ServerAuth.Config.layer
 }
 
 function makeRoutes<AuthError, AuthServices>(

@@ -136,7 +136,7 @@ try {
       ...(trace
         ? {
             imports: lines.filter((line) =>
-              /TRACE preload|cli[\\/]src[\\/](index|server-process)\.ts|handlers[\\/]serve\.ts|server[\\/]src[\\/]process\.ts|file-mode.*\.ts|sqlite.bun\.ts/.test(
+              /TRACE preload|cli[\\/]src[\\/](index|server-process)\.ts|handlers[\\/]serve\.ts|server[\\/]src[\\/]process\.ts|sqlite\.bun\.ts/.test(
                 line,
               ),
             ),

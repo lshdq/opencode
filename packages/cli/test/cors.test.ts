@@ -1,7 +1,7 @@
 import { NodeServices } from "@effect/platform-node"
 import { Global } from "@opencode/util/global"
 import { expect, test } from "bun:test"
-import { Effect, Exit, FileSystem } from "effect"
+import { Effect, Exit, FileSystem, Option } from "effect"
 import { Command } from "effect/cli"
 import path from "node:path"
 import { Commands } from "../src/commands/commands"
@@ -122,3 +122,16 @@ test.each([{ args: ["--cors"] }, { args: ["--cors", ""] }])(
     expect(Exit.isFailure(result)).toBe(true)
   },
 )
+
+test.each([
+  { args: [], autoLogin: undefined },
+  { args: ["--auto-login"], autoLogin: true },
+  { args: ["--auto-login=false"], autoLogin: false },
+])("serve parses the auto-login flag: $args", async ({ args, autoLogin }) => {
+  const received: (boolean | undefined)[] = []
+  const command = Commands.commands.serve.spec.pipe(
+    Command.withHandler((input) => Effect.sync(() => void received.push(Option.getOrUndefined(input.autoLogin)))),
+  )
+  await Effect.runPromise(Command.runWith(command, { version: "test" })(args).pipe(Effect.provide(NodeServices.layer)))
+  expect(received).toEqual([autoLogin])
+})

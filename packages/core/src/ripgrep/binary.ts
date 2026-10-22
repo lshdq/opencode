@@ -7,6 +7,7 @@ import { CrossSpawnSpawner } from "@opencode/util/cross-spawn-spawner"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { FSUtil } from "@opencode/util/fs-util"
+import { Flock } from "@opencode/util/flock"
 import { Global } from "@opencode/util/global"
 import { which } from "../util/which.js"
 
@@ -93,26 +94,37 @@ export namespace RipgrepBinary {
             const target = path.join(global.bin, `rg${process.platform === "win32" ? ".exe" : ""}`)
             if (yield* fs.isFile(target).pipe(Effect.orDie)) return target
 
-            const platformKey = `${process.arch}-${process.platform}` as keyof typeof PLATFORM
-            const config = PLATFORM[platformKey]
-            if (!config) throw new Error(`unsupported platform for ripgrep: ${platformKey}`)
+            // Serialize download/install across processes sharing global.bin: a concurrent first
+            // start can otherwise race the check-then-download, and Windows copy onto a target
+            // being executed by another process fails with EPERM. The lock is held until the
+            // scoped block closes.
+            yield* Effect.gen(function* () {
+              yield* Flock.effect(`ripgrep-binary:${VERSION}`)
 
-            const filename = `ripgrep-${VERSION}-${config.platform}.${config.extension}`
-            const url = `https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`
-            const archive = path.join(global.bin, filename)
+              // Re-check under the lock: another process may have installed the binary already.
+              if (yield* fs.isFile(target).pipe(Effect.orDie)) return
 
-            yield* Effect.logInfo("downloading ripgrep", { url })
-            yield* fs.ensureDir(global.bin).pipe(Effect.orDie)
-            const bytes = yield* HttpClientRequest.get(url).pipe(
-              http.execute,
-              Effect.flatMap((response) => response.arrayBuffer),
-              Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
-            )
-            if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
+              const platformKey = `${process.arch}-${process.platform}` as keyof typeof PLATFORM
+              const config = PLATFORM[platformKey]
+              if (!config) throw new Error(`unsupported platform for ripgrep: ${platformKey}`)
 
-            yield* fs.writeWithDirs(archive, new Uint8Array(bytes))
-            yield* extract(archive, config, target)
-            yield* fs.remove(archive, { force: true }).pipe(Effect.ignore)
+              const filename = `ripgrep-${VERSION}-${config.platform}.${config.extension}`
+              const url = `https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`
+              const archive = path.join(global.bin, filename)
+
+              yield* Effect.logInfo("downloading ripgrep", { url })
+              yield* fs.ensureDir(global.bin).pipe(Effect.orDie)
+              const bytes = yield* HttpClientRequest.get(url).pipe(
+                http.execute,
+                Effect.flatMap((response) => response.arrayBuffer),
+                Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
+              )
+              if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
+
+              yield* fs.writeWithDirs(archive, new Uint8Array(bytes))
+              yield* extract(archive, config, target)
+              yield* fs.remove(archive, { force: true }).pipe(Effect.ignore)
+            }).pipe(Effect.scoped)
             return target
           }),
         ),

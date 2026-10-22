@@ -557,6 +557,10 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
           Flag.withDescription("Additional allowed CORS origin (repeat for multiple origins)"),
           Flag.atLeast(0),
         ),
+        autoLogin: Flag.Boolean("auto-login").pipe(
+          Flag.withDescription("Allow unauthenticated access on 127.0.0.1 without remote access"),
+          Flag.optional,
+        ),
         service: Flag.Boolean("service").pipe(Flag.withDefault(false)),
         stdio: Flag.Boolean("stdio").pipe(Flag.withDefault(false)),
       },

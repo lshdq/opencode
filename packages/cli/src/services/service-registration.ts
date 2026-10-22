@@ -6,8 +6,6 @@ import { Effect, FileSystem, Schedule, Schema } from "effect"
 import { HttpServer } from "effect/http"
 import { NetAddress } from "effect/net"
 import { OPENCODE_VERSION } from "../version"
-import { FileMode } from "@opencode/util/file-mode"
-import { FileModeEffect } from "@opencode/util/file-mode-effect"
 
 const infoJson = Schema.fromJsonString(Service.Info)
 const encodeInfo = Schema.encodeEffect(infoJson)
@@ -23,10 +21,6 @@ export const register = Effect.fnUntraced(function* (options: {
   const fs = yield* FileSystem.FileSystem
   const temp = options.file + "." + options.id + ".tmp"
   yield* fs.makeDirectory(path.dirname(options.file), { recursive: true })
-  if (process.platform === "win32") {
-    yield* FileModeEffect.run((signal) => FileMode.prepare(options.file, { create: false, signal }))
-    yield* FileModeEffect.run((signal) => FileMode.prepare(temp, { signal }))
-  }
   const info = {
     id: options.id,
     version: OPENCODE_VERSION,

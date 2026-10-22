@@ -1,9 +1,27 @@
 import { execFile } from "node:child_process"
-import { FileModeWindows } from "../../src/file-mode-windows.js"
+import { existsSync } from "node:fs"
+import { delimiter, isAbsolute, join, win32 } from "node:path"
+
+// Same host selection the removed runtime hardening used: prefer the
+// OS-shipped PowerShell 5.1, fall back to a pwsh.exe found on PATH.
+function command() {
+  const systemRoot =
+    process.env.SystemRoot && /^[A-Za-z]:[\\/]/.test(process.env.SystemRoot)
+      ? win32.normalize(process.env.SystemRoot)
+      : "C:\\Windows"
+  const system = win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+  if (existsSync(system)) return system
+  const core = process.env.PATH?.split(delimiter)
+    .filter(isAbsolute)
+    .map((directory) => join(directory, "pwsh.exe"))
+    .find(existsSync)
+  if (!core) throw new Error("ACL fixture requires system PowerShell 5.1 or PowerShell 7")
+  return core
+}
 
 export function powershell(script: string, file: string) {
   return new Promise<string>((resolve, reject) => {
-    execFile(FileModeWindows.command(), ["-NoProfile", "-NonInteractive", "-Command", `
+    execFile(command(), ["-NoProfile", "-NonInteractive", "-Command", `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $env:PSModulePath = $PSHOME + '\\Modules'
 ${script}`], {

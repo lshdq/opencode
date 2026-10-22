@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { createHash } from "node:crypto"
+import { existsSync } from "node:fs"
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -73,7 +74,7 @@ test("real CLI config reads stay in the owned root and leave outside bait bytes 
     expect(value).toBe("127.0.0.1")
     if (process.platform === "win32") {
       const { acl } = await import("../../util/test/fixture/file-acl")
-      expect((await acl(own)).protected).toBe(true)
+      expect((await acl(own)).protected).toBe(false)
     }
   } finally {
     try {
@@ -212,6 +213,23 @@ async function bait() {
   }
 }
 
+// Same host selection the removed runtime hardening used: prefer the
+// OS-shipped PowerShell 5.1, fall back to a pwsh.exe found on PATH.
+function powershellCommand() {
+  const systemRoot =
+    process.env.SystemRoot && /^[A-Za-z]:[\\/]/.test(process.env.SystemRoot)
+      ? path.win32.normalize(process.env.SystemRoot)
+      : "C:\\Windows"
+  const system = path.win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+  if (existsSync(system)) return system
+  const core = process.env.PATH?.split(path.delimiter)
+    .filter(path.isAbsolute)
+    .map((directory) => path.join(directory, "pwsh.exe"))
+    .find(existsSync)
+  if (!core) throw new Error("ACL snapshot requires system PowerShell 5.1 or PowerShell 7")
+  return core
+}
+
 async function snapshot(directory: string) {
   return Promise.all(
     ["", ...(await readdir(directory, { recursive: true })).sort()].map(async (entry) => {
@@ -220,10 +238,9 @@ async function snapshot(directory: string) {
       const security =
         process.platform === "win32"
           ? await (async () => {
-              const { FileModeWindows } = await import("@opencode/util/file-mode-windows")
               const security = await execute(
                 [
-                  FileModeWindows.command(),
+                  powershellCommand(),
                   "-NoProfile",
                   "-NonInteractive",
                   "-Command",

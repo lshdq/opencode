@@ -29,25 +29,62 @@ export function apply(db: Database) {
     if (tables.some((table) => table.name === "session" || table.name === "session_v2"))
       return yield* applyOnly(db, migrations)
     if (tables.length > 0) return yield* Effect.die(new Error("Database is not empty and has no session table"))
+    yield* bootstrap(db)
+  })
+}
+
+// Multi-user hosts point several processes at one shared database file, and
+// the Database layer's semaphore only serializes within a process: two
+// processes can both read an empty sqlite_master before either commits. SQLite
+// itself serializes the bootstrap transactions, so the loser rolls back
+// atomically and adopts the winner's committed schema instead of dying on it.
+function bootstrap(db: Database) {
+  return Effect.gen(function* () {
     const started = Date.now()
     yield* Effect.logInfo("database schema bootstrap started", { migrations: migrations.length })
-    yield* db.transaction((tx) =>
-      Effect.gen(function* () {
-        yield* schema.up(tx)
-        yield* tx.run(
-          sql`CREATE TABLE ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL)`,
-        )
-        yield* Effect.forEach(migrations, (migration) =>
-          tx.run(
-            sql`INSERT INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
-          ),
-        )
-      }),
+    const outcome = yield* Effect.result(
+      db.transaction((tx) =>
+        Effect.gen(function* () {
+          yield* schema.up(tx)
+          yield* tx.run(
+            sql`CREATE TABLE ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL)`,
+          )
+          yield* Effect.forEach(migrations, (migration) =>
+            tx.run(
+              sql`INSERT INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${migration.id}, ${Date.now()})`,
+            ),
+          )
+        }),
+      ),
     )
-    yield* Effect.logInfo("database schema bootstrap completed", {
+    if (outcome._tag === "Success") {
+      return yield* Effect.logInfo("database schema bootstrap completed", {
+        migrations: migrations.length,
+        durationMs: Date.now() - started,
+      })
+    }
+    // A fresh read only sees committed schema, and the winner may still hold
+    // the write lock when the loser's transaction fails (SQLITE_BUSY), so poll
+    // a few times with short delays; the bounded wait stays far below
+    // busy_timeout (5s).
+    for (const delay of [0, 250, 500]) {
+      if (delay > 0) yield* Effect.sleep(delay)
+      const winner = yield* db.get(
+        sql`SELECT name FROM sqlite_master WHERE type = 'table' AND (name = ${"session"} OR name = ${"session_v2"})`,
+      )
+      if (!winner) continue
+      yield* Effect.logInfo("database schema bootstrap committed by concurrent process", {
+        migrations: migrations.length,
+        durationMs: Date.now() - started,
+      })
+      return yield* applyOnly(db, migrations)
+    }
+    yield* Effect.logError("database schema bootstrap failed", {
       migrations: migrations.length,
       durationMs: Date.now() - started,
+      error: outcome.failure,
     })
+    return yield* Effect.fail(outcome.failure)
   })
 }
 
@@ -131,16 +168,28 @@ export function applyOnly(db: Database, input: Migration[]) {
               yield* relaxForeignKeys
               yield* apply.pipe(Effect.ensuring(restoreForeignKeys.pipe(Effect.orDie)))
             })
-      yield* run.pipe(
-        Effect.tapError((error) =>
-          Effect.logError("database migration failed", {
-            migration: migration.id,
-            durationMs: Date.now() - started,
-            error,
-          }),
-        ),
-      )
-      yield* Effect.logInfo("database migration completed", {
+      const outcome = yield* Effect.result(run)
+      if (outcome._tag === "Success") {
+        yield* Effect.logInfo("database migration completed", {
+          migration: migration.id,
+          durationMs: Date.now() - started,
+        })
+        continue
+      }
+      // Processes sharing one database file (multi-user hosts) also race
+      // individual migration transactions. The loser's rollback is atomic, so
+      // when a fresh journal read finds the winner's record the migration is
+      // done; only a missing record means this failure is real.
+      const recorded = yield* db.get(sql`SELECT id FROM ${sql.identifier("migration")} WHERE id = ${migration.id}`)
+      if (!recorded) {
+        yield* Effect.logError("database migration failed", {
+          migration: migration.id,
+          durationMs: Date.now() - started,
+          error: outcome.failure,
+        })
+        return yield* Effect.fail(outcome.failure)
+      }
+      yield* Effect.logInfo("database migration committed by concurrent process", {
         migration: migration.id,
         durationMs: Date.now() - started,
       })

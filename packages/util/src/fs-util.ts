@@ -8,8 +8,6 @@ import { Glob } from "./glob.js"
 import { serviceUse } from "./effect/service-use.js"
 import { makeGlobalNode } from "./effect/app-node.js"
 import { filesystem } from "./effect/app-node-platform.js"
-import { FileMode } from "./file-mode.js"
-import { FileModeEffect } from "./file-mode-effect.js"
 import { sameDirectory } from "./path.js"
 
 export namespace FSUtil {
@@ -128,18 +126,8 @@ export namespace FSUtil {
 
       const writeJson = Effect.fn("FileSystem.writeJson")(function* (path: string, data: unknown, mode?: number) {
         const content = JSON.stringify(data, null, 2)
-        if (process.platform === "win32" && FileMode.privateMode(mode)) {
-          yield* FileModeEffect.run((signal) => FileMode.prepare(path, { signal })).pipe(
-            Effect.mapError((cause) => new FileSystemError({ method: "writeJson permissions", cause })),
-          )
-        }
         yield* fs.writeFileString(path, content)
-        if (process.platform === "win32" && FileMode.privateMode(mode) && mode !== 0o600) {
-          yield* FileModeEffect.run((signal) => FileMode.apply(path, mode, signal)).pipe(
-            Effect.mapError((cause) => new FileSystemError({ method: "writeJson permissions", cause })),
-          )
-        }
-        if (mode && !(process.platform === "win32" && FileMode.privateMode(mode))) yield* fs.chmod(path, mode)
+        if (mode) yield* fs.chmod(path, mode)
       })
 
       const ensureDir = Effect.fn("FileSystem.ensureDir")(function* (path: string) {
@@ -158,12 +146,6 @@ export namespace FSUtil {
         content: string | Uint8Array,
         mode?: number,
       ) {
-        if (process.platform === "win32" && FileMode.privateMode(mode)) {
-          yield* ensureDir(dirname(path))
-          yield* FileModeEffect.run((signal) => FileMode.prepare(path, { signal })).pipe(
-            Effect.mapError((cause) => new FileSystemError({ method: "writeWithDirs permissions", cause })),
-          )
-        }
         const write = typeof content === "string" ? fs.writeFileString(path, content) : fs.writeFile(path, content)
 
         yield* write.pipe(
@@ -176,12 +158,7 @@ export namespace FSUtil {
               }),
           ),
         )
-        if (process.platform === "win32" && FileMode.privateMode(mode) && mode !== 0o600) {
-          yield* FileModeEffect.run((signal) => FileMode.apply(path, mode, signal)).pipe(
-            Effect.mapError((cause) => new FileSystemError({ method: "writeWithDirs permissions", cause })),
-          )
-        }
-        if (mode && !(process.platform === "win32" && FileMode.privateMode(mode))) yield* fs.chmod(path, mode)
+        if (mode) yield* fs.chmod(path, mode)
       })
 
       const scan = Effect.fn("FileSystem.scan")(function* (pattern: string, options?: Glob.Options) {

@@ -26,6 +26,7 @@ export type Options = {
   readonly hostname?: string
   readonly port?: number
   readonly cors?: readonly string[]
+  readonly autoLogin?: boolean
 }
 
 // The process effect lives until server shutdown; tracing it would parent every request to one process-lifetime trace.
@@ -70,6 +71,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       const config = options.mode === "service" ? yield* ServiceConfig.read() : {}
       const hostname = options.hostname ?? config.hostname ?? "127.0.0.1"
       const port = options.port ?? config.port ?? (options.mode === "service" ? ServiceConfig.defaultPort() : undefined)
+      const autoLogin = options.autoLogin ?? config.autoLogin ?? false
       const findIncumbent =
         serviceOptions !== undefined && port !== undefined
           ? Service.incumbent({ ...serviceOptions, url: serviceURL(hostname, port) })
@@ -107,6 +109,8 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
           hostname,
           port,
           cors: options.cors ?? config.cors,
+          autoLogin,
+          remote: config.remote !== undefined,
           password,
           pty: { handoff },
           simulation: truthy(process.env.OPENCODE_SIMULATE),

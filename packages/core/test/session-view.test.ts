@@ -191,9 +191,8 @@ describe("Session.view", () => {
       const targetLayer = AppNodeBuilder.build(
         LayerNode.group([Database.node, Bus.node, SessionProjector.node, SessionStore.node]),
         [
-          // tmpdirScoped owns this fresh database parent, unlike a user-supplied custom path.
           Database.node.replace(
-            Database.configured({ path: path.join(tmp.path, "target.sqlite"), privateDirectory: true }),
+            Database.configured({ path: path.join(tmp.path, "target.sqlite") }),
           ),
           Bus.node.replace(Bus.configured({ persist: true })),
         ],

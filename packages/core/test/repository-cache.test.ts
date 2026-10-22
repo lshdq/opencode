@@ -243,8 +243,7 @@ describe("RepositoryCache", () => {
 function cacheLayer(root: string) {
   return AppNodeBuilder.build(LayerNode.group([RepositoryCache.node, KV.node]), [
     Global.node.replace(Global.layerWith({ state: path.join(root, "state"), repos: path.join(root, "repos") })),
-    // Every caller supplies the fresh temporary root owned by withRemote.
-    Database.node.replace(Database.configured({ path: path.join(root, "cache.sqlite"), privateDirectory: true })),
+    Database.node.replace(Database.configured({ path: path.join(root, "cache.sqlite") })),
   ])
 }
 

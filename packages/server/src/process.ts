@@ -16,7 +16,7 @@ import { ServerAuth } from "./auth"
 import { isAllowedCorsOrigin } from "./cors"
 import { authorizedRequest, unauthorizedResponse } from "./middleware/authorization"
 import { withoutParentSpan } from "./request-tracing"
-import { createRoutes } from "./routes"
+import { createNodeRoutes } from "./routes"
 import { ServerInfo } from "./server-info"
 import { Status } from "./service-status"
 import type { ServerOptions } from "./options"
@@ -53,6 +53,11 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   const password = options.password
   if (!password) return yield* Effect.fail(new Error("Missing server password"))
   const hostname = options.hostname ?? "127.0.0.1"
+  // Fail before binding so an unsafe auto-login server can never briefly accept requests.
+  if (options.autoLogin === true && hostname !== "127.0.0.1")
+    return yield* Effect.fail(new Error("Auto-login requires the server hostname to be exactly 127.0.0.1"))
+  if (options.autoLogin === true && options.remote === true)
+    return yield* Effect.fail(new Error("Auto-login cannot be enabled while remote access is enabled"))
   const port = Option.fromNullishOr(options.port)
   const shutdown = yield* Latch.make()
   const status = yield* Status.make()
@@ -65,7 +70,15 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   }
   const urls = () => [...localURLs(), ...(remoteURLs?.() ?? [])]
   const application = yield* Ref.make(Option.none<App>())
-  const app = dispatch(password, status, application, options.app?.version ?? "unknown", urls, Global.Path.tmp)
+  const app = dispatch(
+    password,
+    options.autoLogin,
+    status,
+    application,
+    options.app?.version ?? "unknown",
+    urls,
+    Global.Path.tmp,
+  )
   // Request fibers may continue inbound trace context, but must not inherit the server startup parent.
   yield* bound.http
     .serve(
@@ -95,9 +108,10 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
 
   const boot = Effect.gen(function* () {
     const context = yield* Layer.buildWithScope(
-      createRoutes(
+      createNodeRoutes(
         {
           ...options,
+          hostname,
           password,
         },
         urls,
@@ -172,13 +186,18 @@ function addressInUse(error: unknown) {
 
 function dispatch(
   password: string,
+  autoLogin: boolean | undefined,
   status: Status.Interface,
   application: Ref.Ref<Option.Option<App>>,
   version: string,
   urls: () => ReadonlyArray<string>,
   tmp: string,
 ): App {
-  const auth = ServerAuth.Config.of({ password: Option.some(password), username: "opencode" })
+  const auth = ServerAuth.Config.of({
+    password: Option.some(password),
+    username: "opencode",
+    autoLogin,
+  })
   return Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest
     const url = new URL(request.url, "http://localhost")

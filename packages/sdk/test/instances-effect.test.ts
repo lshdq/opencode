@@ -39,8 +39,7 @@ it.live(
       const closed: number[] = []
       const executed: number[] = []
       const options: OpenCode.CreateOptions = {
-        // tmpdirScoped owns the parent across both host lifetimes.
-        database: { path: path.join(directory.path, "sessions.db"), privateDirectory: true },
+        database: { path: path.join(directory.path, "sessions.db") },
         app: { name: "instance-test", version: "1.2.3" },
         events: { persist: true },
         config: { directory: directory.path, project: false, content: "{}" },

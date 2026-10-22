@@ -18,9 +18,9 @@ async function install(
   input: { readonly path: string; readonly version: string; readonly sha256: string },
 ) {
   const root = path.join(bin, "opencode-pty")
-  await privateDirectory(root)
+  await secureDirectory(root)
   const directory = path.join(root, `${input.version}-${input.sha256.slice(0, 16)}`)
-  await privateDirectory(directory)
+  await secureDirectory(directory)
   const destination = path.join(directory, "opencode-pty")
   if (await validateIfPresent(destination, input.sha256)) return destination
 
@@ -45,7 +45,7 @@ async function install(
   return validate(destination, input.sha256)
 }
 
-async function privateDirectory(directory: string) {
+async function secureDirectory(directory: string) {
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const info = await lstat(directory)
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Unsafe opencode-pty directory: ${directory}`)

@@ -31,7 +31,8 @@ export interface BootOptions {
  *
  * Auth follows `createRoutes` semantics: `options.password` enforces Basic auth; omitting it
  * serves unauthenticated, so an embedder without a password must front the handler with its own
- * access control.
+ * access control. `options.autoLogin` is rejected because only the Node server process can
+ * enable it after validating its loopback listener boundary.
  *
  * Sessions whose execution claim was never released resume once the layer is built, exactly as
  * the Node server process does: a runtime that dies without teardown — an evicted Durable
@@ -39,6 +40,7 @@ export interface BootOptions {
  * next boot, and the sweep is a no-op when nothing is suspended.
  */
 export const make = Effect.fn("ServerFetch.make")(function* (options: ServerOptions = {}, boot: BootOptions = {}) {
+  if (options.autoLogin === true) return yield* Effect.fail(new Error("ServerFetch does not support auto-login"))
   const context = yield* Layer.build(
     createRoutes(options, () => [], boot.overrides ?? []).pipe(Layer.provide(HttpServer.layerServices)),
   )

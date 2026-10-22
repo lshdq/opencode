@@ -20,8 +20,6 @@ export interface Interface {
 
 export const Options = Schema.Struct({
   path: Schema.optional(Schema.String),
-  // Explicit authority to tighten an app-owned parent, never inferred for custom paths.
-  privateDirectory: Schema.optional(Schema.Boolean),
 })
 export type Options = typeof Options.Type
 
@@ -71,7 +69,7 @@ export function layer(options: Options = { path: ":memory:" }) {
     Effect.gen(function* () {
       const provide = (filename: string) =>
         databaseLayer(filename === ":memory:" ? Semaphore.make(1) : Effect.succeed(lockFor(filename))).pipe(
-          Layer.provide(sqliteLayer({ filename, privateDirectory: options.privateDirectory })),
+          Layer.provide(sqliteLayer({ filename })),
         )
       const filename = options.path ?? ":memory:"
       if (filename === ":memory:") return provide(filename)

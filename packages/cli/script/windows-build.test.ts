@@ -190,13 +190,12 @@ describe("Windows build isolation", () => {
   )
 
   test.skipIf(process.platform !== "win32")(
-    "prepares only owned data for custom DB, baseline and restored copies before SQLite creates files",
+    "custom DB, baseline and restored copies keep inherited ACLs when SQLite creates files",
     async () => {
-      const { FileMode } = await import("@opencode/util/file-mode")
       const { acl } = await import("../../util/test/fixture/file-acl")
       const parent = fixtureParent
       await mkdir(parent, { recursive: true })
-      const root = await mkdtemp(path.join(parent, "private-db-中文's-"))
+      const root = await mkdtemp(path.join(parent, "shared-db-中文's-"))
       const env = isolatedEnvironment(root)
       const sibling = path.join(root, "unrelated")
       try {
@@ -204,20 +203,18 @@ describe("Windows build isolation", () => {
         const before = await Promise.all([root, sibling].map(acl))
         const directory = await prepareIsolatedDatabaseDirectory(root)
         expect(directory).toBe(path.dirname(env.OPENCODE_DB))
-        // The production custom-directory path is check-only: it must now accept this directory.
-        await FileMode.directory(directory)
         const baseline = path.join(directory, "official-base.db")
         for (const file of [baseline, env.OPENCODE_DB]) {
           if (file !== baseline) await copyFile(baseline, file)
-          // Also models the official baseline producer, which has no privateDirectory option.
+          // The copied baseline models an externally produced database; the
+          // smoke DB models the runtime creating its own file. Both inherit.
           const db = new Database(file)
           try {
             db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS sentinel(value TEXT)")
             db.run("INSERT INTO sentinel VALUES (?)", ["synthetic-fixture"])
             for (const suffix of ["", "-wal", "-shm"]) {
               const found = await acl(file + suffix)
-              expect(found.rules.map((rule) => rule.sid)).toEqual([found.current])
-              expect(found.rules.every((rule) => rule.inherited && rule.allow)).toBe(true)
+              expect(found.protected).toBe(false)
             }
           } finally {
             db.close()
@@ -229,34 +226,10 @@ describe("Windows build isolation", () => {
         await copyFile(baseline, restored)
         expect(await sha256(restored)).toBe(await sha256(baseline))
         const found = await acl(restored)
-        expect(found.rules.map((rule) => rule.sid)).toEqual([found.current])
+        expect(found.protected).toBe(false)
         const after = await Promise.all([root, sibling].map(acl))
         expect(after.map((item) => item.sddl)).toEqual(before.map((item) => item.sddl))
         expect(await Bun.file(sibling).text()).toBe("untouched")
-      } finally {
-        await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
-      }
-    },
-    30_000,
-  )
-
-  test.skipIf(process.platform !== "win32")(
-    "refuses a redirected data directory instead of tightening an unrelated target",
-    async () => {
-      const { acl } = await import("../../util/test/fixture/file-acl")
-      const parent = fixtureParent
-      await mkdir(parent, { recursive: true })
-      const root = await mkdtemp(path.join(parent, "private-db-junction-"))
-      const outside = path.join(root, "outside")
-      try {
-        await mkdir(outside)
-        await Bun.write(path.join(outside, "sentinel"), "untouched")
-        const before = await Promise.all([outside, path.join(outside, "sentinel")].map(acl))
-        await symlink(outside, path.join(root, "data"), "junction")
-        await expect(prepareIsolatedDatabaseDirectory(root)).rejects.toThrow()
-        const after = await Promise.all([outside, path.join(outside, "sentinel")].map(acl))
-        expect(after.map((item) => item.sddl)).toEqual(before.map((item) => item.sddl))
-        expect(await Bun.file(path.join(outside, "sentinel")).text()).toBe("untouched")
       } finally {
         await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
       }

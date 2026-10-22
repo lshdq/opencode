@@ -5,20 +5,8 @@ import { isolatedEnvironment } from "../../script/windows-runtime"
 
 export const transpilerCache = path.join(os.tmpdir(), "opencode-test-transpiler-cache")
 
-// Only this fixture's freshly allocated root is owned, never a custom DB override's parent.
 export async function isolatedRoot(prefix: string) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
-  try {
-    if (process.platform === "win32") {
-      const { FileMode } = await import("@opencode/util/file-mode")
-      await FileMode.directory(root, { owned: true })
-      await FileMode.directory(root)
-    }
-    return root
-  } catch (error) {
-    await fs.rm(root, { recursive: true, force: true })
-    throw error
-  }
+  return fs.mkdtemp(path.join(os.tmpdir(), prefix))
 }
 
 export function isolatedEnv(root: string, overrides: Record<string, string | undefined> = {}) {

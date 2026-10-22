@@ -26,11 +26,12 @@ import { Global } from "@opencode/util/global"
 const run = <A, E>(
   effect: Effect.Effect<A, E, SqlClient.SqlClient | Global.Service>,
   global = Global.make({ data: path.join(process.cwd(), ".test-data") }),
+  filename = ":memory:",
 ) =>
   Effect.runPromise(
     effect.pipe(
       Effect.provideService(Global.Service, global),
-      Effect.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })),
+      Effect.provide(SqliteClient.layer({ filename, disableWAL: true })),
       Effect.scoped,
     ),
   )
@@ -61,6 +62,72 @@ const parkedClient = (arrived: Deferred.Deferred<void>, gate: Deferred.Deferred<
       })
     }),
   ).pipe(Layer.provide(SqliteClient.layer({ filename: ":memory:", disableWAL: true })), Layer.provide(Reactivity.layer))
+
+// A client over a shared database file that loses one cross-process bootstrap
+// race: apply()'s schema inspection still reads a stale empty snapshot and the
+// bootstrap transaction's first DDL fails like a lost write race. Recovery must
+// poll sqlite_master for the winner's committed schema and finish through
+// applyOnly instead of failing the whole apply.
+const losingBootstrapClient = (filename: string) =>
+  Layer.effect(
+    SqlClient.SqlClient,
+    Effect.gen(function* () {
+      const client = yield* SqlClient.SqlClient
+      const connection = yield* client.reserve
+      let staleInspection = true
+      let failedFirstDdl = false
+      const intercept = <A, E>(query: string, effect: Effect.Effect<A, E>): Effect.Effect<A, E> => {
+        if (staleInspection && query.includes("sqlite_master") && query.includes("substr")) {
+          staleInspection = false
+          return Effect.succeed([] as unknown as A)
+        }
+        if (!failedFirstDdl && query.includes("CREATE TABLE `account_state`")) {
+          failedFirstDdl = true
+          return Effect.fail(new Error("simulated concurrent bootstrap loser")) as unknown as Effect.Effect<A, E>
+        }
+        return effect
+      }
+      return yield* SqlClient.make({
+        acquirer: Effect.succeed({
+          ...connection,
+          execute: (query, params, transform) => intercept(query, connection.execute(query, params, transform)),
+          executeRaw: (query, params) => intercept(query, connection.executeRaw(query, params)),
+        }),
+        compiler: Statement.makeCompilerSqlite(),
+        spanAttributes: [],
+      })
+    }),
+  ).pipe(Layer.provide(SqliteClient.layer({ filename, disableWAL: true })), Layer.provide(Reactivity.layer))
+
+// A client whose first journal read misses the winner's records, reproducing
+// the applyOnly race between processes sharing one file: the loser's migration
+// transaction fails, and the fresh journal reread must adopt the winner's
+// record instead of failing the whole apply.
+const staleJournalClient = (filename: string) =>
+  Layer.effect(
+    SqlClient.SqlClient,
+    Effect.gen(function* () {
+      const client = yield* SqlClient.SqlClient
+      const connection = yield* client.reserve
+      let staleJournal = true
+      const intercept = <A, E>(query: string, effect: Effect.Effect<A, E>): Effect.Effect<A, E> => {
+        if (staleJournal && /^\s*select/i.test(query) && query.includes("migration") && !query.includes("WHERE")) {
+          staleJournal = false
+          return Effect.succeed([] as unknown as A)
+        }
+        return effect
+      }
+      return yield* SqlClient.make({
+        acquirer: Effect.succeed({
+          ...connection,
+          execute: (query, params, transform) => intercept(query, connection.execute(query, params, transform)),
+          executeRaw: (query, params) => intercept(query, connection.executeRaw(query, params)),
+        }),
+        compiler: Statement.makeCompilerSqlite(),
+        spanAttributes: [],
+      })
+    }),
+  ).pipe(Layer.provide(SqliteClient.layer({ filename, disableWAL: true })), Layer.provide(Reactivity.layer))
 
 describe("DatabaseMigration", () => {
   test("defaults missing workspace names while preserving legacy workspace data", async () => {
@@ -131,10 +198,9 @@ describe("DatabaseMigration", () => {
 
     await Effect.runPromise(
       Effect.all(
-        // Both independent layers open the same parent owned by this tmpdir fixture.
         [
-          Database.layer({ path: filename, privateDirectory: true }),
-          Database.layer({ path: filename, privateDirectory: true }),
+          Database.layer({ path: filename }),
+          Database.layer({ path: filename }),
         ].map((layer) => Effect.scoped(Layer.build(layer))),
         { concurrency: "unbounded" },
       ).pipe(Effect.provideService(Global.Service, Global.make({ data: tmp.path }))),
@@ -161,6 +227,77 @@ describe("DatabaseMigration", () => {
         yield* Fiber.join(parked)
       }).pipe(
         Effect.provideService(Global.Service, Global.make({ data: path.join(process.cwd(), ".test-data") })),
+        Effect.scoped,
+      ),
+    )
+  })
+
+  test("adopts the winner's schema when the bootstrap transaction loses a cross-process race", async () => {
+    await using tmp = await tmpdir()
+    const filename = path.join(tmp.path, "bootstrap-race.sqlite")
+
+    // The winner bootstraps the shared file first.
+    await run(
+      Effect.gen(function* () {
+        yield* DatabaseMigration.apply(yield* makeDb)
+      }),
+      Global.make({ data: tmp.path }),
+      filename,
+    )
+
+    // The loser reads a stale empty snapshot, its bootstrap transaction fails,
+    // and apply must recover through the sqlite_master poll and applyOnly.
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* DatabaseMigration.apply(db)
+        const journal = yield* db.all<{ id: string }>(sql`SELECT id FROM ${sql.identifier("migration")}`)
+        expect(journal).toHaveLength(migrations.length)
+        expect(
+          yield* db.get(sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${"session_v2"}`),
+        ).toEqual({ name: "session_v2" })
+      }).pipe(
+        Effect.provideService(Global.Service, Global.make({ data: tmp.path })),
+        Effect.provide(losingBootstrapClient(filename)),
+        Effect.scoped,
+      ),
+    )
+  })
+
+  test("treats a failed migration as already applied when a concurrent process recorded it", async () => {
+    await using tmp = await tmpdir()
+    const filename = path.join(tmp.path, "migration-race.sqlite")
+    const global = Global.make({ data: tmp.path })
+    const raced: DatabaseMigration.Migration = {
+      id: "20261022000000_concurrent_winner",
+      up: () => Effect.fail(new Error("simulated migration race loser")),
+    }
+
+    // The winner completes the shared file and records the raced migration.
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* DatabaseMigration.apply(db)
+        yield* db.run(
+          sql`INSERT INTO ${sql.identifier("migration")} (id, time_completed) VALUES (${raced.id}, ${Date.now()})`,
+        )
+      }),
+      global,
+      filename,
+    )
+
+    // The loser's journal read misses the record, its migration fails, and the
+    // fresh reread must adopt the winner's record instead of failing.
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* DatabaseMigration.applyOnly(db, [raced])
+        expect(
+          yield* db.get(sql`SELECT id FROM ${sql.identifier("migration")} WHERE id = ${raced.id}`),
+        ).toEqual({ id: raced.id })
+      }).pipe(
+        Effect.provideService(Global.Service, global),
+        Effect.provide(staleJournalClient(filename)),
         Effect.scoped,
       ),
     )

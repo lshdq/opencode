@@ -59,6 +59,31 @@ test("service disabled accepts only booleans without changing configuration on i
   }
 })
 
+test("auto-login service config persists, validates booleans, and defaults off for old files", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-auto-login-config-"))
+  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
+    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
+  try {
+    expect(await run(ServiceConfig.get("auto-login"))).toBe("false")
+    await expect(run(ServiceConfig.set("auto-login", "yes"))).rejects.toThrow("Auto-login must be true or false")
+    expect(await run(ServiceConfig.read())).toEqual({})
+
+    await run(ServiceConfig.password("secret"))
+    await run(ServiceConfig.set("auto-login", "true"))
+    expect(await run(ServiceConfig.read())).toEqual({ password: "secret", autoLogin: true })
+    expect(await run(ServiceConfig.get("auto-login"))).toBe("true")
+
+    await run(ServiceConfig.unset("auto-login"))
+    expect(await run(ServiceConfig.read())).toEqual({ password: "secret" })
+    await fs.mkdir(path.dirname(path.join(root, "config", ServiceConfig.filename())), { recursive: true })
+    await fs.writeFile(path.join(root, "config", ServiceConfig.filename()), JSON.stringify({ hostname: "127.0.0.1" }))
+    expect(await run(ServiceConfig.get("auto-login"))).toBe("false")
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 // Enabling remote creates a real tunnel, so only the paths that stay local are covered here.
 test("service remote accepts only booleans and persists across set and unset", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-remote-config-"))
@@ -417,6 +442,30 @@ test("configured managed service port overrides the channel default", async () =
   }
 }, 30_000)
 
+test("managed service applies persisted auto-login configuration", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-auto-login-"))
+  const port = await availablePort()
+  const env = { ...serviceEnv(root), OPENCODE_DB: ":memory:" }
+  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
+  const config = path.join(root, "config", "opencode", ServiceConfig.filename())
+  await fs.mkdir(path.dirname(config), { recursive: true })
+  await fs.writeFile(config, JSON.stringify({ port, autoLogin: true }))
+  const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
+    env,
+    stderr: "pipe",
+    stdout: "ignore",
+  })
+  try {
+    const info = await waitForInfo(registration)
+    const response = await waitForUnauthenticatedInfo(info.url)
+    expect(await response.json()).toMatchObject({ pid: info.pid, urls: [info.url] })
+  } finally {
+    owner.kill("SIGTERM")
+    await owner.exited
+    await fs.rm(root, { recursive: true, force: true })
+  }
+}, 30_000)
+
 test.each([
   { args: [], origins: ["http://192.0.2.10:3001", "https://configured.example.com"] },
   {
@@ -726,6 +775,16 @@ async function waitForFailed(info: Info) {
     await Bun.sleep(50)
   }
   throw new Error("Timed out waiting for service boot failure")
+}
+
+async function waitForUnauthenticatedInfo(url: string) {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    const response = await fetch(new URL("/api/info", url)).catch(() => undefined)
+    if (response?.status === 200) return response
+    await response?.arrayBuffer()
+    await Bun.sleep(50)
+  }
+  throw new Error("Timed out waiting for auto-login service readiness")
 }
 
 async function availablePort() {

@@ -34,3 +34,10 @@ test("accepts an optional CORS allowlist", () => {
   ])
   expect(Option.isNone(decode({ cors: "http://192.168.1.10:3001" }))).toBe(true)
 })
+
+test("accepts auto-login and remote access controls", () => {
+  expect(Option.getOrThrow(decode({ autoLogin: true, remote: false }))).toMatchObject({
+    autoLogin: true,
+    remote: false,
+  })
+})

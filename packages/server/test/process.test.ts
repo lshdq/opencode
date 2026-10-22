@@ -1,5 +1,5 @@
 import { expect } from "bun:test"
-import { Effect } from "effect"
+import { Cause, Effect, Exit } from "effect"
 import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { it } from "../../core/test/lib/effect"
 import { ServerProcess } from "../src/process"
@@ -165,6 +165,47 @@ it.live("authenticates API requests behind the frontend transform while allowing
       }),
     )
   }),
+)
+
+it.live("allows unauthenticated requests only for explicitly enabled loopback auto-login", () =>
+  Effect.gen(function* () {
+    const server = yield* ServerProcess.start<never, never>({
+      hostname: "127.0.0.1",
+      port: 0,
+      password: "secret",
+      autoLogin: true,
+      app: { version: "test-version" },
+      database: { path: ":memory:" },
+    })
+    const response = yield* Effect.promise(() => fetch(new URL("/api/info", HttpServer.formatAddress(server.address))))
+    expect(response.status).toBe(200)
+  }),
+)
+
+it.live("rejects auto-login for non-loopback hosts and remote access", () =>
+  Effect.forEach(
+    [
+      { hostname: "0.0.0.0", message: "exactly 127.0.0.1" },
+      { hostname: "::", message: "exactly 127.0.0.1" },
+      { hostname: "192.168.1.20", message: "exactly 127.0.0.1" },
+      { hostname: "127.0.0.1", remote: true, message: "remote access" },
+    ],
+    (input) =>
+      Effect.gen(function* () {
+        const result = yield* ServerProcess.start<never, never>({
+          hostname: input.hostname,
+          port: 0,
+          password: "secret",
+          autoLogin: true,
+          remote: input.remote,
+          app: { version: "test-version" },
+          database: { path: ":memory:" },
+        }).pipe(Effect.exit)
+        expect(Exit.isFailure(result)).toBe(true)
+        if (Exit.isFailure(result))
+          expect(Cause.squash(result.cause)).toMatchObject({ message: expect.stringContaining(input.message) })
+      }),
+  ),
 )
 
 it.live("pairing links sign in browsers with a cookie and API clients with a token", () =>

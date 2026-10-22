@@ -50,6 +50,34 @@ http://127.0.0.1:49374
 
 You can change this config with the `opencode service` command.
 
+### Automatic local login
+
+For a deliberately trusted loopback server, enable automatic login explicitly:
+
+```bash
+$ opencode serve --auto-login --hostname 127.0.0.1 --port 4096
+```
+
+Automatic login accepts browser and API requests without a password. It is only
+allowed when the server hostname is exactly `127.0.0.1` and OpenTunnel remote
+access is off. The server rejects `0.0.0.0`, `::`, LAN addresses, and remote
+access instead of silently falling back to a less safe mode.
+
+SSH port forwarding remains inside this trust boundary: clients using a local
+forward to the server's `127.0.0.1` port are treated as local clients. Anyone
+who can access that loopback port, including another local process, can use the
+server without authentication.
+
+The shared background service can persist the same setting:
+
+```bash
+$ opencode service set auto-login true
+$ opencode service start
+```
+
+It still requires the service hostname to be exactly `127.0.0.1` and remote
+access to be disabled. Turn it off with `opencode service unset auto-login`.
+
 ### Remote access
 
 To connect from anywhere, pair through an [OpenTunnel](https://github.com/anomalyco/opentunnel)

@@ -7,8 +7,7 @@ import { OpenCode, Session, SessionMessage } from "../src"
 
 const metadata = Schema.decodeUnknownSync(Schema.Struct({ account: Schema.String }))
 const hostOptions = (directory: string) => ({
-  // All callers pass the fresh root owned by their tmpdir fixture.
-  database: { path: join(directory, "opencode.sqlite"), privateDirectory: true },
+  database: { path: join(directory, "opencode.sqlite") },
   config: { directory, project: false, content: "{}" },
   models: { fetch: false },
   fs: { filewatcher: false },
@@ -50,7 +49,7 @@ test("Promise instances are lazy, share by key and Location, and stay isolated b
     }
     return OpenCode.create({
       ...hostOptions(directory.path),
-      database: { path: join(directory.path, `${name}.sqlite`), privateDirectory: true },
+      database: { path: join(directory.path, `${name}.sqlite`) },
       instances,
     })
   }
