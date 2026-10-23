@@ -2,11 +2,12 @@ import { describe, expect } from "bun:test"
 import { $ } from "bun"
 import fs from "fs/promises"
 import path from "path"
-import { Effect, Stream } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
 import { Database } from "@opencode/core/database/database"
+import { Git } from "@opencode/core/git"
 import { Project } from "@opencode/core/project"
 import { ProjectSchema } from "@opencode/core/project/schema"
 import { ProjectTable } from "@opencode/core/project/sql"
@@ -16,7 +17,8 @@ import { initGit } from "./fixture/git"
 import { tmpdir } from "./fixture/tmpdir"
 import { testEffect } from "./lib/effect"
 
-const it = testEffect(AppNodeBuilder.build(LayerNode.group([Project.node, Database.node, Bus.node])))
+const appLayer = AppNodeBuilder.build(LayerNode.group([Project.node, Database.node, Bus.node]))
+const it = testEffect(appLayer)
 
 describe("Project.list", () => {
   it.effect("returns complete projects ordered by recent activity", () =>
@@ -336,6 +338,21 @@ async function rootCommit(dir: string) {
   return (await $`git rev-list --max-parents=0 HEAD`.cwd(dir).text()).trim()
 }
 
+// A Git layer whose repo discovery always fails, matching how dubious ownership or a
+// missing git binary behaves for a user who does not own the checkout.
+const gitDiscoveryFailure = Effect.map(
+  Git.Service,
+  (git) =>
+    Layer.succeed(
+      Git.Service,
+      Git.Service.of({ ...git, repo: { ...git.repo, discover: () => Effect.succeed(undefined) } }),
+    ),
+).pipe(Effect.provide(AppNodeBuilder.build(Git.node)))
+
+const gitlessProjectLayer = Effect.map(gitDiscoveryFailure, (failing) =>
+  AppNodeBuilder.build(LayerNode.group([Project.node, Database.node, Bus.node]), [Git.node.replace(failing)]),
+)
+
 describe("Project.resolve", () => {
   it.live("creates distinct deterministic projects for exact markerless directories", () =>
     Effect.gen(function* () {
@@ -592,7 +609,7 @@ describe("Project.resolve", () => {
     }),
   )
 
-  it.live("does not write the cache while resolving", () =>
+  it.live("caches the resolved id beside the VCS metadata", () =>
     Effect.gen(function* () {
       const tmp = yield* Effect.acquireRelease(
         Effect.promise(() => tmpdir()),
@@ -600,10 +617,122 @@ describe("Project.resolve", () => {
       )
       yield* Effect.promise(() => initRepo(tmp.path, { commit: true, remote: "git@github.com:owner/repo.git" }))
       const project = yield* Project.Service
+      const cache = path.join(tmp.path, ".git", "opencode")
 
+      const result = yield* project.resolve(abs(tmp.path))
+
+      expect(result.id).toBe(remoteID("github.com/owner/repo"))
+      expect((yield* Effect.promise(() => Bun.file(cache).text())).trim()).toBe(result.id)
+
+      // An unchanged cache entry is not rewritten.
+      const written = yield* Effect.promise(() => fs.stat(cache))
       yield* project.resolve(abs(tmp.path))
+      const rewritten = yield* Effect.promise(() => fs.stat(cache))
+      expect(rewritten.mtimeMs).toBe(written.mtimeMs)
+    }),
+  )
 
-      expect(yield* Effect.promise(() => Bun.file(path.join(tmp.path, ".git", "opencode")).exists())).toBe(false)
+  // The git-discovery-failure tests run on a bare runner: under the module layer an
+  // inner Effect.provide would fork the memo map and reuse its already-built Project
+  // service, silently bypassing the Git replacement.
+  testEffect(Layer.empty).live("resolves through the cached id when git discovery fails", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      yield* Effect.promise(() => initRepo(tmp.path, { commit: true, remote: "git@github.com:owner/repo.git" }))
+      const cache = path.join(tmp.path, ".git", "opencode")
+      const owned = yield* Effect.gen(function* () {
+        const project = yield* Project.Service
+        return yield* project.resolve(abs(tmp.path))
+      }).pipe(Effect.provide(appLayer))
+      expect((yield* Effect.promise(() => Bun.file(cache).text())).trim()).toBe(owned.id)
+
+      yield* Effect.gen(function* () {
+        const project = yield* Project.Service
+        const db = (yield* Database.Service).db
+        const result = yield* project.resolve(abs(tmp.path))
+
+        expect(result.id).toBe(owned.id)
+        expect(result.previous).toBe(owned.id)
+        expect(result.vcs?.type).toBe("git")
+        expect(result.directory).toBe(yield* real(tmp.path))
+        expect(result.canonical).toBe(yield* real(tmp.path))
+        const rows = yield* db.select().from(ProjectTable).all().pipe(Effect.orDie)
+        expect(rows.map((row) => row.id)).toEqual([owned.id])
+        expect(rows[0]?.vcs).toBe("git")
+      }).pipe(Effect.provide(yield* gitlessProjectLayer))
+    }),
+  )
+
+  testEffect(Layer.empty).live("falls back to the directory hash when git discovery fails without a cache", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      yield* Effect.promise(() => initRepo(tmp.path, { commit: true, remote: "git@github.com:owner/repo.git" }))
+      yield* Effect.gen(function* () {
+        const project = yield* Project.Service
+        const result = yield* project.resolve(abs(tmp.path))
+
+        const directory = yield* real(tmp.path)
+        expect(result.id).toBe(Project.ID.make(Hash.fast(`directory:${directory}`)))
+        expect(result.id).not.toBe(remoteID("github.com/owner/repo"))
+        expect(result.vcs).toBeUndefined()
+        expect(yield* Effect.promise(() => Bun.file(path.join(tmp.path, ".git", "opencode")).exists())).toBe(false)
+      }).pipe(Effect.provide(yield* gitlessProjectLayer))
+    }),
+  )
+
+  testEffect(Layer.empty).live("falls back to the directory hash for a linked worktree when git discovery fails", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      const worktree = `${tmp.path}-worktree`
+      yield* Effect.addFinalizer(() =>
+        Effect.promise(() => $`rm -rf ${worktree}`.quiet().nothrow()).pipe(Effect.ignore),
+      )
+      yield* Effect.promise(() => initRepo(tmp.path, { commit: true, remote: "git@github.com:owner/repo.git" }))
+      const owned = yield* Effect.gen(function* () {
+        const project = yield* Project.Service
+        return yield* project.resolve(abs(tmp.path))
+      }).pipe(Effect.provide(appLayer))
+      yield* Effect.promise(() => $`git worktree add ${worktree} -b test-${Date.now()}`.cwd(tmp.path).quiet())
+
+      yield* Effect.gen(function* () {
+        const project = yield* Project.Service
+        const result = yield* project.resolve(abs(worktree))
+
+        // The worktree's `.git` is a file, so reading <worktree>/.git/opencode fails and
+        // resolution keeps the markerless behavior.
+        const directory = yield* real(worktree)
+        expect(result.id).toBe(Project.ID.make(Hash.fast(`directory:${directory}`)))
+        expect(result.id).not.toBe(owned.id)
+        expect(result.vcs).toBeUndefined()
+      }).pipe(Effect.provide(yield* gitlessProjectLayer))
+    }),
+  )
+
+  it.live("keeps resolving when the cache location is unwritable", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      yield* Effect.promise(() => initRepo(tmp.path, { commit: true, remote: "git@github.com:owner/repo.git" }))
+      // A directory at the cache path makes both the read and the write fail.
+      yield* Effect.promise(() => fs.mkdir(path.join(tmp.path, ".git", "opencode")))
+      const project = yield* Project.Service
+
+      const result = yield* project.resolve(abs(tmp.path))
+
+      expect(result.id).toBe(remoteID("github.com/owner/repo"))
+      expect(result.previous).toBeUndefined()
+      expect(result.vcs?.type).toBe("git")
     }),
   )
 
@@ -694,6 +823,72 @@ describe("Project.resolve", () => {
 
       expect(result.vcs?.type).toBe("hg")
       expect(result.id).toBe(Project.ID.make("global"))
+    }),
+  )
+
+  it.live("does not cache the global fallback id and converges once the repo gains a root commit", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      yield* Effect.promise(() => initRepo(tmp.path))
+      const project = yield* Project.Service
+      const cache = path.join(tmp.path, ".git", "opencode")
+
+      const degenerate = yield* project.resolve(abs(tmp.path))
+      expect(degenerate.id).toBe(Project.ID.global)
+      expect(yield* Effect.promise(() => Bun.file(cache).exists())).toBe(false)
+
+      yield* Effect.promise(() => $`git commit --allow-empty -m root`.cwd(tmp.path).quiet())
+      const converged = yield* project.resolve(abs(tmp.path))
+
+      const root = yield* Effect.promise(() => rootCommit(tmp.path))
+      expect(converged.id).toBe(Project.ID.make(root))
+      expect(converged.id).not.toBe(Project.ID.global)
+      expect((yield* Effect.promise(() => Bun.file(cache).text())).trim()).toBe(root)
+    }),
+  )
+
+  testEffect(Layer.empty).live("ignores corrupted cache content when git discovery fails", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      yield* Effect.promise(() => initRepo(tmp.path, { commit: true, remote: "git@github.com:owner/repo.git" }))
+      yield* Effect.promise(() =>
+        Bun.write(path.join(tmp.path, ".git", "opencode"), "not an id\nsecond line"),
+      )
+      yield* Effect.gen(function* () {
+        const project = yield* Project.Service
+        const result = yield* project.resolve(abs(tmp.path))
+
+        const directory = yield* real(tmp.path)
+        expect(result.id).toBe(Project.ID.make(Hash.fast(`directory:${directory}`)))
+        expect(result.previous).toBeUndefined()
+        expect(result.vcs).toBeUndefined()
+      }).pipe(Effect.provide(yield* gitlessProjectLayer))
+    }),
+  )
+
+  it.live("ignores corrupted cache content on the normal git path", () =>
+    Effect.gen(function* () {
+      const tmp = yield* Effect.acquireRelease(
+        Effect.promise(() => tmpdir()),
+        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+      )
+      yield* Effect.promise(() => initRepo(tmp.path, { commit: true, remote: "git@github.com:owner/repo.git" }))
+      yield* Effect.promise(() => Bun.write(path.join(tmp.path, ".git", "opencode"), "not an id\nsecond line"))
+      const project = yield* Project.Service
+
+      const result = yield* project.resolve(abs(tmp.path))
+
+      expect(result.previous).toBeUndefined()
+      expect(result.id).toBe(remoteID("github.com/owner/repo"))
+      expect((yield* Effect.promise(() => Bun.file(path.join(tmp.path, ".git", "opencode")).text())).trim()).toBe(
+        result.id,
+      )
     }),
   )
 

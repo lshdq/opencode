@@ -145,6 +145,7 @@ const layer = Layer.effect(
       const changed = replaced ?? unarchived
       if (changed) yield* bus.publish(ProjectSchema.Event.Updated, fromRow(changed))
       if (!project.vcs) return project
+      yield* storeCached(project.vcs.store, project.id)
       const directories: Array<{ projectID: ID; directory: AbsolutePath; strategy?: string }> = [
         { projectID: project.id, directory: project.canonical },
       ]
@@ -274,9 +275,23 @@ const layer = Layer.effect(
     const cached = Effect.fnUntraced(function* (dir: string) {
       return yield* fs.readFileString(path.join(dir, "opencode")).pipe(
         Effect.map((value) => value.trim()),
-        Effect.map((value) => (value ? ID.make(value) : undefined)),
+        // Corrupted or interleaved cache content must not become a Project ID; every
+        // legitimate cached ID (Hash.fast hex, root commit SHA, "global") is a single
+        // dot/hyphen/word token.
+        Effect.map((value) => (/^[\w.-]+$/.test(value) ? ID.make(value) : undefined)),
         Effect.orElseSucceed(() => undefined),
       )
+    })
+
+    // Refreshes the ID cached beside the VCS metadata so users who cannot run git
+    // (dubious ownership, missing binary) still resolve this checkout to the same
+    // Project. The write is best-effort: read-only stores must not fail resolution.
+    const storeCached = Effect.fnUntraced(function* (store: AbsolutePath, id: ID) {
+      // A degenerate resolution (no remote, no commits, hg unavailable) falls back to
+      // the global Project; caching it would pin the checkout to global forever.
+      if (id === ID.global) return
+      if ((yield* cached(store)) === id) return
+      yield* fs.writeFileString(path.join(store, "opencode"), `${id}\n`).pipe(Effect.orElseSucceed(() => undefined))
     })
 
     const remote = Effect.fnUntraced(function* (repo: Git.Repository) {
@@ -378,6 +393,26 @@ const layer = Layer.effect(
           canonical,
           vcs: { type: "git" as const, store: repo.commonDirectory },
         })
+      }
+
+      // A `.git` marker with failed discovery (dubious ownership, missing binary) keeps
+      // the checkout's identity through the ID the owner cached beside the VCS metadata.
+      // A linked worktree's `.git` is a file, so reading under it fails and the
+      // markerless fallback below applies unchanged.
+      if (native && path.basename(native) === ".git") {
+        const store = AbsolutePath.make(native)
+        const cachedID = yield* cached(store)
+        if (cachedID) {
+          const worktree = AbsolutePath.make(path.dirname(native))
+          return yield* persist({
+            previous: cachedID,
+            id: cachedID,
+            directory: worktree,
+            canonical: worktree,
+            // vcs must stay git here: an undefined vcs would downgrade the owner's row.
+            vcs: { type: "git" as const, store },
+          })
+        }
       }
 
       const hg = native && path.basename(native) === ".hg" ? yield* hgDiscover(AbsolutePath.make(native)) : undefined
