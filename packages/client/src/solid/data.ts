@@ -86,6 +86,7 @@ const messageIDFromEvent = (eventID: string) => eventID.replace(/^evt_/, "msg_")
 const messagePageLimit = 20
 // Trailing window for event bursts that each ask for the same refetch.
 export const settleMs = 150
+const MAX_SHELL_TOMBSTONES = 1024
 
 // Global MCP elicitations temporarily use "global" instead of a real session ID, so the
 // server cannot recover their Location when settling them. Preserve the event Location
@@ -284,8 +285,23 @@ export function createData(config: CreateDataInput) {
   )
   const messageIndex = new Map<string, Map<string, number>>()
   const sync = createSync()
+  // Shell list responses can be in flight while lifecycle events remove a shell. Keep a
+  // per-ID generation so an old response cannot republish a shell after it exits, even if
+  // the ID is created again before that response settles.
+  const shellTombstones = new Set<string>()
+  const shellVersions = new Map<string, number>()
   let activeUpdates: Map<string, DataSessionStatus | undefined> | undefined
   const pendingUpdates = new Map<string, Map<string, SessionInboxInfo | SessionInbox.Delivery | undefined>>()
+
+  function advanceShellVersion(id: string) {
+    shellVersions.set(id, (shellVersions.get(id) ?? 0) + 1)
+  }
+
+  function addShellTombstone(id: string) {
+    shellTombstones.add(id)
+    if (shellTombstones.size <= MAX_SHELL_TOMBSTONES) return
+    shellTombstones.delete(shellTombstones.values().next().value!)
+  }
 
   function setSessionActive(sessionID: string, status: DataSessionStatus) {
     activeUpdates?.set(sessionID, status)
@@ -1287,6 +1303,8 @@ export function createData(config: CreateDataInput) {
         ])
         break
       case "shell.created":
+        shellTombstones.delete(event.data.info.id)
+        advanceShellVersion(event.data.info.id)
         setStore("location", locationKey(location), (data) => ({
           shell: {
             ...data?.shell,
@@ -1296,6 +1314,8 @@ export function createData(config: CreateDataInput) {
         break
       case "shell.exited":
       case "shell.deleted":
+        addShellTombstone(event.data.id)
+        advanceShellVersion(event.data.id)
         setStore("location", locationKey(location), (data) => ({
           shell: Object.fromEntries(Object.entries(data?.shell ?? {}).filter(([id]) => id !== event.data.id)),
         }))
@@ -1373,11 +1393,26 @@ export function createData(config: CreateDataInput) {
 
   const vcs = locationResource("vcs", (location) => api().vcs.get({ location }))
   const shells = locationResource("shell", async (location) => {
+    const versions = new Map(shellVersions)
     const response = await api().shell.list({ location })
     const ref = { directory: response.location.directory }
+    const current = {
+      ...(store.location[locationKey(location)]?.shell ?? {}),
+      ...(store.location[locationKey(response.location)]?.shell ?? {}),
+    }
+    const data = Object.fromEntries(
+      response.data
+        .filter((info) => !shellTombstones.has(info.id) && shellVersions.get(info.id) === versions.get(info.id))
+        .map((info) => [info.id, { ...info, location: ref }]),
+    )
+    // Keep lifecycle entries created or updated after this request started. The list response is a snapshot and
+    // replacing the whole field would otherwise discard a newer shell that was not present in that snapshot.
+    Object.entries(current).forEach(([id, info]) => {
+      if (!shellTombstones.has(id) && shellVersions.get(id) !== versions.get(id)) data[id] = info
+    })
     return {
       location: response.location,
-      data: Object.fromEntries(response.data.map((info) => [info.id, { ...info, location: ref }])),
+      data,
     }
   })
 

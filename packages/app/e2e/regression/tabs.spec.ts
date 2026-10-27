@@ -539,6 +539,45 @@ test("a remote tab stays busy while a child session runs", async ({ page }) => {
   await expect(tabA.locator('[data-component="session-progress-indicator-v2"]')).toHaveCount(0)
 })
 
+test("a root tab stays busy while its background shell runs", async ({ page }) => {
+  const sessionID = "ses_tab_shell"
+  const directory = "C:/OpenCode/TabShell"
+  const shellID = "shell_tab_background"
+  const workspace = await openSession(page, {
+    name: "TabShell",
+    directory,
+    sessions: [{ id: sessionID, title: "Shell session" }],
+    sessionStatus: { [sessionID]: { type: "idle" } },
+    shellCommands: [
+      {
+        id: shellID,
+        status: "running",
+        command: "bun run check",
+        cwd: directory,
+        shell: "bash",
+        file: "output",
+        metadata: { sessionID },
+        time: { started: 1 },
+      },
+    ],
+  })
+  const tab = page.locator(`[data-titlebar-tab-slot]:has(a[href="${sessionHref(sessionID)}"])`)
+  const progress = tab.locator('[data-component="session-progress-indicator-v2"]')
+
+  await expect(progress).toBeVisible()
+
+  await workspace.push([
+    {
+      id: "evt_tab_shell_exited",
+      created: 2,
+      type: "shell.exited",
+      location: { directory },
+      data: { id: shellID, status: "exited", exit: 0 },
+    },
+  ])
+  await expect(progress).toHaveCount(0)
+})
+
 test("inactive tabs stay busy while work waits in their inbox, and pulse on a new prompt, as in the TUI", async ({
   page,
 }) => {

@@ -963,6 +963,10 @@ test("preserves sibling catalogs through location preload, branch, shell, and we
     emit({ type: "shell.created", location, data: { info: { ...shell, id: "sh_second" } } })
     expect(setup.data.shell.list().map((shell) => shell.id)).toEqual(["sh_first", "sh_second"])
     expect(setup.data.location.reference.list()).toBe(references)
+    emit({ type: "shell.exited", location, data: { id: "sh_second", exit: 0, status: "exited" } })
+    expect(setup.data.shell.list().map((shell) => shell.id)).toEqual(["sh_first"])
+    emit({ type: "shell.created", location, data: { info: { ...shell, id: "sh_second", command: "echo recreated" } } })
+    expect(setup.data.shell.list().map((shell) => shell.id)).toEqual(["sh_first", "sh_second"])
     emit({ type: "shell.deleted", location, data: { id: "sh_second" } })
     expect(setup.data.shell.list().map((shell) => shell.id)).toEqual(["sh_first"])
     expect(setup.data.shell.get(shell.id)).toBe(first)
@@ -986,6 +990,70 @@ test("preserves sibling catalogs through location preload, branch, shell, and we
       "/api/websearch/provider",
     ])
   } finally {
+    setup.dispose()
+  }
+})
+
+test("does not resurrect a shell from a list response that races its exit", async () => {
+  const location = { directory: "/project" }
+  const shell = {
+    id: "sh_race",
+    status: "running" as const,
+    command: "sleep 10",
+    cwd: location.directory,
+    shell: "/bin/sh",
+    file: "/shell-output",
+    metadata: { sessionID: "ses_shell" },
+    time: { started: 1 },
+  }
+  const newShell = { ...shell, id: "sh_created_during_list", command: "echo new" }
+  const requested = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const listeners = new Set<Parameters<CreateDataInput["event"]["listen"]>[0]>()
+  const api = OpenCode.make({
+    baseUrl: "http://opencode.local",
+    fetch: async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init)
+      if (new URL(request.url).pathname !== "/api/shell") throw new Error(`Unexpected request: ${request.url}`)
+      requested.resolve()
+      await release.promise
+      return Response.json({ location, data: [shell] })
+    },
+  })
+  const setup = createRoot((dispose) => ({
+    data: createData({
+      api: () => api,
+      directory: location.directory,
+      event: {
+        on: () => () => {},
+        listen(handler) {
+          listeners.add(handler)
+          return () => listeners.delete(handler)
+        },
+      },
+    }),
+    dispose,
+  }))
+  const emit = (details: OpenCodeEvent) => listeners.forEach((listener) => listener({ name: details.type, details }))
+
+  try {
+    const list = setup.data.shell.sync(location)
+    await requested.promise
+    emit({ type: "shell.created", location, data: { info: newShell } })
+    expect(setup.data.shell.get(newShell.id)).toMatchObject(newShell)
+    expect(setup.data.shell.listBySession("ses_shell").map((item) => item.id)).toEqual([newShell.id])
+
+    emit({ type: "shell.exited", location, data: { id: shell.id, exit: 0, status: "exited" } })
+    expect(setup.data.shell.get(shell.id)).toBeUndefined()
+    expect(setup.data.shell.listBySession("ses_shell").map((item) => item.id)).toEqual([newShell.id])
+
+    release.resolve()
+    await list
+    expect(setup.data.shell.get(shell.id)).toBeUndefined()
+    expect(setup.data.shell.get(newShell.id)).toMatchObject(newShell)
+    expect(setup.data.shell.listBySession("ses_shell").map((item) => item.id)).toEqual([newShell.id])
+  } finally {
+    release.resolve()
     setup.dispose()
   }
 })
