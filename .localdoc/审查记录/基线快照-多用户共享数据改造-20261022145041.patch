@@ -1,0 +1,634 @@
+diff --git a/packages/cli/src/commands/commands.ts b/packages/cli/src/commands/commands.ts
+index ba3454b6b9..a5eb645886 100644
+--- a/packages/cli/src/commands/commands.ts
++++ b/packages/cli/src/commands/commands.ts
+@@ -557,6 +557,10 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
+           Flag.withDescription("Additional allowed CORS origin (repeat for multiple origins)"),
+           Flag.atLeast(0),
+         ),
++        autoLogin: Flag.Boolean("auto-login").pipe(
++          Flag.withDescription("Allow unauthenticated access on 127.0.0.1 without remote access"),
++          Flag.optional,
++        ),
+         service: Flag.Boolean("service").pipe(Flag.withDefault(false)),
+         stdio: Flag.Boolean("stdio").pipe(Flag.withDefault(false)),
+       },
+diff --git a/packages/cli/src/commands/handlers/serve.ts b/packages/cli/src/commands/handlers/serve.ts
+index 5e1337a16a..31b7c51359 100644
+--- a/packages/cli/src/commands/handlers/serve.ts
++++ b/packages/cli/src/commands/handlers/serve.ts
+@@ -12,6 +12,7 @@ export default Runtime.handler(
+       hostname: Option.getOrUndefined(input.hostname),
+       port: Option.getOrUndefined(input.port),
+       cors: input.cors.length > 0 ? input.cors : undefined,
++      autoLogin: Option.getOrUndefined(input.autoLogin),
+     })
+   }),
+ )
+diff --git a/packages/cli/src/server-process.ts b/packages/cli/src/server-process.ts
+index f7c5af2abf..6576a827ec 100644
+--- a/packages/cli/src/server-process.ts
++++ b/packages/cli/src/server-process.ts
+@@ -26,6 +26,7 @@ export type Options = {
+   readonly hostname?: string
+   readonly port?: number
+   readonly cors?: readonly string[]
++  readonly autoLogin?: boolean
+ }
+ 
+ // The process effect lives until server shutdown; tracing it would parent every request to one process-lifetime trace.
+@@ -70,6 +71,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
+       const config = options.mode === "service" ? yield* ServiceConfig.read() : {}
+       const hostname = options.hostname ?? config.hostname ?? "127.0.0.1"
+       const port = options.port ?? config.port ?? (options.mode === "service" ? ServiceConfig.defaultPort() : undefined)
++      const autoLogin = options.autoLogin ?? config.autoLogin ?? false
+       const findIncumbent =
+         serviceOptions !== undefined && port !== undefined
+           ? Service.incumbent({ ...serviceOptions, url: serviceURL(hostname, port) })
+@@ -107,6 +109,8 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
+           hostname,
+           port,
+           cors: options.cors ?? config.cors,
++          autoLogin,
++          remote: config.remote !== undefined,
+           password,
+           pty: { handoff },
+           simulation: truthy(process.env.OPENCODE_SIMULATE),
+diff --git a/packages/cli/src/services/service-config.ts b/packages/cli/src/services/service-config.ts
+index a1cb19b3d8..451186f443 100644
+--- a/packages/cli/src/services/service-config.ts
++++ b/packages/cli/src/services/service-config.ts
+@@ -25,12 +25,13 @@ export const Info = Schema.Struct({
+   hostname: Schema.optional(Schema.String),
+   port: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(65_535))),
+   password: Schema.optional(Schema.String),
++  autoLogin: Schema.optional(Schema.Boolean),
+   cors: Schema.optional(Schema.Array(Schema.String)),
+   env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+ })
+ export type Info = typeof Info.Type
+ 
+-const keys = ["disabled", "remote", "hostname", "port", "password", "cors", "env"] as const
++const keys = ["disabled", "remote", "hostname", "port", "password", "auto-login", "cors", "env"] as const
+ type Key = (typeof keys)[number]
+ 
+ const decodeInfo = Schema.decodeUnknownEffect(Schema.fromJsonString(Info))
+@@ -128,6 +129,7 @@ function configKey(key: string): Key {
+     key === "hostname" ||
+     key === "port" ||
+     key === "password" ||
++    key === "auto-login" ||
+     key === "cors" ||
+     key === "env"
+   )
+@@ -256,6 +258,9 @@ export const get = Effect.fn("cli.service-config.get")(function* (key?: string,
+     case "password": {
+       return yield* password()
+     }
++    case "auto-login": {
++      return String((yield* read()).autoLogin ?? false)
++    }
+     case "cors": {
+       return JSON.stringify((yield* read()).cors ?? [], null, 2)
+     }
+@@ -307,6 +312,12 @@ export const set = Effect.fn("cli.service-config.set")(function* (key: string, v
+       yield* password(value)
+       return
+     }
++    case "auto-login": {
++      if (value !== "true" && value !== "false") throw new Error("Auto-login must be true or false")
++      yield* Service.stop(yield* options())
++      yield* write({ ...(yield* read()), autoLogin: value === "true" })
++      return
++    }
+     case "env": {
+       if (nestedValue === undefined) throw new Error("Usage: opencode service set env <key> <value>")
+       yield* Service.stop(yield* options())
+@@ -362,6 +373,12 @@ export const unset = Effect.fn("cli.service-config.unset")(function* (key: strin
+       yield* write(next)
+       return
+     }
++    case "auto-login": {
++      yield* Service.stop(yield* options())
++      const { autoLogin: _autoLogin, ...next } = yield* read()
++      yield* write(next)
++      return
++    }
+     case "env": {
+       if (name === undefined) throw new Error("Usage: opencode service unset env <key>")
+       yield* Service.stop(yield* options())
+diff --git a/packages/cli/test/cors.test.ts b/packages/cli/test/cors.test.ts
+index 92e5de1fb8..ff9230bbe2 100644
+--- a/packages/cli/test/cors.test.ts
++++ b/packages/cli/test/cors.test.ts
+@@ -1,7 +1,7 @@
+ import { NodeServices } from "@effect/platform-node"
+ import { Global } from "@opencode/util/global"
+ import { expect, test } from "bun:test"
+-import { Effect, Exit, FileSystem } from "effect"
++import { Effect, Exit, FileSystem, Option } from "effect"
+ import { Command } from "effect/cli"
+ import path from "node:path"
+ import { Commands } from "../src/commands/commands"
+@@ -122,3 +122,16 @@ test.each([{ args: ["--cors"] }, { args: ["--cors", ""] }])(
+     expect(Exit.isFailure(result)).toBe(true)
+   },
+ )
++
++test.each([
++  { args: [], autoLogin: undefined },
++  { args: ["--auto-login"], autoLogin: true },
++  { args: ["--auto-login=false"], autoLogin: false },
++])("serve parses the auto-login flag: $args", async ({ args, autoLogin }) => {
++  const received: (boolean | undefined)[] = []
++  const command = Commands.commands.serve.spec.pipe(
++    Command.withHandler((input) => Effect.sync(() => void received.push(Option.getOrUndefined(input.autoLogin)))),
++  )
++  await Effect.runPromise(Command.runWith(command, { version: "test" })(args).pipe(Effect.provide(NodeServices.layer)))
++  expect(received).toEqual([autoLogin])
++})
+diff --git a/packages/cli/test/service.test.ts b/packages/cli/test/service.test.ts
+index 27cb66e1db..11af9338fb 100644
+--- a/packages/cli/test/service.test.ts
++++ b/packages/cli/test/service.test.ts
+@@ -59,6 +59,31 @@ test("service disabled accepts only booleans without changing configuration on i
+   }
+ })
+ 
++test("auto-login service config persists, validates booleans, and defaults off for old files", async () => {
++  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-auto-login-config-"))
++  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
++  const run = <A, E>(effect: Effect.Effect<A, E, Global.Service | FileSystem.FileSystem>) =>
++    Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)))
++  try {
++    expect(await run(ServiceConfig.get("auto-login"))).toBe("false")
++    await expect(run(ServiceConfig.set("auto-login", "yes"))).rejects.toThrow("Auto-login must be true or false")
++    expect(await run(ServiceConfig.read())).toEqual({})
++
++    await run(ServiceConfig.password("secret"))
++    await run(ServiceConfig.set("auto-login", "true"))
++    expect(await run(ServiceConfig.read())).toEqual({ password: "secret", autoLogin: true })
++    expect(await run(ServiceConfig.get("auto-login"))).toBe("true")
++
++    await run(ServiceConfig.unset("auto-login"))
++    expect(await run(ServiceConfig.read())).toEqual({ password: "secret" })
++    await fs.mkdir(path.dirname(path.join(root, "config", ServiceConfig.filename())), { recursive: true })
++    await fs.writeFile(path.join(root, "config", ServiceConfig.filename()), JSON.stringify({ hostname: "127.0.0.1" }))
++    expect(await run(ServiceConfig.get("auto-login"))).toBe("false")
++  } finally {
++    await fs.rm(root, { recursive: true, force: true })
++  }
++})
++
+ // Enabling remote creates a real tunnel, so only the paths that stay local are covered here.
+ test("service remote accepts only booleans and persists across set and unset", async () => {
+   const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-remote-config-"))
+@@ -417,6 +442,30 @@ test("configured managed service port overrides the channel default", async () =
+   }
+ }, 30_000)
+ 
++test("managed service applies persisted auto-login configuration", async () => {
++  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-auto-login-"))
++  const port = await availablePort()
++  const env = { ...serviceEnv(root), OPENCODE_DB: ":memory:" }
++  const registration = path.join(root, "state", "opencode", ServiceConfig.filename())
++  const config = path.join(root, "config", "opencode", ServiceConfig.filename())
++  await fs.mkdir(path.dirname(config), { recursive: true })
++  await fs.writeFile(config, JSON.stringify({ port, autoLogin: true }))
++  const owner = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
++    env,
++    stderr: "pipe",
++    stdout: "ignore",
++  })
++  try {
++    const info = await waitForInfo(registration)
++    const response = await waitForUnauthenticatedInfo(info.url)
++    expect(await response.json()).toMatchObject({ pid: info.pid, urls: [info.url] })
++  } finally {
++    owner.kill("SIGTERM")
++    await owner.exited
++    await fs.rm(root, { recursive: true, force: true })
++  }
++}, 30_000)
++
+ test.each([
+   { args: [], origins: ["http://192.0.2.10:3001", "https://configured.example.com"] },
+   {
+@@ -728,6 +777,16 @@ async function waitForFailed(info: Info) {
+   throw new Error("Timed out waiting for service boot failure")
+ }
+ 
++async function waitForUnauthenticatedInfo(url: string) {
++  for (let attempt = 0; attempt < 400; attempt++) {
++    const response = await fetch(new URL("/api/info", url)).catch(() => undefined)
++    if (response?.status === 200) return response
++    await response?.arrayBuffer()
++    await Bun.sleep(50)
++  }
++  throw new Error("Timed out waiting for auto-login service readiness")
++}
++
+ async function availablePort() {
+   const server = Bun.serve({ port: 0, fetch: () => new Response() })
+   const port = server.port
+diff --git a/packages/server/src/auth.ts b/packages/server/src/auth.ts
+index 2dc0a19daf..340b83973d 100644
+--- a/packages/server/src/auth.ts
++++ b/packages/server/src/auth.ts
+@@ -11,13 +11,14 @@ export type DecodedCredentials = {
+ export type Info = {
+   readonly password: Option.Option<string>
+   readonly username: string
++  readonly autoLogin?: boolean
+ }
+ 
+ export const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+ 
+ export class Config extends Context.Service<Config, Info>()("@opencode/ServerAuthConfig") {
+-  static configLayer(input: Pick<Info, "password">) {
+-    return Layer.succeed(this, this.of({ ...input, username: "opencode" }))
++  static configLayer(input: Pick<Info, "password" | "autoLogin">) {
++    return Layer.succeed(this, this.of({ ...input, autoLogin: input.autoLogin === true, username: "opencode" }))
+   }
+ 
+   static get layer() {
+@@ -26,11 +27,13 @@ export class Config extends Context.Service<Config, Info>()("@opencode/ServerAut
+ }
+ 
+ export function required(config: Info) {
+-  return Option.isSome(config.password) && config.password.value !== ""
++  return config.autoLogin !== true && Option.isSome(config.password) && config.password.value !== ""
+ }
+ 
+ // Session tokens issued by pairing links are accepted anywhere the password is.
+ export function authorized(credentials: DecodedCredentials, config: Info) {
++  // ServerProcess validates the loopback and remote-access boundary before binding.
++  if (config.autoLogin === true) return true
+   if (Option.isNone(config.password) || credentials.username !== config.username) return false
+   const password = Redacted.value(credentials.password)
+   return password === config.password.value || verifySession(password, config)
+diff --git a/packages/server/src/fetch.ts b/packages/server/src/fetch.ts
+index e6aba4da56..88ebb471cf 100644
+--- a/packages/server/src/fetch.ts
++++ b/packages/server/src/fetch.ts
+@@ -31,7 +31,8 @@ export interface BootOptions {
+  *
+  * Auth follows `createRoutes` semantics: `options.password` enforces Basic auth; omitting it
+  * serves unauthenticated, so an embedder without a password must front the handler with its own
+- * access control.
++ * access control. `options.autoLogin` is rejected because only the Node server process can
++ * enable it after validating its loopback listener boundary.
+  *
+  * Sessions whose execution claim was never released resume once the layer is built, exactly as
+  * the Node server process does: a runtime that dies without teardown — an evicted Durable
+@@ -39,6 +40,7 @@ export interface BootOptions {
+  * next boot, and the sweep is a no-op when nothing is suspended.
+  */
+ export const make = Effect.fn("ServerFetch.make")(function* (options: ServerOptions = {}, boot: BootOptions = {}) {
++  if (options.autoLogin === true) return yield* Effect.fail(new Error("ServerFetch does not support auto-login"))
+   const context = yield* Layer.build(
+     createRoutes(options, () => [], boot.overrides ?? []).pipe(Layer.provide(HttpServer.layerServices)),
+   )
+diff --git a/packages/server/src/options.ts b/packages/server/src/options.ts
+index b5b9b8085a..6f47cd6327 100644
+--- a/packages/server/src/options.ts
++++ b/packages/server/src/options.ts
+@@ -14,6 +14,8 @@ export const ServerOptions = Schema.Struct({
+   hostname: Schema.optional(Schema.String),
+   port: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(65_535))),
+   password: Schema.optional(Schema.String),
++  autoLogin: Schema.optional(Schema.Boolean),
++  remote: Schema.optional(Schema.Boolean),
+   cors: Schema.optional(Schema.Array(Schema.String)),
+   simulation: Schema.optional(Schema.Boolean),
+   database: Schema.optional(Database.Options),
+diff --git a/packages/server/src/process.ts b/packages/server/src/process.ts
+index d7f79a7e65..0a930dc96b 100644
+--- a/packages/server/src/process.ts
++++ b/packages/server/src/process.ts
+@@ -16,7 +16,7 @@ import { ServerAuth } from "./auth"
+ import { isAllowedCorsOrigin } from "./cors"
+ import { authorizedRequest, unauthorizedResponse } from "./middleware/authorization"
+ import { withoutParentSpan } from "./request-tracing"
+-import { createRoutes } from "./routes"
++import { createNodeRoutes } from "./routes"
+ import { ServerInfo } from "./server-info"
+ import { Status } from "./service-status"
+ import type { ServerOptions } from "./options"
+@@ -53,6 +53,11 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
+   const password = options.password
+   if (!password) return yield* Effect.fail(new Error("Missing server password"))
+   const hostname = options.hostname ?? "127.0.0.1"
++  // Fail before binding so an unsafe auto-login server can never briefly accept requests.
++  if (options.autoLogin === true && hostname !== "127.0.0.1")
++    return yield* Effect.fail(new Error("Auto-login requires the server hostname to be exactly 127.0.0.1"))
++  if (options.autoLogin === true && options.remote === true)
++    return yield* Effect.fail(new Error("Auto-login cannot be enabled while remote access is enabled"))
+   const port = Option.fromNullishOr(options.port)
+   const shutdown = yield* Latch.make()
+   const status = yield* Status.make()
+@@ -65,7 +70,15 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
+   }
+   const urls = () => [...localURLs(), ...(remoteURLs?.() ?? [])]
+   const application = yield* Ref.make(Option.none<App>())
+-  const app = dispatch(password, status, application, options.app?.version ?? "unknown", urls, Global.Path.tmp)
++  const app = dispatch(
++    password,
++    options.autoLogin,
++    status,
++    application,
++    options.app?.version ?? "unknown",
++    urls,
++    Global.Path.tmp,
++  )
+   // Request fibers may continue inbound trace context, but must not inherit the server startup parent.
+   yield* bound.http
+     .serve(
+@@ -95,9 +108,10 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
+ 
+   const boot = Effect.gen(function* () {
+     const context = yield* Layer.buildWithScope(
+-      createRoutes(
++      createNodeRoutes(
+         {
+           ...options,
++          hostname,
+           password,
+         },
+         urls,
+@@ -172,13 +186,18 @@ function addressInUse(error: unknown) {
+ 
+ function dispatch(
+   password: string,
++  autoLogin: boolean | undefined,
+   status: Status.Interface,
+   application: Ref.Ref<Option.Option<App>>,
+   version: string,
+   urls: () => ReadonlyArray<string>,
+   tmp: string,
+ ): App {
+-  const auth = ServerAuth.Config.of({ password: Option.some(password), username: "opencode" })
++  const auth = ServerAuth.Config.of({
++    password: Option.some(password),
++    username: "opencode",
++    autoLogin,
++  })
+   return Effect.gen(function* () {
+     const request = yield* HttpServerRequest.HttpServerRequest
+     const url = new URL(request.url, "http://localhost")
+diff --git a/packages/server/src/routes.ts b/packages/server/src/routes.ts
+index 8be99ce662..738ea487d0 100644
+--- a/packages/server/src/routes.ts
++++ b/packages/server/src/routes.ts
+@@ -83,14 +83,19 @@ export function createRoutes(
+   serviceURLs: () => ReadonlyArray<string> = () => [],
+   overrides: LayerNode.Replacements = [],
+ ) {
+-  return makeRoutes(
+-    options.password
+-      ? ServerAuth.Config.configLayer({ password: Option.some(options.password) })
+-      : ServerAuth.Config.layer,
+-    options,
+-    serviceURLs,
+-    overrides,
+-  )
++  return makeRoutes(authLayer(options), options, serviceURLs, overrides)
++}
++
++/**
++ * Builds the Node server routes and validates the listener boundary for auto-login.
++ * Embedded runtimes must use createRoutes, which deliberately does not honor autoLogin.
++ */
++export function createNodeRoutes(
++  options: ServerOptions = {},
++  serviceURLs: () => ReadonlyArray<string> = () => [],
++  overrides: LayerNode.Replacements = [],
++) {
++  return makeRoutes(authLayer(options, options.autoLogin), options, serviceURLs, overrides)
+ }
+ 
+ type InstanceNode = (
+@@ -105,6 +110,25 @@ export function createEmbeddedRoutes(
+   return makeRoutes(ServerAuth.Config.configLayer({ password: Option.none() }), options, () => [], overrides, instances)
+ }
+ 
++function authLayer(options: ServerOptions, autoLogin = false) {
++  if (autoLogin === true && options.hostname !== "127.0.0.1")
++    return Layer.effect(
++      ServerAuth.Config,
++      Effect.fail(new Error("Auto-login requires the server hostname to be exactly 127.0.0.1")),
++    )
++  if (autoLogin === true && options.remote === true)
++    return Layer.effect(
++      ServerAuth.Config,
++      Effect.fail(new Error("Auto-login cannot be enabled while remote access is enabled")),
++    )
++  return options.password
++    ? ServerAuth.Config.configLayer({
++        password: Option.some(options.password),
++        autoLogin,
++      })
++    : ServerAuth.Config.layer
++}
++
+ function makeRoutes<AuthError, AuthServices>(
+   auth: Layer.Layer<ServerAuth.Config, AuthError, AuthServices>,
+   options: ServerOptions,
+diff --git a/packages/server/test/auth.test.ts b/packages/server/test/auth.test.ts
+index ebf9c8a323..de5bc7abf4 100644
+--- a/packages/server/test/auth.test.ts
++++ b/packages/server/test/auth.test.ts
+@@ -8,6 +8,13 @@ test("accepts only the fixed opencode username", () => {
+   expect(ServerAuth.authorized({ username: "custom", password: Redacted.make("secret") }, config)).toBe(false)
+ })
+ 
++test("auto-login bypasses credentials without removing the server password", () => {
++  const config = { password: Option.some("secret"), username: "opencode", autoLogin: true }
++  expect(ServerAuth.required(config)).toBe(false)
++  expect(ServerAuth.authorized({ username: "custom", password: Redacted.make("wrong") }, config)).toBe(true)
++  expect(ServerAuth.issueSession(config)).toMatch(/^\d+\.[\w-]+$/)
++})
++
+ test("session tokens expire, resist tampering, and are revoked by changing the password", () => {
+   const config = { password: Option.some("secret"), username: "opencode" }
+   const now = Date.now()
+diff --git a/packages/server/test/fetch.test.ts b/packages/server/test/fetch.test.ts
+index 952a89aca0..2920f20813 100644
+--- a/packages/server/test/fetch.test.ts
++++ b/packages/server/test/fetch.test.ts
+@@ -5,7 +5,7 @@ import path from "node:path"
+ import { Agent } from "@opencode/schema/agent"
+ import { Integration } from "@opencode/schema/integration"
+ import { ServerInfo } from "@opencode/protocol/groups/server"
+-import { Effect, Schedule, Schema } from "effect"
++import { Cause, Effect, Exit, Schedule, Schema } from "effect"
+ import { Session } from "@opencode/schema/session"
+ import { tmpdir } from "../../core/test/fixture/tmpdir"
+ import { it } from "../../core/test/lib/effect"
+@@ -169,6 +169,15 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
+   }),
+ )
+ 
++it.effect("rejects auto-login for embedded fetch handlers", () =>
++  Effect.gen(function* () {
++    const result = yield* ServerFetch.make({ ...options, password: "secret", autoLogin: true }).pipe(Effect.exit)
++    expect(Exit.isFailure(result)).toBe(true)
++    if (Exit.isFailure(result))
++      expect(Cause.squash(result.cause)).toMatchObject({ message: "ServerFetch does not support auto-login" })
++  }),
++)
++
+ it.live("activates credentials through the HttpApi", () =>
+   Effect.gen(function* () {
+     const handler = yield* ServerFetch.make(options)
+diff --git a/packages/server/test/options.test.ts b/packages/server/test/options.test.ts
+index 1da08f031b..dddba38a76 100644
+--- a/packages/server/test/options.test.ts
++++ b/packages/server/test/options.test.ts
+@@ -34,3 +34,10 @@ test("accepts an optional CORS allowlist", () => {
+   ])
+   expect(Option.isNone(decode({ cors: "http://192.168.1.10:3001" }))).toBe(true)
+ })
++
++test("accepts auto-login and remote access controls", () => {
++  expect(Option.getOrThrow(decode({ autoLogin: true, remote: false }))).toMatchObject({
++    autoLogin: true,
++    remote: false,
++  })
++})
+diff --git a/packages/server/test/process.test.ts b/packages/server/test/process.test.ts
+index 20ada8bae0..3970832d45 100644
+--- a/packages/server/test/process.test.ts
++++ b/packages/server/test/process.test.ts
+@@ -1,5 +1,5 @@
+ import { expect } from "bun:test"
+-import { Effect } from "effect"
++import { Cause, Effect, Exit } from "effect"
+ import { HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http"
+ import { it } from "../../core/test/lib/effect"
+ import { ServerProcess } from "../src/process"
+@@ -167,6 +167,47 @@ it.live("authenticates API requests behind the frontend transform while allowing
+   }),
+ )
+ 
++it.live("allows unauthenticated requests only for explicitly enabled loopback auto-login", () =>
++  Effect.gen(function* () {
++    const server = yield* ServerProcess.start<never, never>({
++      hostname: "127.0.0.1",
++      port: 0,
++      password: "secret",
++      autoLogin: true,
++      app: { version: "test-version" },
++      database: { path: ":memory:" },
++    })
++    const response = yield* Effect.promise(() => fetch(new URL("/api/info", HttpServer.formatAddress(server.address))))
++    expect(response.status).toBe(200)
++  }),
++)
++
++it.live("rejects auto-login for non-loopback hosts and remote access", () =>
++  Effect.forEach(
++    [
++      { hostname: "0.0.0.0", message: "exactly 127.0.0.1" },
++      { hostname: "::", message: "exactly 127.0.0.1" },
++      { hostname: "192.168.1.20", message: "exactly 127.0.0.1" },
++      { hostname: "127.0.0.1", remote: true, message: "remote access" },
++    ],
++    (input) =>
++      Effect.gen(function* () {
++        const result = yield* ServerProcess.start<never, never>({
++          hostname: input.hostname,
++          port: 0,
++          password: "secret",
++          autoLogin: true,
++          remote: input.remote,
++          app: { version: "test-version" },
++          database: { path: ":memory:" },
++        }).pipe(Effect.exit)
++        expect(Exit.isFailure(result)).toBe(true)
++        if (Exit.isFailure(result))
++          expect(Cause.squash(result.cause)).toMatchObject({ message: expect.stringContaining(input.message) })
++      }),
++  ),
++)
++
+ it.live("pairing links sign in browsers with a cookie and API clients with a token", () =>
+   Effect.gen(function* () {
+     const server = yield* ServerProcess.start<never, never>({
+diff --git a/services/www/src/docs/content/cli/commands.mdx b/services/www/src/docs/content/cli/commands.mdx
+index d5d2308d4b..fecac2a102 100644
+--- a/services/www/src/docs/content/cli/commands.mdx
++++ b/services/www/src/docs/content/cli/commands.mdx
+@@ -354,6 +354,16 @@ Allow a browser client from another origin.
+ $ opencode serve --cors https://app.example.com
+ ```
+ 
++Enable unauthenticated access only for a service bound to the local loopback
++address:
++
++```bash
++$ opencode serve --auto-login --hostname 127.0.0.1
++```
++
++`--auto-login` fails when the hostname is not exactly `127.0.0.1` or when
++OpenTunnel remote access is enabled. See [Automatic local login](/cli/web#automatic-local-login).
++
+ View all subcommands and flags.
+ 
+ ```bash
+@@ -433,6 +443,16 @@ Set a setting.
+ $ opencode service set hostname 0.0.0.0
+ ```
+ 
++Persist automatic local login for the shared service:
++
++```bash
++$ opencode service set auto-login true
++```
++
++This setting is accepted only at startup when the service remains bound to
++exactly `127.0.0.1` with remote access disabled. Use
++`opencode service unset auto-login` to restore password and pairing authentication.
++
+ Allow an extra CORS origin.
+ 
+ ```bash
+diff --git a/services/www/src/docs/content/cli/web.mdx b/services/www/src/docs/content/cli/web.mdx
+index da55340920..51a61e8c9e 100644
+--- a/services/www/src/docs/content/cli/web.mdx
++++ b/services/www/src/docs/content/cli/web.mdx
+@@ -50,6 +50,34 @@ http://127.0.0.1:49374
+ 
+ You can change this config with the `opencode service` command.
+ 
++### Automatic local login
++
++For a deliberately trusted loopback server, enable automatic login explicitly:
++
++```bash
++$ opencode serve --auto-login --hostname 127.0.0.1 --port 4096
++```
++
++Automatic login accepts browser and API requests without a password. It is only
++allowed when the server hostname is exactly `127.0.0.1` and OpenTunnel remote
++access is off. The server rejects `0.0.0.0`, `::`, LAN addresses, and remote
++access instead of silently falling back to a less safe mode.
++
++SSH port forwarding remains inside this trust boundary: clients using a local
++forward to the server's `127.0.0.1` port are treated as local clients. Anyone
++who can access that loopback port, including another local process, can use the
++server without authentication.
++
++The shared background service can persist the same setting:
++
++```bash
++$ opencode service set auto-login true
++$ opencode service start
++```
++
++It still requires the service hostname to be exactly `127.0.0.1` and remote
++access to be disabled. Turn it off with `opencode service unset auto-login`.
++
+ ### Remote access
+ 
+ To connect from anywhere, pair through an [OpenTunnel](https://github.com/anomalyco/opentunnel)

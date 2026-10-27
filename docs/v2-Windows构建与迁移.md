@@ -2,9 +2,9 @@
 
 ## 已合入上游基线与工具链
 
-- 上游基线：构建时对本地 Git 引用执行 `git merge-base HEAD upstream/v2`；上游前进但未合入 fork 的提交不会改变此基线。`upstream/v2` 不存在或无法解析时失败，不自动 fetch。Bun：`1.4.2`。
+- 上游基线：构建时对本地 Git 引用执行 `git merge-base HEAD upstream/dev`；上游前进但未合入 fork 的提交不会改变此基线。`upstream/dev` 不存在或无法解析时失败，不自动 fetch。Bun：`1.4.2`。
 - 本机便携 Bun：`D:\Program\bun\node_modules\@oven\bun-windows-x64\bin\bun.exe`（Bun 1.4.2；本机无 Bun PATH）。包装脚本以此为默认路径，也可通过 `-Bun` 显式指定。
-- 从上述**已合入基线提交的根 package.json**读取动态版本（要求 packageManager 为 `bun@1.4.2`）；不查询 npm latest、不改 package 版本或锁文件。产物 `--version`、注册服务及 HTTP 身份须与该版本一致；元数据保留实际基线 SHA，以便之后 `upstream/v2` 移动时重跑旧产物 smoke。
+- 从上述**已合入基线提交的根 package.json**读取动态版本（要求 packageManager 为 `bun@1.4.2`）；不查询 npm latest、不改 package 版本或锁文件。产物 `--version`、注册服务及 HTTP 身份须与该版本一致；元数据保留实际基线 SHA，以便之后 `upstream/dev` 移动时重跑旧产物 smoke。
 - `build-metadata.json` 独立记录 fork HEAD、dirty 状态、Git status、实际源码文件哈希清单及集合哈希、bun/lock/二进制 SHA256、构建参数和时间。清单区分 tracked/untracked、file/symlink/deleted，symlink 记录目标及目标文本哈希。未提交和未跟踪源码亦纳入；构建期间源码改变则拒绝部署。
 - 同时在构建目录保存相对 HEAD 的二进制安全 `source.diff`（含 staged 与 unstaged 的最终内容差异），并将其 SHA256 写入 metadata；CI artifact 一并保留，单文件部署不复制这些元数据。未跟踪文件内容由逐文件哈希追溯，不把“HEAD 仍等于基线”误解为未打补丁。
 - `source.diff` 通过 `executeRaw` 取得 Git stdout 的原始字节，直接以 Uint8Array 落盘，不解码、不 trim、不补换行；版本、SHA、路径等元数据继续使用规范化文本 `execute`。这样保留末行尾空白、LF/CRLF、无末尾换行标记和 binary patch。阶段7 R1修复前的制品差异文件可能被截断，不能作为最终交付，应重新构建、冒烟并核验，而不是手工补一个换行后复用旧制品。
@@ -59,7 +59,7 @@ smoke 使用新建目录中的 HOME/USERPROFILE、APPDATA/LOCALAPPDATA、XDG con
 仅读取该新目录的 `service-local.json`，绝不执行日常程序的 `service get password/status/stop`。终止前重新核对注册所有权；失败清理只操作持有的子进程对象。凭证/测试数据库结束后删除，报告仅保存非敏感身份及耗时。
 
 ```powershell
-# 可对保留构建重新执行 smoke；依据该产物记录的上游提交而非当前 upstream/v2 核对版本
+# 可对保留构建重新执行 smoke；依据该产物记录的上游提交而非当前 upstream/dev 核对版本
 & 'D:\Program\bun\node_modules\@oven\bun-windows-x64\bin\bun.exe' `
   ./packages/cli/script/smoke-win.ts '<构建目录>'
 ```
@@ -131,4 +131,4 @@ $env:OPENCODE_DB = Join-Path $directory 'opencode.db'
 
 ## CI
 
-`.github/workflows/build-windows.yml` 使用 Windows runner 和 Bun 1.4.2，冻结安装、小测试、独立构建与 smoke；明确 `-NoDeploy`，仅上传 bin、metadata 和脱敏 smoke 报告。不提交、不推送、不发布 release。CI 在完整历史 checkout 后，显式从官方 `anomalyco/opencode` 的 `v2` 分支获取本地 `upstream/v2` 引用，并在安装依赖前验证其与 HEAD 存在共同祖先；构建脚本本身不会自动 fetch。离线运行或上游不可访问时，该 CI 前置步骤会失败。
+`.github/workflows/build-windows.yml` 使用 Windows runner 和 Bun 1.4.2，冻结安装、小测试、独立构建与 smoke；明确 `-NoDeploy`，仅上传 bin、metadata 和脱敏 smoke 报告。不提交、不推送、不发布 release。CI 在完整历史 checkout 后，显式从官方 `anomalyco/opencode` 的 `dev` 分支获取本地 `upstream/dev` 引用，并在安装依赖前验证其与 HEAD 存在共同祖先；构建脚本本身不会自动 fetch。离线运行或上游不可访问时，该 CI 前置步骤会失败。

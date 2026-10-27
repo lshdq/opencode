@@ -51,6 +51,6 @@ async function resolveBase(explicit: string | undefined) {
     refs.map(async (ref) => (await $`git rev-parse --verify --quiet ${ref}`.nothrow().quiet()).exitCode === 0),
   )
   const ref = refs.find((_, index) => found[index])
-  if (!ref) throw new Error("lint:changed: no v2 ref found; pass a base ref")
+  if (!ref) throw new Error("lint:changed: no base ref found; pass a base ref")
   return (await $`git merge-base HEAD ${ref}`.text()).trim()
 }

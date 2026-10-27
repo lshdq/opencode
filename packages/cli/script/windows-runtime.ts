@@ -13,7 +13,7 @@ export async function workspacePackageMetadata(root: string) {
 }
 
 export async function upstreamBaseline(root: string) {
-  const commit = await execute(["git", "merge-base", "HEAD", "upstream/v2"], root)
+  const commit = await execute(["git", "merge-base", "HEAD", "upstream/dev"], root)
   return { commit, ...(await upstreamAtCommit(root, commit)) }
 }
 

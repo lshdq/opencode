@@ -152,10 +152,10 @@ export const CountRollover = {
 
 // Mirrors a long exploration turn in a timeline viewport with the session title header above it.
 const stickyCommands = [
-  "git log --oneline 09c318094c..upstream/v2 -- packages/tui/src/plugin/structure.ts packages/tui/src/plugin/render.tsx",
-  "git log --oneline 09c318094c..upstream/v2 -- packages/tui/src/plugin/structure.ts; git diff --stat upstream/v2",
-  'git log --format="%h %s" 09c318094c..upstream/v2 -- packages/app/src/runtime/persistence',
-  'git log --format="%h %s" 09c318094c..upstream/v2 -- packages/app/src/session/review packages/app/src/session/files',
+  "git log --oneline 09c318094c..upstream/dev -- packages/tui/src/plugin/structure.ts packages/tui/src/plugin/render.tsx",
+  "git log --oneline 09c318094c..upstream/dev -- packages/tui/src/plugin/structure.ts; git diff --stat upstream/dev",
+  'git log --format="%h %s" 09c318094c..upstream/dev -- packages/app/src/runtime/persistence',
+  'git log --format="%h %s" 09c318094c..upstream/dev -- packages/app/src/session/review packages/app/src/session/files',
   'git show 09c318094c:packages/app/src/session/review/model.ts | Select-String "ChangeMode ="',
   "git show 09c318094c:packages/app/src/session/review/model.ts | Select-String -Pattern 'turn' -Context 0,0",
 ]
