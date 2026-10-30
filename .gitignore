@@ -38,9 +38,12 @@ logs/
 tsconfig.tsbuildinfo
 /artifacts/
 
-# Keep local OpenCode data ignored, except the two fork-maintained skill guides.
+# Keep local OpenCode data ignored, except the fork-maintained skill guides and Linux build command.
 !/.opencode/
 /.opencode/*
+!/.opencode/commands/
+/.opencode/commands/*
+!/.opencode/commands/build-linux.md
 !/.opencode/skills/
 /.opencode/skills/*
 !/.opencode/skills/fork-development/
