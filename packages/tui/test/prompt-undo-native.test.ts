@@ -4,7 +4,7 @@ import { createTestRenderer } from "@opentui/core/testing"
 import { bindPromptUndo, PROMPT_UNDO_LIMIT } from "../src/component/prompt/undo"
 
 async function fixture() {
-  const app = await createTestRenderer({ width: 80, height: 10, useThread: false })
+  const app = await createTestRenderer({ width: 80, height: 10 })
   const input = new TextareaRenderable(app.renderer, { id: "native-undo", initialValue: "ab\ncd" })
   app.renderer.root.add(input)
   input.focus()

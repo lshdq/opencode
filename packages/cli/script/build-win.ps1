@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 $OutputEncoding = [System.Text.Encoding]::UTF8
 if (-not (Test-Path -LiteralPath $Bun -PathType Leaf)) { throw "Bun not found: $Bun" }
 $version = & $Bun --version
-if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne '1.4.2') { throw 'Bun 1.4.2 is required' }
+if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne '1.4.4') { throw 'Bun 1.4.4 is required' }
 $arguments = @((Join-Path $PSScriptRoot 'windows-build.ts'), "--deploy-root=$DeployRoot")
 if ($BuildOnly) { $arguments += '--build-only' }
 if ($NoDeploy) { $arguments += '--no-deploy' }

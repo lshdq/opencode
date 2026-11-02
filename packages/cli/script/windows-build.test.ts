@@ -35,20 +35,20 @@ describe("Windows build isolation", () => {
     const root = await mkdtemp(path.join(parent, "upstream-baseline-test-"))
     try {
       await execute(["git", "init", "--quiet"], root)
-      await Bun.write(path.join(root, "package.json"), JSON.stringify({ version: "3.4.0", packageManager: "bun@1.4.2" }))
+      await Bun.write(path.join(root, "package.json"), JSON.stringify({ version: "3.4.0", packageManager: "bun@1.4.4" }))
       await execute(["git", "add", "package.json"], root)
       const commit = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m"]
       await execute([...commit, "upstream base"], root)
       const base = await execute(["git", "rev-parse", "HEAD"], root)
       const fork = await execute(["git", "branch", "--show-current"], root)
       await execute(["git", "update-ref", "refs/remotes/upstream/dev", base], root)
-      await Bun.write(path.join(root, "package.json"), JSON.stringify({ version: "9.9.9", packageManager: "bun@1.4.2" }))
+      await Bun.write(path.join(root, "package.json"), JSON.stringify({ version: "9.9.9", packageManager: "bun@1.4.4" }))
       await execute(["git", "add", "package.json"], root)
       await execute([...commit, "fork changes"], root)
       expect(await upstreamBaseline(root)).toEqual({ commit: base, version: "3.4.0" })
       expect(await workspacePackageMetadata(root)).toEqual({ version: "9.9.9" })
       await execute(["git", "switch", "--quiet", "-c", "upstream-next", base], root)
-      await Bun.write(path.join(root, "package.json"), JSON.stringify({ version: "3.5.0", packageManager: "bun@1.4.2" }))
+      await Bun.write(path.join(root, "package.json"), JSON.stringify({ version: "3.5.0", packageManager: "bun@1.4.4" }))
       await execute(["git", "add", "package.json"], root)
       await execute([...commit, "new upstream release"], root)
       await execute(["git", "update-ref", "refs/remotes/upstream/dev", "HEAD"], root)
@@ -66,9 +66,9 @@ describe("Windows build isolation", () => {
 
   test.each([
     { name: "missing package metadata", packageJSON: undefined },
-    { name: "invalid version", packageJSON: { version: "9.9", packageManager: "bun@1.4.2" } },
-    { name: "leading zero major version", packageJSON: { version: "01.2.3", packageManager: "bun@1.4.2" } },
-    { name: "leading zero minor version", packageJSON: { version: "1.02.3", packageManager: "bun@1.4.2" } },
+    { name: "invalid version", packageJSON: { version: "9.9", packageManager: "bun@1.4.4" } },
+    { name: "leading zero major version", packageJSON: { version: "01.2.3", packageManager: "bun@1.4.4" } },
+    { name: "leading zero minor version", packageJSON: { version: "1.02.3", packageManager: "bun@1.4.4" } },
     { name: "invalid package manager", packageJSON: { version: "9.9.9", packageManager: "npm@11" } },
     { name: "invalid JSON", packageJSON: "{ invalid json" },
   ])("rejects $name for the workspace package metadata", async ({ packageJSON }) => {
@@ -157,7 +157,7 @@ describe("Windows build isolation", () => {
         const binary = process.execPath
         const hash = await sha256(binary)
         const version = cliVersion(await execute([binary, "--version"], checkRoot, isolatedEnvironment(checkRoot)))
-        expect(version).toBe("1.4.2")
+        expect(version).toBe("1.4.4")
         const at = new Date(2026, 8, 24, 13, 49)
         const target = await deployVerifiedWindowsBinary(binary, deploy, version, hash, checkRoot, at)
         expect(path.basename(target)).toBe(`opencode-${version}-202609241349.exe`)

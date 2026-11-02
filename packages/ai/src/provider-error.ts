@@ -4,7 +4,6 @@ import {
   ContentPolicyError,
   InvalidRequestError,
   AIError,
-  ProviderErrorEvent,
   ProviderInternalError,
   QuotaExceededError,
   RateLimitError,
@@ -12,10 +11,13 @@ import {
   type HttpContext,
   type HttpRateLimitDetails,
 } from "./schema/index.js"
+import { awsErrorType, providerCodes } from "./utils/provider-codes.js"
 
 const patterns = [
   /prompt is too long/i,
-  /input is too long for requested model/i,
+  /input is too long for (?:the )?(?:requested|selected) model/i,
+  // OpenCode Go
+  /too large for the model'?s configured input limit/i,
   // Cloudflare Workers AI reports this as HTTP 413.
   /exceeded this model context window limit/i,
   /exceeds the context window/i,
@@ -38,12 +40,14 @@ const patterns = [
   // Hugging Face Text Generation Inference, e.g. Together
   /`inputs` tokens \+ `max_new_tokens` must be <= \d+/i,
   /context window exceeds limit/i,
+  // LiteLLM's ContextWindowExceededError
+  /context window exceeded/i,
   /exceeded model token limit/i,
   /context[_ ]length[_ ]exceeded/i,
   /context length is only \d+ tokens/i,
   /input length.*exceeds.*context length/i,
-  // Z.ai code 1261 arrives as `Prompt too long` or `Prompt 超长`.
-  /prompt (?:too long|超长)/i,
+  // Z.ai code 1261 arrives as `Prompt too long`, `Prompt exceeds max length` or `Prompt 超长`.
+  /prompt (?:too long|exceeds max length|超长)/i,
   /too large for model with \d+ maximum context length/i,
   /prompt has [\d,]+ tokens?, but the configured context size is [\d,]+ tokens?/i,
   /model_context_window_exceeded/i,
@@ -61,79 +65,35 @@ const exclusions = [
   /too many requests/i,
   // Cohere reports an output limit above the model maximum as "too many tokens"; compaction cannot fix it.
   /max[_ ]tokens must be less than/i,
+  // Bedrock phrases throttling as "Too many tokens[, per day], please wait..."; it is a 429 to retry, not overflow.
+  /too many tokens(?: per day)?, please wait/i,
 ]
 
 export const isContextOverflow = (message: string) =>
   !exclusions.some((pattern) => pattern.test(message)) &&
   (patterns.some((pattern) => pattern.test(message)) || /^4(?:00|13)\s*(status code)?\s*\(no body\)/i.test(message))
 
-export const isPayloadTooLarge = (message: string) => payloadPatterns.some((pattern) => pattern.test(message))
+const isPayloadTooLarge = (message: string) => payloadPatterns.some((pattern) => pattern.test(message))
 
 export const isContextOverflowFailure = (failure: unknown) =>
-  failure instanceof AIError
-    ? failure.reason._tag === "InvalidRequest" && failure.reason.classification === "context-overflow"
-    : Schema.is(ProviderErrorEvent)(failure) && failure.classification === "context-overflow"
+  failure instanceof AIError &&
+  failure.reason._tag === "InvalidRequest" &&
+  failure.reason.classification === "context-overflow"
 
 /**
  * Whether a failed call may succeed when sent again: rate limits, account quotas, provider-side failures, transport
  * failures that did not deliver an accepted write, and unrecognized failures. Callers decide which calls are safe to
  * repeat.
  */
-export const isRetryable = (error: AIError) => {
-  // An acknowledged non-read operation may already have caused provider-side
-  // effects. No provider header is allowed to turn that delivery boundary into
-  // a duplicate write.
-  if (
-    error.reason._tag === "Transport" &&
-    error.reason.delivery === "accepted" &&
-    error.reason.operation !== "read"
-  )
-    return false
-  const override = error.reason.http?.headers["x-should-retry"]
-  if (override === "false") return false
-  switch (error.reason._tag) {
-    case "RateLimit":
-    case "QuotaExceeded":
-    case "ProviderInternal":
-      return true
-    // A WebSocket acknowledgment marks delivery accepted before model output may exist.
-    // Read failures can still recover; the caller chooses retry versus continuation from durable output.
-    case "Transport":
-      return (
-        override === "true" ||
-        (error.reason.delivery !== "rejected" &&
-          (error.reason.delivery !== "accepted" || error.reason.operation === "read"))
-      )
-    case "InvalidProviderOutput":
-      return error.reason.classification === "incomplete-stream"
-    // Unrecognized failures retry: classification records affirmative
-    // deterministic evidence, and transient failures are exactly the ones
-    // that arrive in shapes no classifier anticipates.
-    case "UnknownProvider":
-      return true
-    // Retry headers cannot promote a deterministic rejection. Callers may
-    // explicitly allow a bounded recovery (for example, an OAuth refresh).
-    case "Authentication":
-    case "ContentPolicy":
-    case "InvalidRequest":
-    case "UnsupportedOperation":
-    case "NoRoute":
-    case "Timeout":
-      return false
-    default: {
-      const exhaustive: never = error.reason
-      return exhaustive
-    }
-  }
-}
+export const isRetryable = (error: AIError) => error.isRetryable
 
-const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
 // OpenCode Zen reports account caps as typed 429/402 errors that are not throttles.
 const QUOTA_CODES = new Set([
   "insufficient_quota",
   "usage_not_included",
   "billing_error",
   "gousagelimiterror",
+  "budgetlimiterror",
   "freeusagelimiterror",
   "creditlimitexceeded",
   "subscription_sharing_usage_limit_exceeded",
@@ -190,7 +150,8 @@ const INVALID_REQUEST_CODES = new Set([
 ])
 // Azure OpenAI reports `content_filter` with `innererror.code` ResponsibleAIPolicyViolation.
 // OpenRouter tags provider failures with a typed `error_type`; its Responses skin also
-// emits `image_content_policy_violation` as the native code.
+// emits `image_content_policy_violation` as the native code. Alibaba Model Studio reports
+// moderation rejections as `DataInspectionFailed`. OpenAI Images reports `moderation_blocked`.
 const CONTENT_POLICY_CODES = new Set([
   "content_filter",
   "content_moderation",
@@ -198,6 +159,8 @@ const CONTENT_POLICY_CODES = new Set([
   "content_policy_violation",
   "image_content_policy_violation",
   "refusal",
+  "datainspectionfailed",
+  "moderation_blocked",
 ])
 // OpenCode Zen replaces upstream codes outside its allow-list but keeps the original
 // as a `[code]` label at the start of the rewritten message.
@@ -213,14 +176,15 @@ const DEFINITIVE_TEMPORARY_TEXT =
   /at capacity|overloaded|temporarily unavailable|service[-_\s]?unavailable|(?:server|internal)[-_\s]?error|server (?:is )?busy|resource[-_\s]?exhausted|rate[-_\s]?limit|too[_\s]?many[_\s]?requests/i
 // Only consulted on 429, where throttles and account caps share a status.
 // Z.ai reports balance, plan expiry, plan limits, and plan model access on 429.
+// Cerebras reports its per-minute token throttle as `token_quota_exceeded`; that is a rate limit.
 const QUOTA_TEXT =
-  /insufficient[-_\s]?(?:quota|balance)|quota[-_\s]?exceeded|budget exceeded|usage limit|limit exhausted|package has expired|plan does not yet include/i
+  /insufficient[-_\s]?(?:quota|balance)|(?<!token_)quota[-_\s]?exceeded|budget exceeded|usage limit|limit exhausted|package has expired|plan does not yet include/i
 // Policy rejections without a dedicated code, matched against the provider's own
 // explanation only. OpenAI reuses `invalid_prompt` for usage-policy rejections while
 // Bedrock Mantle reuses it for schema validation; Anthropic reports blocked output
-// under `invalid_request_error`.
+// under `invalid_request_error`. The Vercel AI Gateway drops OpenAI's `moderation_blocked` code.
 const CONTENT_POLICY_TEXT =
-  /violating our usage policy|blocked by content filtering policy|content[-_\s]?policy|rejected as a result of our safety system|detected potentially unsafe or sensitive content/i
+  /violating our usage policy|blocked by content filtering policy|content[-_\s]?policy|rejected (?:as a result of our|by the) safety system|detected potentially unsafe or sensitive content/i
 // Some providers return model/catalog failures without a status or structured
 // code. Keep these deterministic phrases out of the UnknownProvider retry
 // path, while leaving genuinely unrecognized failures retryable.
@@ -316,6 +280,7 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
     ...providerCodes(body),
     ...providerCodes(input.message),
     ...(GATEWAY_CODE_LABEL.exec(input.message)?.slice(1) ?? []),
+    ...awsErrorType(input.http?.headers["x-amzn-errortype"]),
   ].map((code) => code.toLowerCase())
   // Scan the raw payload too so signals missing from the summary message
   // (e.g. overflow phrases nested in a JSON error body) still classify.
@@ -345,7 +310,9 @@ export function classifyProviderFailure(input: ProviderFailure): AIError["reason
     (codes.includes("context_length_exceeded") ||
       codes.includes("model_context_window_exceeded") ||
       codes.includes("request_too_large") ||
-      isContextOverflow(text))
+      // 429 bodies are throttles even when their wording matches an overflow phrase, e.g. Cerebras's
+      // "too many tokens processed". Text matching stays on for 4xx and mid-stream errors without a status.
+      (input.status !== 429 && !codes.includes("throttlingexception") && isContextOverflow(text)))
   )
     return new InvalidRequestError({ ...details, classification: "context-overflow" })
   if (!isTransientStatus(input.status) && (input.status === 413 || isPayloadTooLarge(text)))
@@ -432,38 +399,4 @@ function isTransientStatus(status: number | undefined) {
 
 function isExplicitClientStatus(status: number | undefined) {
   return status === undefined || (status >= 400 && status < 500 && !isTransientStatus(status))
-}
-
-function providerCodes(value: unknown) {
-  const decoded = typeof value === "string" ? Option.getOrUndefined(decodeJson(value)) : value
-  if (!isRecord(decoded)) return []
-  const error = isRecord(decoded.error) ? decoded.error : undefined
-  const inner = error && isRecord(error.innererror) ? error.innererror : undefined
-  const metadata = error && isRecord(error.metadata) ? error.metadata : undefined
-  const response = isRecord(decoded.response) ? decoded.response : undefined
-  const responseError = response && isRecord(response.error) ? response.error : undefined
-  const exception = isRecord(decoded.exception) ? decoded.exception : undefined
-  return [
-    decoded.code,
-    // Stability's `{ id, name, errors }` bodies carry the code in `name`.
-    Array.isArray(decoded.errors) ? decoded.name : undefined,
-    decoded.error_type,
-    error?.code,
-    error?.type,
-    error?.status,
-    error?.error_type,
-    // Google `google.rpc.ErrorInfo` details carry the specific reason.
-    ...(Array.isArray(error?.details)
-      ? error.details.map((detail) => (isRecord(detail) ? detail.reason : undefined))
-      : []),
-    inner?.code,
-    metadata?.error_type,
-    responseError?.code,
-    response?.error_type,
-    exception?.type,
-  ].filter((value): value is string => typeof value === "string")
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
 }

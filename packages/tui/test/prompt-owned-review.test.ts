@@ -93,7 +93,7 @@ const payload = "AAA1\nAAA2\nAAA3"
 // Compare only forward-edit results. Native checkpoint counts are deliberately
 // not an oracle for the approved application-owned history contract.
 test.each(nativeHistoryCases)("independent owned forward result matches locked native input: $name", async (item) => {
-  const app = await createTestRenderer({ width: 80, height: 10, useThread: false })
+  const app = await createTestRenderer({ width: 80, height: 10 })
   const raw = new TextareaRenderable(app.renderer, { id: "raw-result" })
   const owned = new TextareaRenderable(app.renderer, { id: "owned-result" })
   app.renderer.root.add(raw)
@@ -108,7 +108,8 @@ test.each(nativeHistoryCases)("independent owned forward result matches locked n
         if (item.tail) input.insertText(item.tail)
       }
       prepareNativeHistoryCase(input, item, item.empty ? 0 : label.length)
-      item.act(input, item.empty ? 0 : label.length)
+      if (item.error) expect(() => item.act(input, item.empty ? 0 : label.length)).toThrow(item.error)
+      else item.act(input, item.empty ? 0 : label.length)
     }
     expect({ text: owned.plainText, caret: owned.logicalCursor }).toEqual({ text: raw.plainText, caret: raw.logicalCursor })
   } finally {
@@ -206,7 +207,7 @@ test("independent distinct hidden payloads evict complete steps without corrupti
 }, 30000)
 
 test.each(["clearHistory", "clear"] as const)("independent %s releases exhausted payload budget for a full new window", async (reset) => {
-  const app = await createTestRenderer({ width: 80, height: 10, useThread: false })
+  const app = await createTestRenderer({ width: 80, height: 10 })
   const input = new TextareaRenderable(app.renderer, { id: "owned-budget-release" })
   app.renderer.root.add(input)
   const metadata = { payload: "" }

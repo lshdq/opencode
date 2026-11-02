@@ -97,6 +97,7 @@ test("related service CORS and web UI validation also stay direct in a proxy-poi
       path.resolve(import.meta.dir, ".."),
       {
         ...env,
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH ?? env.BUN_RUNTIME_TRANSPILER_CACHE_PATH,
         HTTP_PROXY: url,
         HTTPS_PROXY: url,
         ALL_PROXY: url,

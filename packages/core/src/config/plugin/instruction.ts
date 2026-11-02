@@ -4,7 +4,7 @@ import { define } from "@opencode/plugin/effect/plugin"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Document } from "@opencode/schema/config"
-import { basename, dirname, isAbsolute, join, resolve } from "path"
+import { dirname, isAbsolute, join, resolve, sep } from "path"
 import { sameDirectory } from "@opencode/util/path"
 import { isDeepStrictEqual } from "node:util"
 import { createHash } from "node:crypto"
@@ -117,15 +117,23 @@ export const Plugin = define({
           if (pattern.startsWith("https://") || pattern.startsWith("http://")) return { type: "remote" as const, pattern }
           const input = pattern.startsWith("~/") ? join(global.home, pattern.slice(2)) : pattern
           const absolute = isAbsolute(input)
-          // V1 matches only the basename of absolute globs; relative patterns walk to the project root.
+          // Absolute directory globs start from their literal ancestor; relative patterns walk upward.
+          const parts = absolute ? dirname(input).split(/[/\\]/) : []
+          const wildcard = parts.findIndex((part) => /[*?\[\]{}]/.test(part))
+          const directory = wildcard < 0 ? dirname(input) : resolve(parts.slice(0, wildcard).join("/") + "/")
           const directories = absolute
-            ? [dirname(input)]
+            ? [directory]
             : !discovery.project
               ? [global.config]
               : project
                 ? ancestorDirectories(start, root)
                 : []
-          return { type: "local" as const, pattern, glob: absolute ? basename(input) : input, directories }
+          return {
+            type: "local" as const,
+            pattern,
+            glob: (absolute ? input.slice(directory.length).replace(/^[/\\]+/, "") : input).replaceAll(sep, "/"),
+            directories,
+          }
         })
         loaded.configured = patterns.length > 0
         const files: InstructionDiscovery.File[] = []
@@ -159,11 +167,14 @@ export const Plugin = define({
             if (url) {
               url.username = ""
               url.password = ""
+            }
+            const request = url?.toString() ?? source.pattern
+            if (url) {
               url.search = ""
               url.hash = ""
             }
             const label = url?.toString() ?? "remote instruction"
-            const content = yield* http.execute(HttpClientRequest.get(source.pattern)).pipe(
+            const content = yield* http.execute(HttpClientRequest.get(request)).pipe(
               Effect.flatMap((response) => response.text),
               Effect.timeout("5 seconds"),
               Effect.catchCause(() =>
@@ -200,7 +211,7 @@ export const Plugin = define({
                 Effect.as(true),
                 Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(false)),
               )
-              if (directoryExists) yield* fs.readDirectoryEntries(dirname(previous))
+              if (directoryExists) yield* fs.scanChecked("*", { cwd: dirname(previous), include: "all", dot: true })
             }
             nextMatched.set(bucket, paths)
             for (const path of paths) {
@@ -263,8 +274,8 @@ export const Plugin = define({
         Stream.runForEach((file) => refresh(file)),
         Effect.forkScoped({ startImmediately: true }),
       )
-      yield* ctx.event.subscribe().pipe(
-        Stream.filter((event) => event.type === "config.updated"),
+      // Subscribe before the first config read so an update in between still triggers a reload.
+      yield* ctx.event.subscribe({ types: ["config.updated"] }).pipe(
         Stream.runForEach(() => refresh("config.updated")),
         Effect.forkScoped({ startImmediately: true }),
       )

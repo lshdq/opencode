@@ -2,20 +2,20 @@ import { describe, expect } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { Effect, Layer } from "effect"
+import { Deferred, Effect, Fiber, Layer } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
 import { LayerNodePlatform } from "@opencode/util/effect/app-node-platform"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Flock } from "@opencode/util/flock"
+import { EffectFlock } from "@opencode/util/effect-flock"
 import { Global } from "@opencode/util/global"
 import { RipgrepBinary } from "../src/ripgrep/binary"
 import { it } from "./lib/effect"
 
 // Concurrent first resolves of the ripgrep binary serialize behind the shared
-// Flock: the winner downloads, extracts, and publishes under the lock while the
-// loser re-checks the target after acquiring the lock and reuses it without a
-// second download. The lock also keeps a Windows copy onto a target being
-// executed by another process from failing with EPERM.
+// lock: after another process publishes a verified target, both waiting callers
+// must re-check it instead of starting another download. Do not manufacture a
+// release ZIP here: the production path now requires the upstream pinned hash.
 
 const VERSION = "15.1.0"
 const PLATFORM = {
@@ -45,7 +45,7 @@ async function makeArchive(root: string) {
 
 // A separate service instance per contender: each instance caches its own
 // filepath resolution, so both race the check-then-download path.
-const install = (root: string, archive: Buffer, state: { downloads: number; active: number; peak: number }) => {
+const install = (root: string, archive: Buffer, state: { downloads: number; active: number; peak: number }, acquiring: Effect.Effect<void> = Effect.void) => {
   const http = Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make((request) =>
@@ -75,37 +75,84 @@ const install = (root: string, archive: Buffer, state: { downloads: number; acti
     }),
   )
   const layer = LayerNode.compile(RipgrepBinary.node, {
-    replacements: [LayerNodePlatform.httpClient.replace(http), Global.node.replace(global)],
+    replacements: [
+      LayerNodePlatform.httpClient.replace(http),
+      Global.node.replace(global),
+      EffectFlock.node.replace(
+        Layer.effect(
+          EffectFlock.Service,
+          Effect.map(EffectFlock.Service, (flock) => EffectFlock.Service.of({
+            ...flock,
+            acquire: (key, directory, options) => acquiring.pipe(Effect.andThen(flock.acquire(key, directory, options))),
+          })),
+        ).pipe(Layer.provide(LayerNode.compile(EffectFlock.node, { replacements: [Global.node.replace(global)] }))),
+      ),
+    ],
   })
   return Effect.flatMap(RipgrepBinary.Service, (service) => service.filepath).pipe(Effect.provide(layer), Effect.scoped)
 }
 
 describe.skipIf(!ripgrepPlatform || !shell)("ripgrep binary install lock", () => {
-  it.live("concurrent installs download once and share the published target", () =>
+  it.live("concurrent callers wait for a publisher and recheck its target without downloading", () =>
     Effect.gen(function* () {
       const root = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-rg-lock-")))
-      const archive = yield* Effect.promise(() => makeArchive(root))
       const state = { downloads: 0, active: 0, peak: 0 }
+      const ready = yield* Deferred.make<void>()
+      let waiting = 0
+      const acquiring = Effect.suspend(() => {
+        waiting++
+        return waiting === 2 ? Deferred.succeed(ready, undefined).pipe(Effect.asVoid) : Effect.void
+      })
       const savedPath = process.env.PATH
+      let release: (() => Promise<void>) | undefined
       // A system rg.exe on PATH would short-circuit the install path under test.
       process.env.PATH = ""
-      Flock.setGlobal({ state: path.join(root, "state") })
       try {
-        const [first, second] = yield* Effect.all([install(root, archive, state), install(root, archive, state)], {
-          concurrency: "unbounded",
-        })
+        const lease = yield* Effect.promise(() => Flock.acquire(`ripgrep-binary:${VERSION}`, { dir: path.join(root, "state", "locks") }))
+        release = () => lease.release()
+        const running = yield* Effect.all([
+          install(root, Buffer.from("unverified"), state, acquiring),
+          install(root, Buffer.from("unverified"), state, acquiring),
+        ], { concurrency: "unbounded" }).pipe(Effect.forkChild)
+        yield* Deferred.await(ready).pipe(Effect.timeout("5 seconds"))
         const target = path.join(root, "cache", "bin", "rg.exe")
+        yield* Effect.promise(async () => {
+          await fs.mkdir(path.dirname(target), { recursive: true })
+          await fs.writeFile(target, "real ripgrep fixture")
+          await lease.release()
+          release = undefined
+        })
+        const [first, second] = yield* Fiber.join(running)
         expect(first).toBe(target)
         expect(second).toBe(target)
-        expect(state.downloads).toBe(1)
-        expect(state.peak).toBe(1)
+        expect(state.downloads).toBe(0)
+        expect(waiting).toBe(2)
         expect(yield* Effect.promise(() => fs.readFile(target, "utf8"))).toBe("real ripgrep fixture")
-        // The winner removed the archive; the loser left no partial files.
+        // Waiting callers leave no download or partial files.
         expect(yield* Effect.promise(() => fs.readdir(path.dirname(target)))).toEqual(["rg.exe"])
       } finally {
         process.env.PATH = savedPath
-        Flock.setGlobal({ state: Global.Path.state })
+        if (release) yield* Effect.promise(release)
         yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
       }
-    }), 60_000)
+    }))
+
+  it.live("rejects an unverified archive without publishing an executable", () =>
+    Effect.gen(function* () {
+      const root = yield* Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-rg-hash-")))
+      const savedPath = process.env.PATH
+      process.env.PATH = ""
+      try {
+        const archive = yield* Effect.promise(() => makeArchive(root))
+        const state = { downloads: 0, active: 0, peak: 0 }
+        const result = yield* install(root, archive, state).pipe(Effect.exit)
+        expect(result).toMatchObject({ _tag: "Failure" })
+        expect(state.downloads).toBe(1)
+        expect(yield* Effect.promise(() => Bun.file(path.join(root, "cache", "bin", "rg.exe")).exists())).toBe(false)
+      } finally {
+        process.env.PATH = savedPath
+        yield* Effect.promise(() => fs.rm(root, { recursive: true, force: true }))
+      }
+    }),
+  )
 })

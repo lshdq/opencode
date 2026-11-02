@@ -236,8 +236,10 @@ export default Plugin.define({
           return
         }
         errored.add(sessionID)
-        notify(context, sessionID, event.data.error.message, "error", undefined, parentID(sessionID) !== undefined)
-        context.ui.toast.show({ sessionID, title: "Session failed", message: event.data.error.message, variant: "error" })
+        if (event.data.error.type !== "provider.free-limit" && event.data.error.type !== "provider.go-limit") {
+          notify(context, sessionID, event.data.error.message, "error", undefined, parentID(sessionID) !== undefined)
+          context.ui.toast.show({ sessionID, title: "Session failed", message: event.data.error.message, variant: "error" })
+        }
       }
 
       ended(sessionID)

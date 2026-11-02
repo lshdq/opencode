@@ -21,6 +21,8 @@ function userEnv(root: string, user: string) {
     TEMP: path.join(home, "temp"),
     TMP: path.join(home, "temp"),
     OPENCODE_TEST_HOME: home,
+    // Keep source compilation shared while HOME, config, database and service state remain isolated.
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH,
     XDG_DATA_HOME: path.join(root, "shared-data"),
     XDG_CONFIG_HOME: path.join(root, "shared-config"),
     XDG_CACHE_HOME: path.join(root, "shared-cache"),
@@ -46,10 +48,13 @@ async function startServe(root: string, user: string) {
   const stdout = (async () => {
     for await (const chunk of child.stdout) output.text += new TextDecoder().decode(chunk)
   })()
-  const stderr = new Response(child.stderr).text()
+  const errors = { text: "" }
+  const stderr = (async () => {
+    for await (const chunk of child.stderr) errors.text += new TextDecoder().decode(chunk)
+  })()
   const deadline = Date.now() + 60_000
   while (!output.text.includes('"url":') && child.exitCode === null && Date.now() < deadline) await Bun.sleep(25)
-  return { child, output, stdout, stderr }
+  return { child, output, stdout, stderr, errors }
 }
 
 test("two processes sharing one data root start and serve concurrently", async () => {
@@ -57,10 +62,10 @@ test("two processes sharing one data root start and serve concurrently", async (
   const processes = await Promise.all([startServe(root, "user-a"), startServe(root, "user-b")])
   try {
     const urls: string[] = []
-    for (const { child, output, stderr } of processes) {
-      expect(child.exitCode, child.exitCode === null ? "server exited before ready" : await stderr).toBe(null)
+    for (const { child, output, errors } of processes) {
+      expect(child.exitCode, errors.text).toBe(null)
       const line = output.text.split(/\r?\n/).find((line) => line.startsWith('{"url":'))
-      expect(line, "no ready URL").toBeDefined()
+      expect(line, `no ready URL\nstdout: ${output.text}\nstderr: ${errors.text}`).toBeDefined()
       const address = JSON.parse(line ?? "{}") as { url: string }
       urls.push(address.url)
       const response = await fetch(new URL("/api/info", address.url), {

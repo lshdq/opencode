@@ -29,7 +29,7 @@ subagent: false
 - 从快照 `packages/cli` 执行下面参数（用已核实的 Linux Bun 和本次目录的绝对路径替换占位值，不把尖括号原样传给 shell）：
 
   ```text
-  bun run script/build.ts --target=opencode-linux-x64-baseline --skip-install --outdir=<本次私有目录>/compiled
+  OPENCODE_TARGET=linux-x64-baseline bun run script/build.ts --skip-install --outdir=<本次私有目录>/compiled
   ```
 
 - 必须给**独立、显式、绝对** `--outdir`：`build.ts` 开始即递归删除 outdir，不得传原仓库 `packages/cli/dist`、其 linux 发布目录或任何已有产物目录。不要传 `--skip-web-ui`，不要使用 Windows 的 `--single`；不构建 ARM64、musl、Desktop。现有 `app-assets.ts` 会执行 app build 并嵌入资源，无需另发 Web dist。

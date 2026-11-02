@@ -36,7 +36,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $baseline) { throw "HEAD and upstream/dev have no verifiable common ancestor" }
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - name: Frozen dependencies
         run: bun install --frozen-lockfile
       - name: Restore tracked Windows type declaration symlinks

@@ -6,7 +6,7 @@ import {
   QuotaExceededError,
   RateLimitError,
   TransportError,
-} from "@opencode/ai"
+} from "@opencode/ai/effect"
 import { Agent } from "@opencode/schema/agent"
 import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/core/provider"
@@ -14,7 +14,7 @@ import type { PluginHooks } from "@opencode/core/plugin/hooks"
 import { SessionSchema } from "@opencode/core/session/schema"
 import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
 import { toSessionError } from "@opencode/core/session/to-session-error"
-import { Effect, Ref } from "effect"
+import { Clock, Effect, Ref } from "effect"
 import { it } from "./lib/effect"
 
 const timeout = new AIError({
@@ -53,11 +53,58 @@ describe("SessionRunnerRetry.policy", () => {
     }),
   )
 
-  it.effect("retries quota failures", () =>
+  it.effect("terminates ordinary quota failures instead of promoting them through hooks", () =>
     Effect.gen(function* () {
       const quota = new AIError({ reason: new QuotaExceededError({ message: "quota" }) })
-      expect(SessionRunnerRetry.isRetryable(quota)).toBe(true)
-      expect(yield* decisions(quota, 12)).toEqual(Array(12).fill(true))
+      expect(SessionRunnerRetry.isRetryable(quota)).toBe(false)
+      expect(yield* decisions(quota, 12)).toEqual(Array(12).fill(false))
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_quota_terminal"))
+      expect(yield* policy({ ...input(quota), hook: (event) => Effect.sync(() => { event.decision = { retry: true, delay: 0 } }) })).toEqual({ retry: false })
+    }),
+  )
+
+  it.effect("waits for an explicit five-hour quota reset beyond normal retry caps", () =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_quota_reset"), () => Effect.succeed(1_000))
+      const cause = new AIError({ reason: new QuotaExceededError({
+        message: "Go usage limit exceeded",
+        retryAfterMs: 120_000,
+        body: JSON.stringify({ error: { type: "GoUsageLimitError" }, metadata: { limitName: "5 hour", resetsAt: new Date(now + 7_200_000).toISOString() } }),
+      }) })
+      expect(SessionRunnerRetry.isRetryable(cause)).toBe(true)
+      expect(yield* policy({ ...input(cause), hook: (event) => Effect.sync(() => { event.decision = { retry: true, delay: 0 } }) })).toMatchObject({ retry: true, delay: 7_200_000 })
+    }),
+  )
+
+  it.effect("uses retry-after only for an explicitly identified five-hour window", () =>
+    Effect.gen(function* () {
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_quota_retry_after"))
+      const cause = new AIError({ reason: new QuotaExceededError({
+        message: "Go usage limit exceeded",
+        retryAfterMs: 3_600_000,
+        body: JSON.stringify({ error: { type: "GoUsageLimitError" }, metadata: { limitName: "5 hour" } }),
+      }) })
+      expect(yield* policy(input(cause))).toMatchObject({ retry: true, delay: 3_600_000 })
+    }),
+  )
+
+  it.effect("terminates weekly, unknown, missing, invalid, past, and excessive quota resets", () =>
+    Effect.gen(function* () {
+      const now = yield* Clock.currentTimeMillis
+      for (const metadata of [
+        { limitName: "weekly", resetsAt: new Date(now + 1_000).toISOString() },
+        { limitName: "monthly", resetsAt: new Date(now + 1_000).toISOString() },
+        { limitName: "unknown", resetsAt: new Date(now + 1_000).toISOString() },
+        { limitName: "5 hour" },
+        { limitName: "5 hour", resetsAt: "invalid" },
+        { limitName: "5 hour", resetsAt: new Date(now - 1_000).toISOString() },
+        { limitName: "5 hour", resetsAt: new Date(now + 21_600_000).toISOString() },
+      ]) {
+        const cause = new AIError({ reason: new QuotaExceededError({ message: "limit", body: JSON.stringify({ error: { type: "GoUsageLimitError" }, metadata }) }) })
+        const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_quota_invalid"))
+        expect(yield* policy(input(cause))).toEqual({ retry: false })
+      }
     }),
   )
 
@@ -172,7 +219,7 @@ describe("SessionRunnerRetry.policy", () => {
   it.effect("restores retry after a hook rejects an eligible failure", () =>
     Effect.gen(function* () {
       const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_retry_hook"))
-      const quota = new AIError({ reason: new QuotaExceededError({ message: "quota" }) })
+      const quota = internal
       const result = yield* policy({
         ...input(quota),
         hook: (event) =>

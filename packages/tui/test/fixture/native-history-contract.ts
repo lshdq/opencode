@@ -1,6 +1,6 @@
 import type { TextareaRenderable } from "@opentui/core"
 
-// Expectations are from OpenTUI v0.5.10's Zig checkpoints, NOT the binder.
+// Native checkpoint expectations originate in 0.5.10; invalid ranges now throw in 0.8.1.
 // See src/component/prompt/原生撤销契约.md before changing these values.
 export type NativeHistoryCase = {
   name: string
@@ -10,6 +10,7 @@ export type NativeHistoryCase = {
   select?: (input: TextareaRenderable, prefix: number) => void
   act: (input: TextareaRenderable, prefix: number) => void
   steps: number
+  error?: string
   reset?: "native" | "clear" | "history"
 }
 
@@ -20,25 +21,25 @@ export const nativeHistoryCases: NativeHistoryCase[] = [
   { name: "insertText empty", act: (r) => r.editBuffer.insertText(""), steps: 0 },
   { name: "insertText multiline", act: (r) => r.editBuffer.insertText("x\n中\ny"), steps: 1 },
   { name: "insertText zero-width", act: (r) => r.editBuffer.insertText("\u0301"), steps: 1 },
-  { name: "forward EOF", act: (r) => r.editBuffer.deleteChar(), steps: 1 },
-  { name: "forward empty", empty: true, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
-  { name: "forward repeated EOF", act: (r) => { r.editBuffer.deleteChar(); r.editBuffer.deleteChar(); r.editBuffer.deleteChar() }, steps: 3 },
-  { name: "forward character", tail: "xy", at: 0, act: (r) => r.editBuffer.deleteChar(), steps: 2 },
-  { name: "forward newline", tail: "\nx", at: 0, act: (r) => r.editBuffer.deleteChar(), steps: 2 },
-  { name: "forward empty line", tail: "\n\nx", at: { row: 1, col: 0 }, act: (r) => r.editBuffer.deleteChar(), steps: 2 },
-  { name: "forward wide interior", tail: "中x", at: 1, act: (r) => r.editBuffer.deleteChar(), steps: 2 },
-  { name: "forward emoji interior", tail: "👩‍💻x", at: 1, act: (r) => r.editBuffer.deleteChar(), steps: 2 },
-  { name: "forward tab interior", tail: "\tx", at: 1, act: (r) => r.editBuffer.deleteChar(), steps: 2 },
+  { name: "forward EOF", act: (r) => r.editBuffer.deleteChar(), steps: 0 },
+  { name: "forward empty", empty: true, act: (r) => r.editBuffer.deleteChar(), steps: 0 },
+  { name: "forward repeated EOF", act: (r) => { r.editBuffer.deleteChar(); r.editBuffer.deleteChar(); r.editBuffer.deleteChar() }, steps: 0 },
+  { name: "forward character", tail: "xy", at: 0, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
+  { name: "forward newline", tail: "\nx", at: 0, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
+  { name: "forward empty line", tail: "\n\nx", at: { row: 1, col: 0 }, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
+  { name: "forward wide interior", tail: "中x", at: 1, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
+  { name: "forward emoji interior", tail: "👩‍💻x", at: 1, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
+  { name: "forward tab interior", tail: "\tx", at: 1, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
   { name: "forward leading combining", tail: "\u0301x", at: 0, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
   { name: "forward leading control", tail: "\u0001x", at: 0, act: (r) => r.editBuffer.deleteChar(), steps: 1 },
   { name: "forward virtual mark", at: "start", act: (r) => r.editBuffer.deleteChar(), steps: 1 },
-  { name: "forward buffer with selection", at: "start", select: (r) => r.editorView.setSelection(0, 1), act: (r) => r.editBuffer.deleteChar(), steps: 2 },
+  { name: "forward buffer with selection", at: "start", select: (r) => r.editorView.setSelection(0, 1), act: (r) => r.editBuffer.deleteChar(), steps: 1 },
   { name: "backspace BOF", at: "start", act: (r) => r.editBuffer.deleteCharBackward(), steps: 0 },
   { name: "backspace empty", empty: true, act: (r) => r.editBuffer.deleteCharBackward(), steps: 0 },
   { name: "backspace character", tail: "xy", act: (r) => r.editBuffer.deleteCharBackward(), steps: 1 },
   { name: "backspace newline", tail: "\nx", at: { row: 1, col: 0 }, act: (r) => r.editBuffer.deleteCharBackward(), steps: 1 },
   { name: "backspace wide interior", tail: "中x", at: 1, act: (r) => r.editBuffer.deleteCharBackward(), steps: 1 },
-  { name: "backspace control boundary", tail: "A\u0001B", at: 1, act: (r) => r.editBuffer.deleteCharBackward(), steps: 0 },
+  { name: "backspace control boundary", tail: "A\u0001B", at: 1, act: (r) => r.editBuffer.deleteCharBackward(), steps: 1 },
   { name: "backspace virtual mark", at: -1, act: (r) => r.editBuffer.deleteCharBackward(), steps: 1 },
   { name: "backspace buffer with selection", select: (r) => r.editorView.setSelection(0, 1), act: (r) => r.editBuffer.deleteCharBackward(), steps: 1 },
   { name: "newline populated", act: (r) => r.editBuffer.newLine(), steps: 1 },
@@ -50,8 +51,8 @@ export const nativeHistoryCases: NativeHistoryCase[] = [
   { name: "deleteLine first of multiple", tail: "\nx", at: "start", act: (r) => r.editBuffer.deleteLine(), steps: 1 },
   { name: "range equal", act: (r) => r.editBuffer.deleteRange(0, 0, 0, 0), steps: 0 },
   { name: "range equal invalid", act: (r) => r.editBuffer.deleteRange(99, 99, 99, 99), steps: 0 },
-  { name: "range unequal invalid", act: (r) => r.editBuffer.deleteRange(99, 0, 100, 0), steps: 1 },
-  { name: "range fractional equal after u32", act: (r) => r.editBuffer.deleteRange(0.1, 1.1, 0.9, 1.9), steps: 0 },
+  { name: "range unequal invalid", act: (r) => r.editBuffer.deleteRange(99, 0, 100, 0), steps: 0, error: "InvalidArgument" },
+  { name: "range fractional equal after u32", act: (r) => r.editBuffer.deleteRange(0.1, 1.1, 0.9, 1.9), steps: 0, error: "non-negative integer" },
   { name: "range normal", tail: "xy", act: (r, p) => r.editBuffer.deleteRange(0, p, 0, p + 1), steps: 1 },
   { name: "range reversed", tail: "xy", act: (r, p) => r.editBuffer.deleteRange(0, p + 1, 0, p), steps: 1 },
   { name: "range wide interior", tail: "中x", act: (r, p) => r.editBuffer.deleteRange(0, p + 1, 0, p + 2), steps: 1 },

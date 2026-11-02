@@ -153,7 +153,7 @@ test.each(["model", "provider", "mcp", "skill", "config"])("%s HTTP errors are r
 
 test("a genuine location read failure keeps the recovery target", async () => {
   const calls = createFetch((url) => url.pathname === "/api/location"
-    ? new Response("Directory missing", { status: 404 }) : undefined, createEventStream())
+    ? json({ _tag: "LocationNotFoundError", location: { directory: process.cwd() }, message: "Directory missing" }, { status: 404 }) : undefined, createEventStream())
   let location!: ReturnType<typeof useLocation>
   function Probe() {
     location = useLocation()
@@ -175,13 +175,14 @@ test("a genuine location read failure keeps the recovery target", async () => {
   }
 })
 
-test("syncs VCS info and applies branch updates", async () => {
+test("syncs VCS info and reloads it on branch updates", async () => {
   const events = createEventStream()
+  let branch = "main"
   const calls = createFetch((url) => {
     if (url.pathname !== "/api/vcs") return undefined
     return json({
       location: { directory, project: { id: "proj_test", directory: worktree, canonical: worktree } },
-      data: { branch: { current: "main", default: "main" } },
+      data: { branch: { current: branch, default: "main" } },
     })
   }, events)
   let data!: ReturnType<typeof useData>
@@ -205,6 +206,7 @@ test("syncs VCS info and applies branch updates", async () => {
 
   try {
     await wait(() => data.location.vcs.info()?.branch.current === "main")
+    branch = "feature"
     emitEvent(events, {
       id: "evt_vcs_branch",
       created: Date.now(),
@@ -754,7 +756,6 @@ test("restores running manual compaction before applying live deltas", async () 
             status: "running",
             reason: "manual",
             summary: "Existing ",
-            recent: "",
             time: { created: 1 },
           },
         ],
@@ -1689,7 +1690,7 @@ test("tracks session status from active sessions and execution events", async ()
       created: 1,
       type: "session.compaction.started",
       durable: durable("session-manual", 2),
-      data: { sessionID: "session-manual", reason: "manual", recent: "", inputID: "message-compaction" },
+      data: { sessionID: "session-manual", reason: "manual", inputID: "message-compaction" },
     })
     emitEvent(events, {
       id: "evt_manual_compaction_delta",
@@ -1708,7 +1709,7 @@ test("tracks session status from active sessions and execution events", async ()
       created: 3,
       type: "session.compaction.ended",
       durable: durable("session-manual", 4),
-      data: { sessionID: "session-manual", reason: "manual", text: "Streamed summary", recent: "recent" },
+      data: { sessionID: "session-manual", reason: "manual", text: "Streamed summary" },
     })
     await wait(() => {
       const message = data.session.message.get("session-manual", "message-compaction")
@@ -1726,7 +1727,7 @@ test("tracks session status from active sessions and execution events", async ()
       created: 0,
       type: "session.compaction.started",
       durable: durable("session-live", 2),
-      data: { sessionID: "session-live", reason: "auto", recent: "" },
+      data: { sessionID: "session-live", reason: "auto" },
     })
     emitEvent(events, {
       id: "evt_compaction_delta_1",
@@ -1751,7 +1752,7 @@ test("tracks session status from active sessions and execution events", async ()
       created: 0,
       type: "session.compaction.ended",
       durable: durable("session-live", 5),
-      data: { sessionID: "session-live", reason: "auto", text: "Live summary", recent: "recent" },
+      data: { sessionID: "session-live", reason: "auto", text: "Live summary" },
     })
     await wait(() => {
       const message = data.session.message.get("session-live", "msg_compaction_started")
@@ -1827,7 +1828,7 @@ test.each(["before", "between", "after"])("shows compaction admitted %s steers i
       created: 4,
       type: "session.compaction.started",
       durable: durable(sessionID, 4),
-      data: { sessionID, reason: "manual", recent: "", inputID: "compact" },
+      data: { sessionID, reason: "manual", inputID: "compact" },
     })
     await wait(() => rows[0]?.type === "message")
     expect(unwrap(rows)).toMatchObject(["compact", "a", "b"].map((messageID) => ({ type: "message", messageID })))
@@ -1836,7 +1837,7 @@ test.each(["before", "between", "after"])("shows compaction admitted %s steers i
       created: 5,
       type: "session.compaction.ended",
       durable: durable(sessionID, 5),
-      data: { sessionID, reason: "manual", text: "## Objective\n- Checkpoint", recent: "" },
+      data: { sessionID, reason: "manual", text: "## Objective\n- Checkpoint" },
     })
     for (const [index, id] of ["a", "b"].entries()) {
       emitEvent(events, {
@@ -1962,7 +1963,6 @@ test("restores queued compaction from durable pending input", async () => {
       data: {
         sessionID,
         reason: "manual",
-        recent: "",
         inputID: "message-compaction-queued",
       },
     })
@@ -1974,7 +1974,7 @@ test("restores queued compaction from durable pending input", async () => {
       created: 3,
       type: "session.compaction.ended",
       durable: durable(sessionID, 7),
-      data: { sessionID, reason: "manual", text: "Summary", recent: "" },
+      data: { sessionID, reason: "manual", text: "Summary" },
     })
     expect(data.session.pending.list(sessionID).map((item) => item.id)).toEqual(["message-compaction-later"])
 
@@ -2978,7 +2978,7 @@ test("settles pending tools when a live failure arrives", async () => {
         id: "call-1",
         input: {},
         executed: false,
-        state: { call: true },
+        native: { call: true },
       },
     })
     emitEvent(events, {
@@ -3014,7 +3014,7 @@ test("settles pending tools when a live failure arrives", async () => {
         id: "call-1",
         error: { type: "unknown", message: "aborted" },
         executed: false,
-        resultState: { result: true },
+        native: { result: true },
       },
     })
 
@@ -3041,8 +3041,7 @@ test("settles pending tools when a live failure arrives", async () => {
     expect(tool.state.metadata).toBeUndefined()
     expect(tool.state.content).toBeUndefined()
     expect(tool.executed).toBe(false)
-    expect(tool.providerState).toEqual({ call: true })
-    expect(tool.providerResultState).toEqual({ result: true })
+    expect(tool.native).toEqual({ call: true, result: true })
     expect(sync.session.message.list("session-1").map((message) => message.type)).toEqual([
       "agent-switched",
       "model-switched",

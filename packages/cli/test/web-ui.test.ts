@@ -74,20 +74,19 @@ describe("web UI", () => {
       expect(yield* Effect.promise(() => response.json())).toHaveProperty("pid")
 
       const pairing = yield* Effect.promise(() =>
-        fetch(new URL("/api/pair", origin), {
+        loopbackRequest(new URL("/api/pair", origin), {
           method: "POST",
           headers: { authorization: `Basic ${btoa("opencode:secret")}` },
         }).then((response) => response.json() as Promise<{ code: string }>),
       )
       const redirect = yield* Effect.promise(() =>
-        fetch(new URL(`/auth/connect/${pairing.code}`, origin), {
-          redirect: "manual",
+        loopbackRequest(new URL(`/auth/connect/${pairing.code}`, origin), {
           headers: { accept: "text/html" },
         }),
       )
       expect(redirect.status).toBe(302)
       const cookie = (redirect.headers.get("set-cookie") ?? "").split(";")[0]
-      const authorized = yield* Effect.promise(() => fetch(new URL("/api/info", origin), { headers: { cookie } }))
+      const authorized = yield* Effect.promise(() => loopbackRequest(new URL("/api/info", origin), { headers: { cookie } }))
       expect(authorized.status).toBe(200)
       yield* Effect.promise(() => authorized.arrayBuffer())
     }).pipe(Effect.provide(NodeFileSystem.layer)),
@@ -107,9 +106,8 @@ describe("web UI", () => {
           const origin = HttpServer.formatAddress(http.address)
           const get = (pathname: string, encoding: string) =>
             Effect.promise(async () => {
-              const response = await fetch(`${origin}${pathname}`, {
+              const response = await loopbackRequest(`${origin}${pathname}`, {
                 headers: { "accept-encoding": encoding },
-                decompress: false,
               })
               return { headers: response.headers, body: new Uint8Array(await response.arrayBuffer()) }
             })
@@ -220,6 +218,8 @@ describe("web UI", () => {
           expect(fallback.headers.get("content-security-policy")).toContain("default-src 'self'")
           expect(fallback.headers.get("content-security-policy")).toContain("connect-src * data: blob:")
           expect(fallback.headers.get("content-security-policy")).toContain("worker-src 'self' blob:")
+          expect(fallback.headers.get("content-security-policy")).toContain("frame-src 'self' blob:")
+          expect(fallback.headers.get("content-security-policy")).toContain("object-src 'self' blob:")
 
           const dotted = yield* Effect.promise(() => loopbackRequest(`${origin}/workspace/example.js`))
           expect(dotted.status).toBe(200)

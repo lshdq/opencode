@@ -38,6 +38,7 @@ mock.module("@/runtime/server/current", () => ({
     location: {
       agent: {
         list: () => agentCatalog(),
+        sync: async () => {},
       },
       session: {
         get: () => undefined,
@@ -49,6 +50,7 @@ mock.module("@/runtime/server/current", () => ({
 mock.module("@/runtime/server/client", () => ({
   useServerSDK: () => ({
     scope: "local",
+    connection: { status: () => "connected" },
     event: {
       on: () => () => {},
     },
@@ -60,6 +62,7 @@ mock.module("@/workspaces/location", () => ({
 }))
 
 mock.module("@/providers/catalog/providers", () => ({
+  syncWhileBooting: <T,>(load: () => Promise<T>) => load(),
   useProviders: () => ({
     all: () =>
       new Map([
@@ -93,7 +96,8 @@ mock.module("@/providers/models/models", () => ({
 
     return {
       ready: Object.assign(() => true, { promise: undefined }),
-      recent: { list: () => [] },
+      recent: { list: () => [], push: () => {} },
+      favorite: { list: () => [], toggle: () => {} },
       variant: { get: () => undefined, set: () => {} },
       find: (key: { providerID: string; modelID: string }) =>
         key.providerID === provider.id && key.modelID === model.id ? model : undefined,

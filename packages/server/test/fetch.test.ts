@@ -5,7 +5,7 @@ import path from "node:path"
 import { Agent } from "@opencode/schema/agent"
 import { Integration } from "@opencode/schema/integration"
 import { ServerInfo } from "@opencode/protocol/groups/server"
-import { Cause, Effect, Exit, Schedule, Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import { Session } from "@opencode/schema/session"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
@@ -19,57 +19,106 @@ const options = {
   fs: { filewatcher: false },
 } as const
 
-it.live("returns LocationNotFoundError for a missing folder and recovers once it exists", () =>
-  Effect.gen(function* () {
-    const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-directory-errors-")))
-    const directory = path.join(config.path, "project")
-    const handler = yield* ServerFetch.make({ ...options, config: { directory: config.path } })
-    // Session creation only resolves its placement; it does not boot the Location graph.
-    const created = yield* Effect.promise(() =>
-      handler(
-        new Request("http://opencode.local/api/session", {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-opencode-directory": encodeURIComponent(directory) },
-          body: JSON.stringify({ location: { directory } }),
-        }),
-      ),
-    )
-    expect(created.status).toBe(200)
-    const session = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
-      yield* Effect.promise(() => created.json()),
-    ).data
-    const endpoints = [
-      "/api/model",
-      "/api/integration",
-      `/api/session/${session.id}/permission`,
-      `/api/experimental/session/${session.id}/instructions/entries`,
-      `/api/session/${session.id}/form`,
-      "/api/session/global/form",
-    ]
-    for (const endpoint of endpoints) {
-      const response = yield* Effect.promise(() =>
+// These cases exercise OpenAI's real listener and HttpApi, not every builtin tool/provider's startup.
+const oauthOptions = {
+  ...options,
+  config: { project: false, content: JSON.stringify({ plugins: ["-*", "opencode.provider.openai"] }) },
+} as const
+
+// A failed Location build and recovery is a complete contract per endpoint, not one five-boot test.
+for (const resource of ["model", "integration", "permission", "form"] as const) {
+  it.live(`returns LocationNotFoundError for a missing ${resource} folder and recovers once it exists`, () =>
+    Effect.gen(function* () {
+      const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-directory-errors-")))
+      const directory = path.join(config.path, "project")
+      const handler = yield* ServerFetch.make({ ...options, config: { directory: config.path } })
+      // Session creation only resolves its placement; it does not boot the Location graph.
+      const created = yield* Effect.promise(() =>
         handler(
-          new Request(`http://opencode.local${endpoint}`, {
-            headers: { "x-opencode-directory": encodeURIComponent(directory) },
+          new Request("http://opencode.local/api/session", {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-opencode-directory": encodeURIComponent(directory) },
+            body: JSON.stringify({ location: { directory } }),
           }),
         ),
       )
+      expect(created.status).toBe(200)
+      const session = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+        yield* Effect.promise(() => created.json()),
+      ).data
+      const endpoint =
+        resource === "permission"
+          ? `/api/session/${session.id}/permission`
+          : resource === "form"
+            ? "/api/session/global/form"
+            : `/api/${resource}`
+      const request = () =>
+        handler(new Request(`http://opencode.local${endpoint}`, {
+          headers: { "x-opencode-directory": encodeURIComponent(directory) },
+        }))
+      const response = yield* Effect.promise(request)
       expect({ endpoint, status: response.status }).toEqual({ endpoint, status: 404 })
       expect(yield* Effect.promise(() => response.json())).toEqual({
         _tag: "LocationNotFoundError",
         location: { directory },
         message: `Location not found: ${directory}`,
       })
-    }
+      yield* Effect.promise(() => fs.mkdir(directory))
+      expect((yield* Effect.promise(request)).status).toBe(200)
+    }),
+  )
+}
+
+it.live("manages a session whose directory was deleted", () =>
+  Effect.gen(function* () {
+    const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-deleted-directory-")))
+    const directory = path.join(config.path, "project")
     yield* Effect.promise(() => fs.mkdir(directory))
-    const recovered = yield* Effect.promise(() =>
-      handler(
-        new Request("http://opencode.local/api/model", {
-          headers: { "x-opencode-directory": encodeURIComponent(directory) },
-        }),
-      ),
-    )
-    expect(recovered.status).toBe(200)
+    const handler = yield* ServerFetch.make({ ...options, config: { directory: config.path } })
+    const request = (endpoint: string, method: string, body?: unknown) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://opencode.local${endpoint}`, {
+            method,
+            headers: { "content-type": "application/json" },
+            body: body === undefined ? undefined : JSON.stringify(body),
+          }),
+        ),
+      )
+    const created = yield* request("/api/session", "POST", { location: { directory } })
+    expect(created.status).toBe(200)
+    const session = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+      yield* Effect.promise(() => created.json()),
+    ).data
+    yield* Effect.promise(() => fs.rm(directory, { recursive: true }))
+
+    const statuses = [
+      yield* request(`/api/session/${session.id}`, "PATCH", { title: "Renamed" }),
+      yield* request(`/api/session/${session.id}`, "PATCH", { archived: true }),
+      yield* request(`/api/session/${session.id}/interrupt`, "POST"),
+      yield* request(`/api/experimental/session/${session.id}/instructions/entries`, "GET"),
+    ].map((response) => response.status)
+    expect(statuses).toEqual([204, 204, 200, 200])
+
+    const fetched = yield* request(`/api/session/${session.id}`, "GET")
+    const updated = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+      yield* Effect.promise(() => fetched.json()),
+    ).data
+    expect(updated.title).toBe("Renamed")
+    expect(updated.time.archived).toBeDefined()
+
+    // Title generation still runs in the session's folder.
+    const generated = yield* request(`/api/session/${session.id}`, "PATCH", { title: "" })
+    expect(generated.status).toBe(404)
+    expect(yield* Effect.promise(() => generated.json())).toEqual({
+      _tag: "LocationNotFoundError",
+      location: { directory },
+      message: `Location not found: ${directory}`,
+    })
+
+    const missing = yield* request("/api/session/ses_missing/interrupt", "POST")
+    expect(missing.status).toBe(404)
+    expect(((yield* Effect.promise(() => missing.json())) as { _tag: string })._tag).toBe("SessionNotFoundError")
   }),
 )
 
@@ -78,29 +127,30 @@ type Handler = (request: Request) => Promise<Response>
 function occupy(port: number, cancel = false) {
   return Effect.gen(function* () {
     const requests: string[] = []
+    let stopped: Promise<void> | undefined
     // A localhost listener occupies only one family; Bun can bind the other.
     const servers = ["127.0.0.1", "::1"].map((host) => ({
       host,
       server: createServer((request, response) => {
         requests.push(request.url ?? "")
         response.end(cancel ? "cancelled" : "still running", () => {
-          if (cancel)
-            servers.forEach((item) => {
-              // Bun clears its native handle in close(), so force-close connections first.
-              item.server.closeAllConnections()
-              item.server.close()
-            })
+          if (cancel) void stop()
         })
       }),
     }))
-    yield* Effect.addFinalizer(() =>
-      Effect.forEach(servers, (item) =>
-        Effect.callback<void>((resume) => {
-          item.server.closeAllConnections()
-          item.server.close(() => resume(Effect.void))
-        }),
-      ),
-    )
+    // /cancel and scope teardown can both close these listeners. Await the same close operation once.
+    const stop = () =>
+      (stopped ??= Promise.all(
+        servers.map(
+          (item) =>
+            new Promise<void>((resolve) => {
+              // Bun clears its native handle in close(), so force-close connections first.
+              item.server.closeAllConnections()
+              item.server.close(() => resolve())
+            }),
+        ),
+      ).then(() => undefined))
+    yield* Effect.addFinalizer(() => Effect.promise(stop))
     yield* Effect.forEach(servers, (item) =>
       Effect.callback<void, Error>((resume) => {
         const onError = (error: Error) => resume(Effect.fail(error))
@@ -117,23 +167,19 @@ function occupy(port: number, cancel = false) {
 
 const connectOpenAI = (handler: Handler) =>
   Effect.gen(function* () {
-    // Catalog endpoints no longer wait for plugin initialization.
-    yield* Effect.gen(function* () {
-      const response = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/integration")))
-      expect(response.status).toBe(200)
-      const body = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Array(Integration.Info) }))(
-        yield* Effect.promise(() => response.json()),
-      )
-      return body.data.some(
+    // integration.list owns the activation barrier; wait for its response, not a competing timer.
+    const response = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/integration")))
+    expect(response.status).toBe(200)
+    const body = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Array(Integration.Info) }))(
+      yield* Effect.promise(() => response.json()),
+    )
+    expect(
+      body.data.some(
         (integration) =>
           integration.id === "openai" &&
           integration.methods.some((method) => method.type === "oauth" && method.id === "chatgpt-browser"),
-      )
-    }).pipe(
-      Effect.filterOrFail((ready) => ready),
-      Effect.retry(Schedule.spaced("10 millis")),
-      Effect.timeout("2 seconds"),
-    )
+      ),
+    ).toBe(true)
     return yield* Effect.promise(() =>
       handler(
         new Request("http://opencode.local/api/integration/openai/connect/oauth", {
@@ -144,6 +190,21 @@ const connectOpenAI = (handler: Handler) =>
       ),
     )
   })
+
+const oauthWarnings = Effect.acquireRelease(
+  Effect.sync(() => {
+    const warnings: Error[] = []
+    const listener = (warning: Error) => {
+      if (warning.name === "MaxListenersExceededWarning" && warning.message.includes("listening")) warnings.push(warning)
+    }
+    process.on("warning", listener)
+    return { warnings, listener }
+  }),
+  ({ listener }) =>
+    Effect.sync(() => {
+      process.off("warning", listener)
+    }),
+)
 
 it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
   Effect.gen(function* () {
@@ -165,7 +226,7 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     )
     expect(body.version).toBe("test-version")
     expect(body.paths.tmp).toEndWith("opencode")
-    expect(body.capabilities?.persistentPty).toBe(process.platform !== "win32")
+    expect(body.capabilities?.persistentPty).toBe(true)
   }),
 )
 
@@ -267,6 +328,18 @@ it.live("applies custom CORS origins to HTTP responses and PTY ticket checks", (
             ),
           )
           expect(invalidTicket.status).toBe(403)
+
+          const invalidMcpTicket = yield* Effect.promise(() =>
+            handler(
+              new Request(
+                "http://opencode.local/api/experimental/client-mcp?ticket=invalid&location[directory]=/tmp&name=tui",
+                {
+                  headers: { origin },
+                },
+              ),
+            ),
+          )
+          expect(invalidMcpTicket.status).toBe(403)
 
           const connect = yield* Effect.promise(() =>
             handler(
@@ -372,7 +445,7 @@ it.live("returns 404 when a previously readable file is deleted", () =>
 it.live("cancels a stale OpenAI OAuth callback server before falling back", () =>
   Effect.gen(function* () {
     const requests = yield* occupy(1455, true)
-    const handler = yield* ServerFetch.make(options)
+    const handler = yield* ServerFetch.make(oauthOptions)
     const response = yield* connectOpenAI(handler)
 
     expect(response.status).toBe(200)
@@ -384,14 +457,17 @@ it.live("cancels a stale OpenAI OAuth callback server before falling back", () =
 
 it.live("falls back to port 1457 when OpenAI OAuth port 1455 remains busy", () =>
   Effect.gen(function* () {
+    const captured = yield* oauthWarnings
     const requests = yield* occupy(1455)
-    const handler = yield* ServerFetch.make(options)
+    const handler = yield* ServerFetch.make(oauthOptions)
     const response = yield* connectOpenAI(handler)
 
     expect(response.status).toBe(200)
     expect(requests).toContain("/cancel")
     const body = (yield* Effect.promise(() => response.json())) as { data: { url: string } }
     expect(new URL(body.data.url).searchParams.get("redirect_uri")).toBe("http://localhost:1457/auth/callback")
+    yield* Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)))
+    expect(captured.warnings).toEqual([])
   }),
 )
 
@@ -399,9 +475,10 @@ it.live(
   "explains how to recover when both OpenAI OAuth callback ports are busy",
   () =>
     Effect.gen(function* () {
+      const captured = yield* oauthWarnings
       yield* occupy(1455)
       yield* occupy(1457)
-      const handler = yield* ServerFetch.make(options)
+      const handler = yield* ServerFetch.make(oauthOptions)
       const response = yield* connectOpenAI(handler)
 
       expect(response.status).toBe(400)
@@ -411,6 +488,8 @@ it.live(
           "OpenAI browser login needs local port 1455 or 1457, but both are already in use. Stop the processes using those ports or choose Codex device code (legacy), then try again.",
         kind: "integration_authorization",
       })
+      yield* Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)))
+      expect(captured.warnings).toEqual([])
     }),
   // Real retries wait 18 * 200 ms; startup and scoped cleanup also count toward the deadline.
   { timeout: 10_000 },
@@ -471,7 +550,11 @@ it.live("routes pending requests through the Session's instance", () =>
       config: {
         directory: config.path,
         project: false,
-        content: JSON.stringify({ permissions: [{ action: "shell", resource: "*", effect: "ask" }] }),
+        content: JSON.stringify({
+          // Exercise the real agent and policy plugins without booting unrelated provider/tool catalogs.
+          plugins: ["-*", "opencode.agent", "opencode.config.agent"],
+          permissions: [{ action: "shell", resource: "*", effect: "ask" }],
+        }),
       },
     })
     const created = (yield* Effect.promise(() =>
@@ -561,23 +644,19 @@ it.live("routes pending requests through the Session's instance", () =>
     expect(globalForms.status).toBe(200)
     expect(yield* Effect.promise(() => globalForms.json())).toMatchObject({ data: [{ title: "Global form" }] })
 
-    // Agent permission policy is installed by plugin activation.
-    yield* Effect.gen(function* () {
-      const response = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/agent")))
-      expect(response.status).toBe(200)
-      const body = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Array(Agent.Info) }))(
-        yield* Effect.promise(() => response.json()),
-      )
-      return body.data.some(
+    // agent.list owns the activation barrier; do not race its request with a second timeout.
+    const response = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/agent")))
+    expect(response.status).toBe(200)
+    const body = Schema.decodeUnknownSync(Schema.Struct({ data: Schema.Array(Agent.Info) }))(
+      yield* Effect.promise(() => response.json()),
+    )
+    expect(
+      body.data.some(
         (agent) =>
           agent.id === "build" &&
           agent.permissions.some((rule) => rule.action === "shell" && rule.resource === "*" && rule.effect === "ask"),
-      )
-    }).pipe(
-      Effect.filterOrFail((ready) => ready),
-      Effect.retry(Schedule.spaced("10 millis")),
-      Effect.timeout("2 seconds"),
-    )
+      ),
+    ).toBe(true)
     const createdPermission = yield* Effect.promise(() =>
       handler(
         new Request(`http://opencode.local/api/session/${created.data.id}/permission`, {

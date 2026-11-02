@@ -16,7 +16,8 @@ async function fixture(root: string, options: { stage: Stage; home?: boolean; re
   const gate = Promise.withResolvers<void>()
   const entered = Promise.withResolvers<void>()
   const requests: { stage: string; body: Record<string, unknown> }[] = []
-  const setup = await createTestRenderer({ width: 100, height: 30, useThread: false, kittyKeyboard: true })
+  const setup = await createTestRenderer({ width: 100, height: 30, kittyKeyboard: true })
+  await setup.renderer.setupTerminal()
   setup.renderer.start()
   const location = { directory, project: { id: "proj_test", directory, canonical: directory } }
   const base = {
@@ -93,7 +94,8 @@ async function fixture(root: string, options: { stage: Stage; home?: boolean; re
     await setup.waitFor(() => setup.renderer.currentFocusedEditor instanceof InputRenderable)
     setup.mockInput.pressKey("a", { ctrl: true })
     await setup.waitForFrame((frame) => frame.includes("Name worktree"))
-    await setup.waitFor(() => setup.renderer.currentFocusedEditor instanceof InputRenderable)
+    // DialogPrompt now uses a textarea; do not type into the underlying composer before focus moves.
+    await setup.waitFor(() => setup.renderer.currentFocusedEditor instanceof TextareaRenderable && setup.renderer.currentFocusedEditor !== editor)
     await setup.mockInput.typeText("fresh")
     setup.mockInput.pressEnter()
     await setup.waitFor(() => setup.renderer.currentFocusedEditor === editor)
@@ -116,8 +118,9 @@ async function fixture(root: string, options: { stage: Stage; home?: boolean; re
     [Symbol.asyncDispose]: dispose,
   }
   } catch (error) {
+    const frame = setup.captureCharFrame()
     await dispose()
-    throw error
+    throw new Error(`${error instanceof Error ? error.message : String(error)}\n${frame}`, { cause: error })
   }
 }
 

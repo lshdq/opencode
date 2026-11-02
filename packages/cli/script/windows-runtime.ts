@@ -31,7 +31,7 @@ function validatePackageMetadata(value: unknown, message: string) {
     typeof value.version !== "string" ||
     !packageVersion.test(value.version) ||
     !("packageManager" in value) ||
-    value.packageManager !== "bun@1.4.2"
+    value.packageManager !== "bun@1.4.4"
   )
     throw new Error(message)
   return { version: value.version }

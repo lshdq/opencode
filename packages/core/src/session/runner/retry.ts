@@ -1,10 +1,10 @@
 export * as SessionRunnerRetry from "./retry.js"
 
-import { AIError, isRetryable } from "@opencode/ai"
+import { AIError } from "@opencode/ai/effect"
 import { Agent } from "@opencode/schema/agent"
 import { Model } from "@opencode/schema/model"
 import { SessionError } from "@opencode/schema/session-error"
-import { Clock, Duration, Effect, Pull, Schedule } from "effect"
+import { Clock, Duration, Effect, Option, Pull, Schedule, Schema } from "effect"
 import { Bus } from "../../bus.js"
 import { Config } from "../../config.js"
 import type { PluginHooks } from "../../plugin/hooks.js"
@@ -12,7 +12,25 @@ import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
 import { SessionSchema } from "../schema.js"
 
-export { isRetryable }
+const decodeFiveHourQuota = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Struct({
+  error: Schema.Struct({ type: Schema.Literal("GoUsageLimitError") }),
+  metadata: Schema.Struct({
+    limitName: Schema.Literal("5 hour"),
+    resetsAt: Schema.optional(Schema.DateFromString),
+  }),
+})))
+
+function quotaReset(error: AIError) {
+  if (error.reason._tag !== "QuotaExceeded") return
+  const body = decodeFiveHourQuota(error.reason.body)
+  if (Option.isNone(body)) return
+  if (body.value.metadata.resetsAt) return { at: body.value.metadata.resetsAt.getTime() }
+  const delay = error.reason.retryAfterMs
+  if (delay !== undefined && Number.isFinite(delay) && delay > 0) return { delay }
+}
+
+export const isRetryable = (error: AIError) =>
+  error.reason._tag === "QuotaExceeded" ? quotaReset(error) !== undefined : error.isRetryable
 
 interface Input {
   readonly cause: AIError
@@ -92,6 +110,25 @@ export const policy = (sessionID: SessionSchema.ID, getMaxDelay: MaxDelay = defa
             ? configuredMaxDelay
             : DEFAULT_RETRY_DELAY_MAX
         const now = yield* Clock.currentTimeMillis
+        if (input.cause.reason._tag === "QuotaExceeded") {
+          const reset = quotaReset(input.cause)
+          const at = reset?.at ?? (reset?.delay === undefined ? undefined : now + reset.delay)
+          // Only the explicit five-hour window is recoverable, and only until a credible reset.
+          // Other quotas must not be promoted by a generic provider retry hook.
+          if (at === undefined || !Number.isFinite(at) || at <= now || at - now > Duration.toMillis("5 hours"))
+            return { retry: false as const }
+          attempt++
+          yield* input.hook({
+            sessionID,
+            agent: input.agent,
+            model: input.model,
+            error: input.error,
+            attempt,
+            decision: { retry: true, delay: at - now },
+          })
+          // Hooks and normal retry caps must not schedule another request before the reset.
+          return { retry: true as const, attempt, delay: Math.max(0, at - (yield* Clock.currentTimeMillis)) }
+        }
         const next = yield* step(now, input).pipe(Pull.catchDone(() => Effect.succeed(undefined)))
         if (!next) return { retry: false as const }
         const [, duration] = next

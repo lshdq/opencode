@@ -1,6 +1,7 @@
 /// <reference path="./cross-spawn-parse.d.ts" />
 import path from "node:path"
 import parse from "cross-spawn/lib/parse.js"
+import { Redacted } from "effect"
 import type { ChildProcess } from "effect/process"
 import type { SpawnOptions } from "node:child_process"
 
@@ -18,7 +19,7 @@ export function isOwned(command: ChildProcess.StandardCommand) {
 }
 
 export function wrap(command: ChildProcess.StandardCommand, options: SpawnOptions) {
-  const parsed = parse(command.command, [...command.args], options)
+  const parsed = parse(command.command, command.args.map((arg) => Redacted.isRedacted(arg) ? Redacted.value(arg) : arg), options)
   const variable = `OPENCODE_MCP_JOB_${crypto.randomUUID().replaceAll("-", "")}`
   const line = [
     quote(parsed.command),

@@ -1,4 +1,4 @@
-import { resolveRenderLib, type ExtmarksController, type TextareaRenderable } from "@opentui/core"
+import type { ExtmarksController, TextareaRenderable } from "@opentui/core"
 
 export const PROMPT_UNDO_LIMIT = 256
 export const PROMPT_UNDO_BYTES = 16 * 1024 * 1024
@@ -8,7 +8,6 @@ export function bindPromptUndo<T>(input: TextareaRenderable, capture: () => T, r
   const extmarks = input.extmarks as ExtmarksController
   const buffer = input.editBuffer
   const view = input.editorView
-  const lib = resolveRenderLib()
   const native = {
     insertChar: buffer.insertChar.bind(buffer),
     insertText: buffer.insertText.bind(buffer),
@@ -43,13 +42,17 @@ export function bindPromptUndo<T>(input: TextareaRenderable, capture: () => T, r
     moveUpVisual: view.moveUpVisual.bind(view),
     moveDownVisual: view.moveDownVisual.bind(view),
   }
+  const renderable = {
+    insertChar: input.insertChar.bind(input),
+    insertText: input.insertText.bind(input),
+  }
   const viewCursorMethods = {
     setCursorByOffset: view.setCursorByOffset.bind(view),
     gotoVisualLineEnd: view.gotoVisualLineEnd.bind(view),
     setLocalSelection: view.setLocalSelection.bind(view),
     updateLocalSelection: view.updateLocalSelection.bind(view),
   }
-  // OpenTUI 0.5.10 has no public extmark-history reset. This is the sole
+  // OpenTUI 0.8.1 has no public extmark-history reset. This is the sole
   // version-pinned TS adapter (not a native ABI/rope dependency); see 契约.md.
   const saveMarks = extmarks["saveSnapshot"]
   extmarks["history"].clear()
@@ -84,10 +87,8 @@ export function bindPromptUndo<T>(input: TextareaRenderable, capture: () => T, r
   }
 
   function text() {
-    // EditBuffer.getText() has a 1 MiB output cap. History must not silently
-    // truncate a larger draft when restoring it.
-    const size = lib.textBufferGetByteSize(lib.editBufferGetTextBuffer(buffer.ptr))
-    return share(lib.decoder.decode(lib.editBufferGetText(buffer.ptr, size + 1) ?? new Uint8Array()))
+    // OpenTUI 0.8 reads the complete native buffer; no raw pointer or 1 MiB workaround is needed.
+    return share(buffer.getText())
   }
 
   function state(): State {
@@ -254,6 +255,18 @@ export function bindPromptUndo<T>(input: TextareaRenderable, capture: () => T, r
     moveUpVisual: vertical(editor.moveUpVisual, true),
     moveDownVisual: vertical(editor.moveDownVisual, true),
   })
+  // OpenTUI 0.8 replaces selections atomically. Keep the fork's two logical edits
+  // (delete selection, then insert), using public methods so both enter our history.
+  Object.assign(input, {
+    insertChar: (char: string) => {
+      if (input.hasSelection()) input.deleteSelection()
+      renderable.insertChar(char)
+    },
+    insertText: (text: string) => {
+      if (input.hasSelection()) input.deleteSelection()
+      renderable.insertText(text)
+    },
+  })
 
   return () => {
     undo.length = 0
@@ -267,6 +280,7 @@ export function bindPromptUndo<T>(input: TextareaRenderable, capture: () => T, r
     Object.assign(buffer, cursorMethods)
     Object.assign(view, editor)
     Object.assign(view, viewCursorMethods)
+    Object.assign(input, renderable)
   }
 }
 

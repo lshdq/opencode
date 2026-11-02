@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test"
-import { EditBuffer, resolveRenderLib, TextareaRenderable, type ExtmarksController, type WidthMethod } from "@opentui/core"
+import { EditBuffer, TextareaRenderable, type ExtmarksController, type WidthMethod } from "@opentui/core"
 import { createTestRenderer, setRendererCapabilities } from "@opentui/core/testing"
 import { bindPromptUndo, PROMPT_UNDO_BYTES, PROMPT_UNDO_LIMIT } from "../src/component/prompt/undo"
 
 async function fixture(text = "abcdefghij\nx\nabcdefghij", width = 80, widthMethod: WidthMethod = "unicode") {
-  const app = await createTestRenderer({ width, height: 10, useThread: false })
+  const app = await createTestRenderer({ width, height: 10 })
   setRendererCapabilities(app.renderer, { unicode: widthMethod })
   expect(app.renderer.widthMethod).toBe(widthMethod)
   const input = new TextareaRenderable(app.renderer, { id: "owned-history", initialValue: text, width, height: 8 })
@@ -138,16 +138,15 @@ test("shared 1 MiB metadata does not multiply by 256; oversized payload establis
   expect(app.metadata.payload).toBe("fresh")
 }, 30000)
 
-test("history restores complete text beyond OpenTUI getText's 1 MiB cap", async () => {
+test("history restores complete text beyond 1 MiB through the public buffer API", async () => {
   const base = "a".repeat(1024 * 1024 + 10)
   using app = await fixture(base)
   app.input.gotoBufferEnd()
   app.input.insertText("END")
   app.input.undo()
-  const lib = resolveRenderLib()
-  expect(lib.decoder.decode(lib.editBufferGetText(app.input.editBuffer.ptr, base.length + 100)!)).toBe(base)
+  expect(app.input.editBuffer.getText()).toBe(base)
   app.input.redo()
-  expect(lib.decoder.decode(lib.editBufferGetText(app.input.editBuffer.ptr, base.length + 100)!)).toBe(base + "END")
+  expect(app.input.editBuffer.getText()).toBe(base + "END")
   expect(app.input.logicalCursor.col).toBe(base.length + 3)
 }, 30000)
 
@@ -171,7 +170,7 @@ test.each(["wcwidth", "unicode", "unicode-wide"] as const)("owned history preser
 })
 
 test("cleanup is safe after renderer destruction and restores controller methods", async () => {
-  const app = await createTestRenderer({ width: 80, height: 10, useThread: false })
+  const app = await createTestRenderer({ width: 80, height: 10 })
   const input = new TextareaRenderable(app.renderer, { id: "destroyed-history" })
   app.renderer.root.add(input)
   const marks = input.extmarks as ExtmarksController

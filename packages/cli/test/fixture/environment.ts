@@ -3,7 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import { isolatedEnvironment } from "../../script/windows-runtime"
 
-export const transpilerCache = path.join(os.tmpdir(), "opencode-test-transpiler-cache")
+export const transpilerCache = process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH ?? path.join(os.tmpdir(), "opencode-test-transpiler-cache")
 
 export async function isolatedRoot(prefix: string) {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix))
@@ -12,6 +12,7 @@ export async function isolatedRoot(prefix: string) {
 export function isolatedEnv(root: string, overrides: Record<string, string | undefined> = {}) {
   return {
     ...isolatedEnvironment(root),
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpilerCache,
     HOME: root,
     OPENCODE_CLI_CONFIG_CONTENT: undefined,
     OPENCODE_CONFIG_CONTENT: "{}",

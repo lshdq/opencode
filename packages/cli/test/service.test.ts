@@ -10,8 +10,12 @@ import { TestClock } from "effect/testing"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { LayerNode } from "@opencode/util/effect/layer-node"
+import { AppProcess } from "@opencode/util/process"
+import { PortOwner } from "../src/services/port-owner"
 import { ServiceConfig } from "../src/services/service-config"
 import { ServiceRegistration } from "../src/services/service-registration"
+import { loopbackRequest } from "../script/loopback-http"
 import { isolatedEnv, transpilerCache } from "./fixture/environment"
 import { testEffect } from "../../core/test/lib/effect"
 
@@ -28,17 +32,17 @@ test("managed service ports are stable per installation channel", () => {
   expect(ServiceConfig.defaultPort("preview-a", "linux")).not.toBe(ServiceConfig.defaultPort("preview-b", "linux"))
 })
 
-test("managed service ports on Windows stay below the range Windows reserves", () => {
-  expect(ServiceConfig.defaultPort("latest", "win32")).toBe(0xc0de - 4096)
-  expect(ServiceConfig.defaultPort("dev", "win32")).toBe(0xc0de - 4096)
-  expect(ServiceConfig.defaultPort("local", "win32")).toBe(0xc0df - 4096)
+test("managed service ports on Windows stay below the ranges Windows and WSL reserve", () => {
+  expect(ServiceConfig.defaultPort("latest", "win32")).toBe(0x70de)
+  expect(ServiceConfig.defaultPort("dev", "win32")).toBe(0x70de)
+  expect(ServiceConfig.defaultPort("local", "win32")).toBe(0x70df)
   const ports = Array.from({ length: 200 }, (_, index) => ({
     windows: ServiceConfig.defaultPort(`preview-${index}`, "win32"),
     linux: ServiceConfig.defaultPort(`preview-${index}`, "linux"),
   }))
-  expect(ports.some((port) => port.linux >= 0xc000)).toBe(true)
-  expect(ports.every((port) => port.windows >= 10_000 && port.windows < 0xc000)).toBe(true)
-  expect(ports.filter((port) => port.linux < 0xc000 && port.windows !== port.linux)).toEqual([])
+  expect(ports.some((port) => port.linux >= 0x8000)).toBe(true)
+  expect(ports.every((port) => port.windows >= 10_000 && port.windows < 0x8000)).toBe(true)
+  expect(ports.filter((port) => port.linux < 0x8000 && port.windows !== port.linux)).toEqual([])
 })
 
 test("service disabled accepts only booleans without changing configuration on invalid input", async () => {
@@ -217,6 +221,72 @@ test("service config manages environment variables", async () => {
   }
 })
 
+test("saved service environment cannot move the registration's state directory", async () => {
+  expect(ServiceConfig.processEnv(undefined)).toBeUndefined()
+  expect(ServiceConfig.processEnv({ XDG_STATE_HOME: "/custom/state", XDG_DATA_HOME: "/custom/data", A: "1" })).toEqual({
+    XDG_DATA_HOME: "/custom/data",
+    A: "1",
+  })
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-service-env-state-"))
+  const layer = Global.layerWith({ config: path.join(root, "config"), state: path.join(root, "state") })
+  try {
+    await fs.mkdir(path.join(root, "config"), { recursive: true })
+    await Bun.write(
+      path.join(root, "config", ServiceConfig.filename()),
+      JSON.stringify({ env: { XDG_STATE_HOME: path.join(root, "elsewhere"), A: "1" } }),
+    )
+    const options = await Effect.runPromise(
+      ServiceConfig.options().pipe(Effect.provide(layer), Effect.provide(NodeFileSystem.layer)),
+    )
+    expect(options.env).toEqual({ A: "1" })
+    expect(options.file).toBe(path.join(root, "state", ServiceConfig.filename()))
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(process.platform === "win32" || !Bun.which("lsof"))("port owner names the listening process", async () => {
+  using listener = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+  using wildcard = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch: () => new Response() })
+  const describe = (port: number | undefined, hostname?: string) =>
+    Effect.runPromise(PortOwner.describe(port ?? 0, hostname).pipe(Effect.provide(LayerNode.compile(AppProcess.node))))
+  expect(await describe(listener.port)).toStartWith(`PID ${process.pid} (`)
+  expect(await describe(listener.port, "127.0.0.1")).toStartWith(`PID ${process.pid} (`)
+  expect(await describe(listener.port, "localhost")).toStartWith(`PID ${process.pid} (`)
+  expect(await describe(listener.port, "127.0.0.2")).toBeUndefined()
+  expect(await describe(wildcard.port, "127.0.0.2")).toStartWith(`PID ${process.pid} (`)
+})
+
+test.skipIf(process.platform === "win32")("port owner gives up on a lookup that ignores SIGTERM", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-port-owner-stuck-"))
+  const PATH = process.env.PATH
+  try {
+    await Bun.write(path.join(root, "lsof"), "#!/bin/sh\ntrap '' TERM\nsleep 10\n")
+    await fs.chmod(path.join(root, "lsof"), 0o755)
+    process.env.PATH = `${root}${path.delimiter}${PATH}`
+    const started = Date.now()
+    const owner = await Promise.race([
+      Effect.runPromise(PortOwner.describe(1).pipe(Effect.provide(LayerNode.compile(AppProcess.node)))),
+      Bun.sleep(4_000).then(() => "hung"),
+    ])
+    expect(owner).toBeUndefined()
+    expect(Date.now() - started).toBeLessThan(3_000)
+  } finally {
+    process.env.PATH = PATH
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test.skipIf(process.platform === "win32")("port owner is unknown for a free port", async () => {
+  const free = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() })
+  const port = free.port ?? 0
+  free.stop(true)
+  expect(
+    await Effect.runPromise(PortOwner.describe(port).pipe(Effect.provide(LayerNode.compile(AppProcess.node)))),
+  ).toBeUndefined()
+})
+
 test("service filenames share release channels and identify preview channels", () => {
   expect(ServiceConfig.filename("latest")).toBe("service.json")
   expect(ServiceConfig.filename("dev")).toBe("service.json")
@@ -357,9 +427,19 @@ test("concurrent service processes elect one server", async () => {
   await fs.mkdir(path.join(root, "config", "opencode"), { recursive: true })
   await fs.writeFile(config, JSON.stringify({ port }))
   const processes = Array.from({ length: 10 }, () => Bun.spawn(command, { env, stderr: "pipe", stdout: "pipe" }))
+  // Drain from startup: ten booting processes must not block on a full Windows pipe.
+  const output = new Map(processes.map((child) => [child, {
+    stdout: new Response(child.stdout).text(),
+    stderr: new Response(child.stderr).text(),
+  }]))
 
   try {
-    const info = await waitForInfo(registration)
+    const info = await waitForInfo(registration).catch(async (cause) => {
+      processes.forEach((child) => child.kill("SIGTERM"))
+      await Promise.all(processes.map((child) => child.exited))
+      const errors = await Promise.all([...output.values()].map(async (streams) => (await streams.stdout) + (await streams.stderr)))
+      throw new Error(`${cause instanceof Error ? cause.message : String(cause)}\n${errors.join("\n")}`)
+    })
     const winner = processes.find((process) => process.pid === info.pid)
     const losers = processes.filter((process) => process.pid !== info.pid)
     const exited = await Promise.all(
@@ -369,7 +449,7 @@ test("concurrent service processes elect one server", async () => {
     expect(exited).toEqual(losers.map(() => true))
     const errors = await Promise.all(
       losers.map(
-        async (process) => (await new Response(process.stdout).text()) + (await new Response(process.stderr).text()),
+        async (process) => (await output.get(process)!.stdout) + (await output.get(process)!.stderr),
       ),
     )
     expect(
@@ -381,16 +461,17 @@ test("concurrent service processes elect one server", async () => {
     expect((await Bun.file(config).json()).password).toBe(info.password)
     expect(await Bun.file(registration + ".lock").exists()).toBe(false)
     expect(
-      await fetch(new URL("/api/info", info.url), {
+      await loopbackRequest(new URL("/api/info", info.url), {
         headers: { authorization: "Basic " + btoa(`opencode:${info.password}`) },
       }).then((response) => response.json()),
-    ).toEqual({
+    ).toMatchObject({
       version: info.version,
       pid: info.pid,
+      hostname: os.hostname(),
       urls: [info.url],
       // The server reports the canonical tmp directory; Windows os.tmpdir() can be an 8.3 short name.
       paths: { tmp: await fs.realpath(path.join(os.tmpdir(), "opencode")) },
-      capabilities: { persistentPty: process.platform !== "win32" },
+      capabilities: { persistentPty: true },
     })
     const contender = Bun.spawn(command, { env, stderr: "pipe", stdout: "ignore" })
     try {
@@ -489,7 +570,7 @@ test.each([
       const info = await waitForInfo(registration)
       await Promise.all(
         [...new Set([...cors, ...origins, "https://unlisted.example.com"])].map(async (origin) => {
-          const response = await fetch(new URL("/api/info", info.url), {
+          const response = await loopbackRequest(new URL("/api/info", info.url), {
             method: "OPTIONS",
             headers: { Origin: origin, "Access-Control-Request-Method": "GET" },
           })
@@ -563,7 +644,7 @@ test("the original managed service contender binds when the occupied port is rel
     )
     expect(new URL(endpoint.url).port).toBe(String(port))
     expect(
-      await fetch(new URL("/api/info", endpoint.url), { headers: Service.headers(endpoint) }).then((response) =>
+      await loopbackRequest(new URL("/api/info", endpoint.url), { headers: Service.headers(endpoint) }).then((response) =>
         response.json(),
       ),
     ).toMatchObject({ pid: contender.pid, version: OPENCODE_VERSION, urls: [endpoint.url] })
@@ -597,7 +678,7 @@ test("unresponsive managed port occupancy reports a bounded conflict", async () 
   await fs.mkdir(path.dirname(registration), { recursive: true })
   await fs.writeFile(
     path.join(root, "config", "opencode", "service-local.json"),
-    JSON.stringify({ port: listener.port }),
+    JSON.stringify({ port: listener.port, env: { XDG_STATE_HOME: path.join(root, "elsewhere") } }),
   )
   const stale = {
     id: "stale",
@@ -607,8 +688,17 @@ test("unresponsive managed port occupancy reports a bounded conflict", async () 
     password: "stale",
   }
   await fs.writeFile(registration, JSON.stringify(stale))
+  // The port lookup is a child of the service, so it shows the state directory tools would inherit.
+  const lsof = process.platform === "win32" ? null : Bun.which("lsof")
+  if (lsof) {
+    await Bun.write(
+      path.join(root, "bin", "lsof"),
+      `#!/bin/sh\nprintf %s "$XDG_STATE_HOME" > "${path.join(root, "inherited-state")}"\nexec "${lsof}" "$@"\n`,
+    )
+    await fs.chmod(path.join(root, "bin", "lsof"), 0o755)
+  }
   const contender = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), "serve", "--service"], {
-    env: serviceEnv(root),
+    env: { ...serviceEnv(root), PATH: `${path.join(root, "bin")}${path.delimiter}${process.env.PATH}` },
     stderr: "pipe",
     stdout: "pipe",
   })
@@ -618,7 +708,12 @@ test("unresponsive managed port occupancy reports a bounded conflict", async () 
     const exitCode = await Promise.race([contender.exited, Bun.sleep(20_000).then(() => undefined)])
     expect(exitCode).toBe(1)
     const output = (await new Response(contender.stdout).text()) + (await new Response(contender.stderr).text())
-    expect(output).toContain(`Managed service port ${listener.port} on 127.0.0.1 is already in use by another process`)
+    expect(output).toContain(
+      `Managed service port ${listener.port} on 127.0.0.1 is already in use by ${
+        lsof ? `PID ${process.pid} (` : "another process"
+      }`,
+    )
+    if (lsof) expect(await Bun.file(path.join(root, "inherited-state")).text()).toBe(path.join(root, "state"))
     expect(await Bun.file(registration).json()).toEqual(stale)
   } finally {
     contender.kill("SIGTERM")
@@ -766,7 +861,7 @@ async function waitForInfo(file: string, accept: (info: Info) => boolean = () =>
 
 async function waitForFailed(info: Info) {
   for (let attempt = 0; attempt < 400; attempt++) {
-    const status = await fetch(new URL("/api/info", info.url), {
+    const status = await loopbackRequest(new URL("/api/info", info.url), {
       headers: { authorization: "Basic " + btoa(`opencode:${info.password}`) },
     })
       .then((response) => response.status)
@@ -779,7 +874,7 @@ async function waitForFailed(info: Info) {
 
 async function waitForUnauthenticatedInfo(url: string) {
   for (let attempt = 0; attempt < 400; attempt++) {
-    const response = await fetch(new URL("/api/info", url)).catch(() => undefined)
+    const response = await loopbackRequest(new URL("/api/info", url)).catch(() => undefined)
     if (response?.status === 200) return response
     await response?.arrayBuffer()
     await Bun.sleep(50)
@@ -826,6 +921,7 @@ function serviceEnv(root: string) {
     ...process.env,
     BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpilerCache,
     HOME: root,
+    OPENCODE_CONFIG_DIR: undefined,
     OPENCODE_DB: path.join(root, "opencode.db"),
     OPENCODE_TEST_HOME: root,
     XDG_CACHE_HOME: path.join(root, "cache"),

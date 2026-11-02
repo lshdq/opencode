@@ -12,6 +12,7 @@ import { Document, Info } from "@opencode/schema/config"
 import { Event } from "@opencode/schema/event"
 import { Watcher } from "@opencode/core/filesystem/watcher"
 import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
+import { Instruction } from "@opencode/schema/instruction"
 import { Location } from "@opencode/core/location"
 import { Project } from "@opencode/core/project"
 import { ProjectTable } from "@opencode/core/project/sql"
@@ -28,7 +29,7 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { tempGlobalLayer } from "./fixture/global"
 import { location } from "./fixture/location"
-import { tmpdir } from "./fixture/tmpdir"
+import { tmpdir, tmpdirScoped } from "./fixture/tmpdir"
 import { readInitial, readUpdate, state } from "./lib/instructions"
 import { testEffect } from "./lib/effect"
 import { host } from "./plugin/host"
@@ -205,19 +206,20 @@ describe("ConfigInstructionPlugin.Plugin", () => {
         const far = path.join(project, ".opencode", "AGENTS.md")
         const absolute = path.join(tmp.path, "extra", "rule.md")
         const homeFile = path.join(home, "home.md")
+        const nestedHomeFile = path.join(home, "notes", "projects", "memory.md")
         const agent = path.join(project, "AGENTS.md")
         return Effect.gen(function* () {
           yield* Effect.promise(async () => {
-            await Promise.all([near, far, absolute, homeFile, agent].map((file) => fs.mkdir(path.dirname(file), { recursive: true })))
+            await Promise.all([near, far, absolute, homeFile, agent, nestedHomeFile].map((file) => fs.mkdir(path.dirname(file), { recursive: true })))
             await Promise.all(
-              [near, far, absolute, homeFile, agent].map((file, index) => fs.writeFile(file, `rule ${index}`)),
+              [near, far, absolute, homeFile, agent, nestedHomeFile].map((file, index) => fs.writeFile(file, `rule ${index}`)),
             )
           })
           const discovery = yield* start()
           const initial = yield* readInitial(yield* discovery.load())
           const files = yield* discovery.list()
           if (!Array.isArray(files)) throw new Error("Instruction source unexpectedly unavailable")
-          expect(files.map((item) => item.path)).toEqual([agent, near, far, absolute, homeFile])
+          expect(files.map((item) => item.path)).toEqual([agent, near, far, absolute, homeFile, nestedHomeFile])
           expect(initial.text).toContain(`Instructions from: ${near}\nrule 0`)
           expect(initial.text).toContain(`Instructions from: ${far}\nrule 1`)
 
@@ -237,7 +239,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
                 new Document({
                   type: "document",
                   info: new Info({
-                    instructions: [".opencode/AGENTS.md", path.join(tmp.path, "extra", "*.md"), "~/home.md", agent],
+                    instructions: [".opencode/AGENTS.md", path.join(tmp.path, "extra", "*.md"), "~/home.md", agent, "~/notes/**/*.md"],
                   }),
                 }),
               ],
@@ -610,11 +612,12 @@ describe("ConfigInstructionPlugin.Plugin", () => {
             Effect.map((fs) =>
               FSUtil.Service.of({
                 ...fs,
-                scanChecked: (pattern, options) => (failure.empty ? Effect.succeed([]) : fs.scanChecked(pattern, options)),
-                readDirectoryEntries: (dir) =>
-                  failure.unreadable && dir === directory
-                    ? Effect.fail(new FSUtil.FileSystemError({ method: "readDirectoryEntries" }))
-                    : fs.readDirectoryEntries(dir),
+                scanChecked: (pattern, options) =>
+                  failure.unreadable && options?.cwd === directory
+                    ? Effect.fail(new FSUtil.FileSystemError({ method: "scanChecked" }))
+                    : failure.empty && pattern !== "*"
+                      ? Effect.succeed([])
+                      : fs.scanChecked(pattern, options),
               }),
             ),
           ),
@@ -789,7 +792,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
               expect(denied.calls).toBeGreaterThan(0)
               const failed = yield* discovery.load()
               expect(yield* InstructionState.preview(db, sessionID, failed, yield* Instructions.read(failed))).toEqual({
-                initial: `Instructions from: ${rule}\ndurable rule`,
+                initial: [{ key: Instruction.Key.make("core/instructions"), text: `Instructions from: ${rule}\ndurable rule` }],
                 update: "",
               })
               yield* InstructionState.prepare(db, bus, failed, sessionID)
@@ -1008,10 +1011,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
   )
 
   it.live("loads global and upward project files and rescans them on change", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((tmp) => {
         const global = path.join(tmp.path, "global")
         const home = path.join(tmp.path, "home")
@@ -1146,10 +1146,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
   )
 
   it.live("keeps an empty AGENTS.md as available context", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((tmp) =>
         Effect.gen(function* () {
           const file = path.join(tmp.path, "AGENTS.md")
@@ -1172,10 +1169,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
   )
 
   it.live("discovers a newly created instruction file above the project root", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((tmp) => {
         const home = path.join(tmp.path, "home")
         const shared = path.join(home, "code")
@@ -1219,10 +1213,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
   )
 
   it.live("stops instruction candidates at the project root outside home", () =>
-    Effect.acquireRelease(
-      Effect.promise(() => tmpdir()),
-      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-    ).pipe(
+    tmpdirScoped().pipe(
       Effect.flatMap((tmp) => {
         const global = path.join(tmp.path, "global")
         const home = path.join(tmp.path, "home")
@@ -1263,10 +1254,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
   ;(process.platform === "win32" ? it.live : it.live.skip)(
     "stops at the project root when the location drive letter differs in case",
     () =>
-      Effect.acquireRelease(
-        Effect.promise(() => tmpdir()),
-        (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-      ).pipe(
+      tmpdirScoped().pipe(
         Effect.flatMap((tmp) => {
           const global = path.join(tmp.path, "global")
           const home = path.join(tmp.path, "home")

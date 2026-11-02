@@ -13,7 +13,7 @@ import {
 import { repairWindowsLinks } from "./repair-windows-links"
 
 if (process.platform !== "win32" || process.arch !== "x64") throw new Error("Windows x64 is required")
-if (Bun.version !== "1.4.2") throw new Error("Bun 1.4.2 is required")
+if (Bun.version !== "1.4.4") throw new Error("Bun 1.4.4 is required")
 const root = path.resolve(import.meta.dir, "../../..")
 await repairWindowsLinks(root)
 const upstream = await upstreamBaseline(root)
@@ -27,6 +27,7 @@ const env = {
   HUSKY: "0",
   OPENCODE_CHANNEL: channel,
   OPENCODE_VERSION: workspace.version,
+  OPENCODE_TARGET: "windows-x64",
   OPENCODE_RELEASE: undefined,
   OPENCODE_BUMP: undefined,
   BUN_COMPILE_RELEASE: undefined,

@@ -1,4 +1,4 @@
-import { glob, globSync, type GlobOptions } from "glob"
+import { glob, type GlobOptionsWithFileTypesFalse } from "glob"
 import { minimatch } from "minimatch"
 import { readdir } from "node:fs"
 
@@ -12,7 +12,7 @@ export namespace Glob {
     ignore?: string[]
   }
 
-  function toGlobOptions(options: Options): GlobOptions {
+  function toGlobOptions(options: Options): GlobOptionsWithFileTypesFalse {
     return {
       cwd: options.cwd,
       absolute: options.absolute,
@@ -24,7 +24,7 @@ export namespace Glob {
   }
 
   export async function scan(pattern: string, options: Options = {}): Promise<string[]> {
-    return glob(pattern, toGlobOptions(options)) as Promise<string[]>
+    return glob(pattern, toGlobOptions(options))
   }
 
   // path-scurry turns readdir errors into empty directories. For instruction
@@ -33,10 +33,10 @@ export namespace Glob {
   export async function scanChecked(
     pattern: string,
     options: Options = {},
-    read: NonNullable<NonNullable<GlobOptions["fs"]>["readdir"]> = readdir,
+    read: NonNullable<NonNullable<GlobOptionsWithFileTypesFalse["fs"]>["readdir"]> = readdir,
   ): Promise<string[]> {
     let failure: NodeJS.ErrnoException | undefined
-    const matches = (await glob(pattern, {
+    const matches = await glob(pattern, {
       ...toGlobOptions(options),
       fs: {
         readdir: (path, options, callback) =>
@@ -45,13 +45,9 @@ export namespace Glob {
             callback(error, entries)
           }),
       },
-    })) as string[]
+    })
     if (failure) throw failure
     return matches
-  }
-
-  export function scanSync(pattern: string, options: Options = {}): string[] {
-    return globSync(pattern, toGlobOptions(options)) as string[]
   }
 
   export function match(pattern: string, filepath: string): boolean {

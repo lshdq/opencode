@@ -70,23 +70,31 @@ function resolveExpandedTheme(definition: ThemeDefinition): ResolvedTheme {
     return scale
   })
   const hueSteps = compileHueSteps(hue)
-  const base = tokens(definition)
+  const base = {
+    ...tokens(definition),
+    text: {
+      ...definition.text,
+      // Apply the semantic fallback only to the base, not to partial surface overrides.
+      permission: { autoaccept: definition.text?.permission?.autoaccept ?? "$hue.orange.200" },
+    },
+  }
   const views = {} as Record<SurfaceName, ResolvedTheme>
   const view = (tokens: ThemeTokensDefinition): ResolvedTheme => ({
     ...resolveView(tokens, hue, categorical, hueSteps),
     surface: (name) => views[name],
   })
-  views.dialog = definition["@dialog"] ? view(contextualize(base, definition["@dialog"])) : view(base)
+  const dialog = definition["@dialog"]
+  const dialogTokens = dialog ? contextualize(base, tokens(dialog)) : base
+  views.dialog = view(dialogTokens)
+  // The footer override layers on the dialog surface, so footers keep every dialog token they don't override.
+  const footer = dialog?.["@footer"]
+  views["dialog.footer"] = footer ? view(contextualize(dialogTokens, footer)) : views.dialog
   return view(base)
 }
 
-function tokens(definition: ThemeDefinition): ThemeTokensDefinition {
+function tokens(definition: ThemeTokensDefinition): ThemeTokensDefinition {
   return {
-    text: {
-      ...definition.text,
-      // Older/custom themes need the same independent semantic default, not a status alias.
-      permission: { autoaccept: definition.text.permission?.autoaccept ?? "$hue.orange.200" },
-    },
+    text: definition.text,
     background: definition.background,
     border: definition.border,
     scrollbar: definition.scrollbar,

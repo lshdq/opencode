@@ -14,7 +14,8 @@ import { createEventStream, createFetch, directory, json, type FetchHandler } fr
 async function fixture(root: string, input: { config?: Config.Info; configPath?: string; session?: boolean; fetch?: FetchHandler; packages?: PackageSource } = {}) {
   takeDraft(undefined)
   takeDraft("ses_stability")
-  const setup = await createTestRenderer({ width: 100, height: 30, useThread: false, kittyKeyboard: true })
+  const setup = await createTestRenderer({ width: 100, height: 30, kittyKeyboard: true })
+  await setup.renderer.setupTerminal()
   setup.renderer.start()
   const events = createEventStream()
   const session = {

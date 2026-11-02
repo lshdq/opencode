@@ -1,4 +1,5 @@
-import type { LocationGetOutput, LocationRef } from "@opencode/client"
+import { isLocationNotFoundError, type LocationGetOutput, type LocationRef } from "@opencode/client"
+import { retry } from "@opencode/util/retry"
 import { createContext, createMemo, createSignal, onCleanup, useContext, type ParentProps } from "solid-js"
 import { useClient } from "./client"
 import { useData } from "./data"
@@ -37,8 +38,9 @@ export function LocationProvider(props: ParentProps) {
         : location
     setError(undefined)
     setResourceError(undefined)
-    void data.location
-      .syncInfo(target)
+    void retry(() => (disposed || generation !== attempt ? Promise.resolve() : data.location.syncInfo(target)), {
+      retryIf: (cause) => !disposed && generation === attempt && !isLocationNotFoundError(cause),
+    })
       .then(() => {
         if (disposed || generation !== attempt) return
         // Catalog failures must not replace the composer with Location missing.
@@ -57,7 +59,8 @@ export function LocationProvider(props: ParentProps) {
           current.workspaceID !== location.workspaceID
         )
           return
-        setError({ location, cause })
+        if (isLocationNotFoundError(cause)) setError({ location, cause })
+        else setResourceError({ location, cause })
       })
   }
 
