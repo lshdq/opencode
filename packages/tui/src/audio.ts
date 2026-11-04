@@ -1,4 +1,4 @@
-import { Audio, type AudioErrorContext, type AudioPlayOptions, type AudioSound } from "@opentui/core"
+import { Audio, type AudioPlayOptions, type AudioSound } from "@opentui/core"
 import { readFile } from "node:fs/promises"
 
 let audio: Audio | null | undefined
@@ -8,13 +8,12 @@ function getAudio() {
   if (audio !== undefined) return audio
   try {
     const next = Audio.create({ autoStart: false })
-    next.on("error", (error: Error, context: AudioErrorContext) => {
-      console.debug("tui audio error", { error, context })
-    })
+    // Native errors can contain device details or user-selected file paths. The
+    // attention caller logs sanitized API outcomes, not raw audio exceptions.
+    next.on("error", () => {})
     audio = next
     return next
-  } catch (error) {
-    console.debug("failed to create tui audio", { error })
+  } catch {
     audio = null
     return null
   }
@@ -27,10 +26,7 @@ export function loadSoundFile(file: string) {
   if (cached) return cached
   const task = readFile(file)
     .then((bytes) => current.loadSound(bytes))
-    .catch((error) => {
-      console.debug("failed to load tui sound", { file, error })
-      return null
-    })
+    .catch(() => null)
   sounds.set(file, task)
   return task
 }

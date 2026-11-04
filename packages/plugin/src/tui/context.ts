@@ -304,6 +304,21 @@ export interface AttentionNotifyOptions {
   readonly message: string
   readonly notification?: AttentionNotification
   readonly sound?: AttentionSound
+  /** Optional content-free context for host diagnostics. Never include user text in identifiers. */
+  readonly diagnostic?: AttentionDiagnostic
+}
+
+/** Content-free notification classification; omitted values are logged as unknown. */
+export interface AttentionDiagnostic {
+  readonly type?: AttentionSoundName
+  readonly reason?:
+    | "session.execution.succeeded"
+    | "session.execution.failed"
+    | "session.execution.interrupted"
+    | "form.created"
+    | "permission.asked"
+  readonly eventID?: string
+  readonly sessionID?: string
 }
 
 export type AttentionNotifySkipReason =

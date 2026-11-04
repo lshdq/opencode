@@ -330,6 +330,7 @@ export function createData(config: CreateDataInput) {
   // the ID is created again before that response settles.
   const shellTombstones = new Set<string>()
   const shellVersions = new Map<string, number>()
+  const executionSequences = new Map<string, number>()
   let activeUpdates: Map<string, DataSessionStatus | undefined> | undefined
   const pendingUpdates = new Map<string, Map<string, SessionInboxInfo | SessionInbox.Delivery | undefined>>()
 
@@ -346,6 +347,14 @@ export function createData(config: CreateDataInput) {
   function setSessionActive(sessionID: string, status: DataSessionStatus) {
     activeUpdates?.set(sessionID, status)
     setStore("session", "active", sessionID, status)
+  }
+
+  function advanceExecutionSequence(sessionID: string, seq: number | undefined) {
+    if (seq === undefined) return true
+    const previous = executionSequences.get(sessionID)
+    if (previous !== undefined && seq <= previous) return false
+    executionSequences.set(sessionID, seq)
+    return true
   }
 
   function removePending(sessionID: string, inboxID?: string) {
@@ -680,6 +689,7 @@ export function createData(config: CreateDataInput) {
         const oldest = deletedAt.keys().next().value
         if (oldest !== undefined) {
           deletedAt.delete(oldest)
+          executionSequences.delete(oldest)
           setStore("session", "missing", oldest, undefined)
         }
       }
@@ -760,6 +770,7 @@ export function createData(config: CreateDataInput) {
         setStore("project", "info", event.data.id, reconcile(event.data))
         return
       case "session.created":
+        advanceExecutionSequence(event.data.sessionID, event.durable?.seq)
         clearDeleted(event.data.sessionID)
         sessionOutbox.delete(event.data.sessionID)
         result.session.invalidate(event.data.sessionID)
@@ -772,6 +783,7 @@ export function createData(config: CreateDataInput) {
         sync.complete(`session.message:${event.data.sessionID}`)
         return
       case "session.deleted":
+        advanceExecutionSequence(event.data.sessionID, event.durable?.seq)
         markDeleted(event.data.sessionID)
         return
       case "session.usage.updated":
@@ -1163,6 +1175,10 @@ export function createData(config: CreateDataInput) {
         })
         return
       case "session.execution.started":
+        // Raw listeners still receive every event. Only this projection rejects
+        // known old lifecycle facts, before they can poison cached activity or
+        // the updates merged into an in-flight reconnect snapshot.
+        if (deletedAt.has(event.data.sessionID) || !advanceExecutionSequence(event.data.sessionID, event.durable?.seq)) return
         setSessionActive(event.data.sessionID, "running")
         // Revalidate so `time.busy` follows the projected execution start.
         if (!store.session.info[event.data.sessionID] && !sync.has(`session:${event.data.sessionID}`)) return
@@ -1184,6 +1200,7 @@ export function createData(config: CreateDataInput) {
       case "session.execution.succeeded":
       case "session.execution.failed":
       case "session.execution.interrupted":
+        if (deletedAt.has(event.data.sessionID) || !advanceExecutionSequence(event.data.sessionID, event.durable?.seq)) return
         setSessionActive(event.data.sessionID, "idle")
         message.update(event.data.sessionID, (draft) => {
           const currentAssistant = message.activeAssistant(draft)

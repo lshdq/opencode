@@ -32,6 +32,7 @@ import { useSessionTabs } from "../context/session-tabs"
 import { useOptionalPanel } from "../context/panel"
 import { useLocal } from "../context/local"
 import { abbreviateHome } from "../util/path-format"
+import { scopeTuiAttention } from "../attention"
 
 export type Dispose = () => Promise<void>
 
@@ -158,7 +159,7 @@ export function createPluginContext(input: {
     renderer: host.renderer,
     client: host.client.api,
     data: host.data,
-    attention: host.attention,
+    attention: scopeTuiAttention(host.attention, input.id),
     get theme() {
       return host.themes.currentTokens()
     },

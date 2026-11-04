@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import Notifications from "../../../../src/feature-plugins/system/notifications"
 import type { OpenCodeEvent, PermissionAsked } from "@opencode/client"
 import type { AttentionNotifyOptions, Context, Route, ToastOptions } from "@opencode/plugin/tui/context"
+import { createTuiAttention, scopeTuiAttention } from "../../../../src/attention"
+import type { LogTags } from "../../../../src/context/log"
 
 type Session = { id: string; title?: string; parentID?: string }
 
@@ -12,8 +14,12 @@ async function setup(
   withListBySession = true,
   childrenToHydrate: Record<string, string[]> = {},
   blockReconnect = false,
+  diagnose = false,
 ) {
   const notifications: AttentionNotifyOptions[] = []
+  const requests: AttentionNotifyOptions[] = []
+  const logs: LogTags[] = []
+  const pending = new Map<string, { id: string }[]>()
   const toasts: ToastOptions[] = []
   const handlers = new Map<OpenCodeEvent["type"], ((event: OpenCodeEvent) => void)[]>()
   const hiddenFamilies = new Set<string>()
@@ -70,7 +76,7 @@ async function setup(
   }
   const shell = withListBySession ? { ...shellData, listBySession } : shellData
 
-  const cleanup = await Notifications.setup({
+  const context = {
     ui: {
       router: { current: () => route },
       toast: { show: (toast: ToastOptions) => toasts.push(toast) },
@@ -78,7 +84,9 @@ async function setup(
     location: { directory: "/current" },
     attention: {
       async notify(input: AttentionNotifyOptions) {
-        notifications.push(input)
+        requests.push(input)
+        const { diagnostic, ...notification } = input
+        notifications.push(notification)
         return { ok: true, notification: true, sound: true }
       },
     },
@@ -109,6 +117,9 @@ async function setup(
         },
         list: () => Object.values(sessions).filter((candidate) => !hiddenSessions.has(candidate.id)),
         status: (sessionID: string) => statuses[sessionID],
+        pending: { list: (sessionID: string) => pending.get(sessionID) ?? [] },
+        form: { list: () => undefined },
+        permission: { list: () => undefined },
         sync: async (sessionID: string, options?: { children?: boolean }) => {
           operations.push(`session.sync:${sessionID}`)
           sessionSyncs.push({ sessionID, children: options?.children })
@@ -123,10 +134,25 @@ async function setup(
       },
       shell,
     },
-  } as unknown as Context)
+  } as unknown as Context
+  const attention = diagnose ? createTuiAttention({
+    renderer: { isDestroyed: false, on() {}, off() {}, triggerNotification: () => true },
+    config: { attention: { notifications: true, sound: false, volume: 1, sound_pack: "default", sounds: {} } },
+    data: context.data,
+    log: (_message, tags) => logs.push(tags),
+  }) : undefined
+  const cleanup = await Notifications.setup(attention
+    ? { ...context, attention: scopeTuiAttention(attention, "opencode.notifications") }
+    : context)
 
   return {
     notifications,
+    requests,
+    logs,
+    data: context.data,
+    setPending(sessionID: string, ids: string[]) {
+      pending.set(sessionID, ids.map((id) => ({ id })))
+    },
     toasts,
     emit(event: OpenCodeEvent) {
       if (event.type === "session.created") {
@@ -184,7 +210,10 @@ async function setup(
     sessionSyncs,
     invalidatedSessions,
     operations,
-    dispose: async () => cleanup?.(),
+    dispose: async () => {
+      await cleanup?.()
+      attention?.dispose()
+    },
     releaseReconnect() {
       reconnectWaiters.splice(0).forEach((resolve) => resolve())
     },
@@ -216,8 +245,9 @@ function permission(id: string, sessionID = "session"): PermissionAsked["data"] 
   }
 }
 
+let sequence = 0
 function durable(sessionID: string): { aggregateID: string; seq: number; version: 1 } {
-  return { aggregateID: sessionID, seq: 0, version: 1 }
+  return { aggregateID: sessionID, seq: ++sequence, version: 1 }
 }
 
 function executionStarted(id: string, sessionID = "session"): OpenCodeEvent {
@@ -410,6 +440,7 @@ describe("internal notifications TUI plugin", () => {
       data: { form: { ...form("form-1"), title: "Confirm deployment" } },
     })
     harness.emit({ id: "event-3", created: 0, type: "permission.asked", data: permission("permission-1") })
+    await settle()
 
     expect(harness.notifications).toEqual([titledFormNotification, permissionNotification])
   })
@@ -423,6 +454,7 @@ describe("internal notifications TUI plugin", () => {
       type: "form.created",
       data: { form: { ...form("form-1", "global"), title: "demo-mcp is requesting input" } },
     })
+    await settle()
 
     expect(harness.notifications).toEqual([globalFormNotification])
   })
@@ -432,6 +464,7 @@ describe("internal notifications TUI plugin", () => {
 
     harness.emit({ id: "event-1", created: 0, type: "form.created", data: { form: form("form-1") } })
     harness.emit({ id: "event-2", created: 0, type: "form.created", data: { form: form("form-1") } })
+    await settle()
     harness.emit({
       id: "event-3",
       created: 0,
@@ -442,6 +475,7 @@ describe("internal notifications TUI plugin", () => {
 
     harness.emit({ id: "event-9", created: 0, type: "permission.asked", data: permission("permission-1") })
     harness.emit({ id: "event-10", created: 0, type: "permission.asked", data: permission("permission-1") })
+    await settle()
     harness.emit({
       id: "event-11",
       created: 0,
@@ -449,11 +483,10 @@ describe("internal notifications TUI plugin", () => {
       data: { sessionID: "session", requestID: "permission-1", reply: "once" },
     })
     harness.emit({ id: "event-12", created: 0, type: "permission.asked", data: permission("permission-1") })
+    await settle()
 
     expect(harness.notifications).toEqual([
       formNotification,
-      formNotification,
-      permissionNotification,
       permissionNotification,
     ])
   })
@@ -490,8 +523,10 @@ describe("internal notifications TUI plugin", () => {
       type: "form.created",
       data: { form: { ...form("form-1", "subagent"), title: "Questions" } },
     })
+    await settle()
     harness.emit(executionStarted("event-2", "subagent"))
     harness.emit(executionSucceeded("event-3", "subagent"))
+    await settle()
 
     expect(harness.notifications).toEqual([
       {
@@ -509,7 +544,7 @@ describe("internal notifications TUI plugin", () => {
     ])
   })
 
-  test("waits for a running subagent before notifying the main session", async () => {
+  test("TC-001: never releases old main success on child completion; new execution succeeds once", async () => {
     const harness = await setup()
     harness.emit(executionStarted("event-1", "subagent"))
     harness.emit(executionSucceeded("event-2"))
@@ -524,16 +559,19 @@ describe("internal notifications TUI plugin", () => {
         notification: false,
         sound: { name: "subagent_done", when: "always" },
       },
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
     ])
+    harness.emit(executionSucceeded("old-main-duplicate"))
+    expect(harness.notifications).toHaveLength(1)
+    harness.emit(executionStarted("return-delivery"))
+    harness.emit(executionSucceeded("new-main-success"))
+    harness.emit(executionSucceeded("new-main-duplicate"))
+    expect(harness.notifications).toHaveLength(2)
+    expect(harness.requests[1]?.diagnostic).toEqual({
+      type: "done", reason: "session.execution.succeeded", eventID: "new-main-success", sessionID: "session",
+    })
   })
 
-  test("waits for a running background shell before notifying the main session", async () => {
+  test("does not release old main success when a background shell exits", async () => {
     const harness = await setup()
     harness.emit(shellCreated("shell-created", "session"))
     harness.emit(executionSucceeded("event-1"))
@@ -541,17 +579,10 @@ describe("internal notifications TUI plugin", () => {
     expect(harness.notifications).toEqual([])
 
     harness.emit(shellExited("shell-created"))
-    expect(harness.notifications).toEqual([
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
-    ])
+    expect(harness.notifications).toEqual([])
 
     harness.emit(shellExited("shell-created"))
-    expect(harness.notifications).toHaveLength(1)
+    expect(harness.notifications).toHaveLength(0)
   })
 
   test("retains observed shell ownership after its child session is deleted", async () => {
@@ -566,14 +597,7 @@ describe("internal notifications TUI plugin", () => {
     expect(harness.notifications).toEqual([])
 
     harness.emit(shellExited("shell-created"))
-    expect(harness.notifications).toEqual([
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
-    ])
+    expect(harness.notifications).toEqual([])
   })
 
   test("waits for an observed shell in another location", async () => {
@@ -584,14 +608,7 @@ describe("internal notifications TUI plugin", () => {
     expect(harness.notifications).toEqual([])
 
     harness.emit(shellExited("shell-created"))
-    expect(harness.notifications).toEqual([
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
-    ])
+    expect(harness.notifications).toEqual([])
   })
 
   test("waits for an unobserved shell found by cross-location session lookup", async () => {
@@ -602,14 +619,7 @@ describe("internal notifications TUI plugin", () => {
     expect(harness.notifications).toEqual([])
 
     harness.emit(shellExited("shell-unobserved"))
-    expect(harness.notifications).toEqual([
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
-    ])
+    expect(harness.notifications).toEqual([])
   })
 
   test("falls back to the current-location shell snapshot when listBySession is unavailable", async () => {
@@ -620,7 +630,7 @@ describe("internal notifications TUI plugin", () => {
     expect(harness.notifications).toEqual([])
 
     harness.emit(shellExited("shell-current"))
-    expect(harness.notifications).toHaveLength(1)
+    expect(harness.notifications).toHaveLength(0)
   })
 
   test("rechecks observed shells after reconnect when the exit event was missed", async () => {
@@ -634,14 +644,10 @@ describe("internal notifications TUI plugin", () => {
     harness.emit({ id: "connected", type: "server.connected", data: {} })
     await settle()
     expect(harness.syncLocations).toEqual([{ directory: "/other" }])
-    expect(harness.notifications).toEqual([
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
-    ])
+    expect(harness.notifications).toEqual([])
+    harness.emit(executionStarted("after-reconnect"))
+    harness.emit(executionSucceeded("fresh-success"))
+    expect(harness.notifications).toHaveLength(1)
   })
 
   test("does not notify after disposal while the reconnect barrier is pending", async () => {
@@ -681,20 +687,14 @@ describe("internal notifications TUI plugin", () => {
         notification: false,
         sound: { name: "subagent_done", when: "always" },
       },
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
     ])
 
     harness.emit(executionSucceeded("parent-duplicate", "session"))
     harness.emit(executionSucceeded("child-duplicate", "subagent"))
-    expect(harness.notifications).toHaveLength(2)
+    expect(harness.notifications).toHaveLength(1)
   })
 
-  test("hydrates known children before reconnect releases deferred background work", async () => {
+  test("hydrates known children without reconnect releasing old parent success", async () => {
     const harness = await setup(
       { type: "session", sessionID: "session" },
       { subagent: "running" },
@@ -715,7 +715,7 @@ describe("internal notifications TUI plugin", () => {
 
     harness.setStatus("subagent", "idle")
     harness.emit(executionSucceeded("subagent-done", "subagent"))
-    expect(harness.notifications).toHaveLength(2)
+    expect(harness.notifications).toHaveLength(1)
   })
 
   test("refreshes observed shell ancestors after delayed session hydration", async () => {
@@ -730,7 +730,7 @@ describe("internal notifications TUI plugin", () => {
     harness.dropShell("shell-created")
     harness.emit({ id: "connected", type: "server.connected", data: {} })
     await settle()
-    expect(harness.notifications).toHaveLength(1)
+    expect(harness.notifications).toHaveLength(0)
   })
 
   test("TC-006: restores a subagent after reconnect when its next execution has no started event", async () => {
@@ -761,12 +761,6 @@ describe("internal notifications TUI plugin", () => {
         notification: false,
         sound: { name: "subagent_done", when: "always" },
       },
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
     ])
   })
 
@@ -785,7 +779,7 @@ describe("internal notifications TUI plugin", () => {
     expect(harness.notifications).toHaveLength(1)
   })
 
-  test("notifies the main session once after multiple subagents finish", async () => {
+  test("notifies the main session only on new success after multiple subagents finish", async () => {
     const harness = await setup()
     harness.emit(executionStarted("event-1", "subagent"))
     harness.emit(executionStarted("event-2", "subagent2"))
@@ -795,6 +789,9 @@ describe("internal notifications TUI plugin", () => {
     expect(harness.notifications).toHaveLength(1)
     harness.emit(executionSucceeded("event-5", "subagent2"))
     harness.emit(executionSucceeded("event-6", "subagent2"))
+    expect(harness.notifications).toHaveLength(2)
+    harness.emit(executionStarted("return-delivery"))
+    harness.emit(executionSucceeded("final-success"))
 
     expect(
       harness.notifications.filter(
@@ -803,7 +800,7 @@ describe("internal notifications TUI plugin", () => {
     ).toHaveLength(1)
   })
 
-  test("notifies the main session after the last subagent fails", async () => {
+  test("does not notify main success after the last subagent fails", async () => {
     const harness = await setup()
     harness.emit(executionStarted("event-1", "subagent"))
     harness.emit(executionSucceeded("event-2"))
@@ -816,12 +813,6 @@ describe("internal notifications TUI plugin", () => {
         message: "boom",
         notification: false,
         sound: { name: "error", when: "always" },
-      },
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
       },
     ])
   })
@@ -842,49 +833,36 @@ describe("internal notifications TUI plugin", () => {
         notification: false,
         sound: { name: "subagent_done", when: "always" },
       },
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
     ])
     harness.revealSession("late-subagent")
   })
 
-  test("restores running descendants after setup and releases deleted deferred parents", async () => {
+  test("restores running descendants after setup without deletion releasing old success", async () => {
     const harness = await setup({ type: "session", sessionID: "session" }, { subagent: "running" })
 
     harness.emit(executionSucceeded("event-1"))
     expect(harness.notifications).toEqual([])
 
     harness.emit(sessionDeleted("event-2", "subagent"))
-    expect(harness.notifications).toEqual([
-      {
-        title: "Demo session",
-        message: "Session done",
-        notification: { when: "blurred" },
-        sound: { name: "done", when: "always" },
-      },
-    ])
+    expect(harness.notifications).toEqual([])
 
     harness.emit(sessionDeleted("event-3", "subagent"))
-    expect(harness.notifications).toHaveLength(1)
+    expect(harness.notifications).toHaveLength(0)
   })
 
-  test("TC-008: suppresses late terminal events after a deleted subagent releases its parent", async () => {
+  test("suppresses late terminal events for a deleted subagent without releasing its parent", async () => {
     const harness = await setup({ type: "session", sessionID: "session" }, { subagent: "running" })
 
     harness.emit(executionSucceeded("event-1"))
     harness.emit(sessionDeleted("event-2", "subagent"))
-    expect(harness.notifications).toHaveLength(1)
+    expect(harness.notifications).toHaveLength(0)
 
     harness.emit(sessionDeleted("event-3", "subagent"))
     harness.emit(executionSucceeded("event-4", "subagent"))
     harness.emit(executionFailed("event-5", "subagent"))
     harness.emit(executionInterrupted("event-6", "subagent"))
 
-    expect(harness.notifications).toHaveLength(1)
+    expect(harness.notifications).toHaveLength(0)
     expect(harness.toasts).toHaveLength(0)
   })
 
@@ -909,16 +887,10 @@ describe("internal notifications TUI plugin", () => {
     ])
 
     harness.emit(executionSucceeded("event-5", "nested"))
-    expect(harness.notifications).toHaveLength(3)
-    expect(harness.notifications[2]).toEqual({
-      title: "Demo session",
-      message: "Session done",
-      notification: { when: "blurred" },
-      sound: { name: "done", when: "always" },
-    })
+    expect(harness.notifications).toHaveLength(2)
   })
 
-  test("TC-007: keeps the subagent interruption sound and waits for its last descendant", async () => {
+  test("TC-003: interruption never masquerades as success or releases old parent success", async () => {
     const harness = await setup()
     harness.emit(sessionCreated("subagent", "session"))
     harness.emit(executionStarted("event-1", "subagent"))
@@ -928,23 +900,13 @@ describe("internal notifications TUI plugin", () => {
 
     harness.emit(executionInterrupted("event-4", "subagent"))
     harness.emit(executionInterrupted("event-4-duplicate", "subagent"))
-    expect(harness.notifications).toEqual([
-      {
-        title: "Subagent session",
-        message: "Session done",
-        notification: false,
-        sound: { name: "subagent_done", when: "always" },
-      },
-    ])
+    expect(harness.notifications).toEqual([])
 
     harness.emit(executionSucceeded("event-5", "nested"))
-    expect(harness.notifications).toHaveLength(3)
-    expect(harness.notifications[2]).toEqual({
-      title: "Demo session",
-      message: "Session done",
-      notification: { when: "blurred" },
-      sound: { name: "done", when: "always" },
-    })
+    expect(harness.notifications).toHaveLength(1)
+    harness.emit(executionStarted("main-resumed"))
+    harness.emit(executionInterrupted("main-interrupted"))
+    expect(harness.notifications).toHaveLength(1)
   })
 
   test("notifies session errors once and suppresses the following idle done notification", async () => {
@@ -962,5 +924,109 @@ describe("internal notifications TUI plugin", () => {
         sound: { name: "error", when: "always" },
       },
     ])
+  })
+
+  test("TC-007: pending input suppresses success until a fresh execution consumes it", async () => {
+    const harness = await setup()
+    harness.setPending("session", ["synthetic-return"])
+    harness.emit(executionSucceeded("paused"))
+    expect(harness.notifications).toEqual([])
+    harness.setPending("session", [])
+    harness.emit(executionSucceeded("duplicate-idle"))
+    expect(harness.notifications).toEqual([])
+    harness.emit(executionStarted("consume-return"))
+    harness.emit(executionSucceeded("real-success"))
+    expect(harness.notifications).toHaveLength(1)
+  })
+
+  test("TC-007: an old durable terminal event cannot finish a resumed execution", async () => {
+    const harness = await setup()
+    const old = executionSucceeded("old")
+    harness.emit(executionStarted("new-start"))
+    harness.emit(old)
+    expect(harness.notifications).toEqual([])
+    harness.emit(executionSucceeded("new-success"))
+    expect(harness.notifications).toHaveLength(1)
+  })
+
+  test("TC-003: same-batch automatic settlement and disposal cancel input attention", async () => {
+    const harness = await setup()
+    harness.emit({ id: "form-created", created: 0, type: "form.created", data: { form: form("auto-form") } })
+    harness.emit({ id: "form-replied", created: 0, type: "form.replied", data: { id: "auto-form", sessionID: "session", answer: {} } })
+    harness.emit({ id: "asked", created: 0, type: "permission.asked", data: permission("auto-permission") })
+    harness.emit({ id: "replied", created: 0, type: "permission.replied", data: { requestID: "auto-permission", sessionID: "session", reply: "once" } })
+    await settle()
+    expect(harness.notifications).toEqual([])
+    harness.emit({ id: "last", created: 0, type: "form.created", data: { form: form("disposed-form") } })
+    await harness.dispose()
+    await settle()
+    expect(harness.notifications).toEqual([])
+  })
+
+  test("input requests absent from the current projection do not notify", async () => {
+    const harness = await setup()
+    harness.data.session.form.list = () => []
+    harness.data.session.permission.list = () => []
+    harness.emit({ id: "form", created: 0, type: "form.created", data: { form: form("no-longer-pending") } })
+    harness.emit({ id: "permission", created: 0, type: "permission.asked", data: permission("no-longer-pending") })
+    await settle()
+    expect(harness.notifications).toEqual([])
+  })
+
+  test("TC-007: reconnect does not replay success for an already running main session", async () => {
+    const harness = await setup({ type: "home" }, {}, [], true, {}, true, true)
+    harness.emit({ id: "connected", type: "server.connected", data: {} })
+    harness.emit(executionSucceeded("old-success"))
+    harness.setStatus("session", "running")
+    harness.releaseReconnect()
+    await settle()
+    expect(harness.logs).toContainEqual(expect.objectContaining({ phase: "suppressed", suppressionReason: "session_running", eventID: "old-success" }))
+    expect(harness.logs.filter((log) => log.phase === "request")).toHaveLength(0)
+    harness.emit(executionSucceeded("new-success"))
+    expect(harness.logs.filter((log) => log.phase === "request")).toHaveLength(1)
+    await harness.dispose()
+  })
+
+  test.each([false, true])("reconnect coalesces duplicate terminal events by durable order (reversed=%s)", async (reversed) => {
+    const harness = await setup({ type: "home" }, {}, [], true, {}, true, true)
+    const old = executionSucceeded("older")
+    const current = executionSucceeded("current")
+    harness.emit({ id: "connected", type: "server.connected", data: {} })
+    for (const event of reversed ? [current, old] : [old, current]) harness.emit(event)
+    harness.releaseReconnect()
+    await settle()
+    expect(harness.logs.filter((log) => log.phase === "request").map((log) => log.eventID)).toEqual(["current"])
+    expect(harness.logs).toContainEqual(expect.objectContaining({ phase: "suppressed", suppressionReason: "reconnect_coalesced", eventID: "older" }))
+    await harness.dispose()
+  })
+
+  test("TC-001/007: suppression diagnostics distinguish background, pending, interruption and duplicates", async () => {
+    const harness = await setup({ type: "home" }, {}, [], true, {}, false, true)
+    harness.emit(executionStarted("child-running", "nested"))
+    harness.emit(shellCreatedAt("cross-location-shell", "subagent", "/other"))
+    harness.emit(executionSucceeded("paused-main"))
+    expect(harness.logs).toContainEqual(expect.objectContaining({
+      component: "attention", phase: "suppressed", suppressionReason: "background_work",
+      pluginID: "opencode.notifications", type: "done", reason: "session.execution.succeeded",
+      eventID: "paused-main", sessionID: "session", rootSessionID: "session",
+      runningSubagents: 1, runningShells: 1, statisticsComplete: false,
+    }))
+    harness.emit(executionSucceeded("nested-finished", "nested"))
+    harness.emit(shellExited("cross-location-shell"))
+    expect(harness.logs.filter((log) => log.phase === "request" && log.type === "done")).toHaveLength(0)
+    harness.emit(executionStarted("consume"))
+    harness.setPending("session", ["input"])
+    harness.emit(executionSucceeded("pending-success"))
+    harness.emit(executionSucceeded("duplicate"))
+    harness.setPending("session", [])
+    harness.emit(executionStarted("interrupt-start"))
+    harness.emit(executionInterrupted("interrupted"))
+    expect(harness.logs.filter((log) => log.phase === "suppressed").map((log) => log.suppressionReason))
+      .toEqual(["background_work", "pending_input", "duplicate_terminal", "execution_interrupted"])
+    harness.emit(executionStarted("final"))
+    harness.emit(executionSucceeded("final-success"))
+    await settle()
+    expect(harness.logs.filter((log) => log.phase === "request" && log.type === "done")).toHaveLength(1)
+    await harness.dispose()
   })
 })

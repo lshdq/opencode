@@ -1584,6 +1584,83 @@ test.each([
   }
 })
 
+test.each(["succeeded", "failed", "interrupted"] as const)("orders %s execution projection before mutating cached activity", (outcome) => {
+  const setup = activityFixture(() => Response.json({ data: {} }))
+  try {
+    const start = executionEvent("started", 1)
+    const terminal = executionEvent(outcome, 2)
+    setup.emit(start)
+    setup.emit(terminal)
+    setup.emit(start)
+    expect(setup.data.session.status("ses_refresh")).toBe("idle")
+    const idle = setup.data.session.message.list("ses_refresh").filter((message) => message.type === "idle")
+    expect(idle).toHaveLength(1)
+    setup.emit(terminal)
+    expect(setup.data.session.message.list("ses_refresh").filter((message) => message.type === "idle")).toEqual(idle)
+    setup.emit(executionEvent("started", 3))
+    setup.emit(terminal)
+    expect(setup.data.session.status("ses_refresh")).toBe("running")
+    setup.emit(executionEvent(outcome, 4))
+    expect(setup.data.session.status("ses_refresh")).toBe("idle")
+    expect(setup.data.session.message.list("ses_refresh").filter((message) => message.type === "idle")).toHaveLength(2)
+  } finally {
+    setup.dispose()
+  }
+})
+
+test("deletion blocks late execution events until a newer explicit session creation", () => {
+  const setup = activityFixture(() => Response.json({ data: {} }), [session(0)])
+  try {
+    setup.emit(executionEvent("started", 1))
+    setup.emit({ id: "evt_deleted", created: 2, type: "session.deleted",
+      durable: { aggregateID: "ses_refresh", seq: 2, version: 2 }, data: { sessionID: "ses_refresh" } })
+    setup.emit(executionEvent("started", 3))
+    setup.emit(executionEvent("started", 1))
+    expect(setup.data.session.status("ses_refresh")).toBe("idle")
+    expect(setup.data.session.missing("ses_refresh")).toBe(true)
+    setup.emit({ id: "evt_created", created: 4, type: "session.created",
+      durable: { aggregateID: "ses_refresh", seq: 4, version: 1 }, data: {
+        sessionID: "ses_refresh", projectID: "project", location: { directory: "/project" }, slug: "refresh", version: "1",
+      } })
+    setup.emit(executionEvent("started", 3))
+    expect(setup.data.session.status("ses_refresh")).toBe("idle")
+    setup.emit(executionEvent("started", 5))
+    expect(setup.data.session.status("ses_refresh")).toBe("running")
+  } finally {
+    setup.dispose()
+  }
+})
+
+test.each(["running", "idle"] as const)("reconnect replaces observed %s activity when its transition was missed, without accepting old replay", async (before) => {
+  const release = Promise.withResolvers<void>()
+  const requested = Promise.withResolvers<void>()
+  const setup = activityFixture(async () => {
+    requested.resolve()
+    await release.promise
+    return Response.json({ data: before === "idle" ? { ses_refresh: { type: "running" } } : {} })
+  }, [session(0)])
+  try {
+    setup.data.session.remember(session(0))
+    const stale = executionEvent(before === "running" ? "started" : "succeeded", 1)
+    setup.emit(executionEvent(before === "running" ? "started" : "succeeded", 2))
+    expect(setup.data.session.status("ses_refresh")).toBe(before)
+    setup.emit({ type: "server.connected", data: {} })
+    await requested.promise
+    // A known old event must not enter activeUpdates and override the HTTP snapshot.
+    setup.emit(stale)
+    release.resolve()
+    const after = before === "running" ? "idle" : "running"
+    await wait(() => setup.data.session.status("ses_refresh") === after)
+    setup.emit(stale)
+    expect(setup.data.session.status("ses_refresh")).toBe(after)
+    setup.emit(executionEvent(before === "running" ? "started" : "succeeded", 3))
+    expect(setup.data.session.status("ses_refresh")).toBe(before)
+  } finally {
+    release.resolve()
+    setup.dispose()
+  }
+})
+
 test("adds running sessions created while disconnected to their family", async () => {
   const root = { ...session(0), id: "ses_root" }
   const child = { ...session(0), id: "ses_child", parentID: "ses_root" }
@@ -1668,6 +1745,17 @@ function modelInfo(name: string): ModelInfo {
     enabled: true,
     limit: { context: 8192, output: 1024 },
   }
+}
+
+function executionEvent(type: "started" | "succeeded" | "failed" | "interrupted", seq: number): OpenCodeEvent {
+  return {
+    id: `evt_execution_${seq}_${type}`, created: seq, type: `session.execution.${type}`,
+    durable: { aggregateID: "ses_refresh", seq, version: 1 },
+    data: { sessionID: "ses_refresh",
+      ...(type === "interrupted" ? { reason: "user" } : {}),
+      ...(type === "failed" ? { error: { type: "unknown", message: "fixture failure" } } : {}),
+    },
+  } as OpenCodeEvent
 }
 
 function activityFixture(read: () => Response | Promise<Response>, sessions: SessionInfo[] = []) {
