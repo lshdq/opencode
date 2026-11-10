@@ -19,12 +19,6 @@ const options = {
   fs: { filewatcher: false },
 } as const
 
-// These cases exercise OpenAI's real listener and HttpApi, not every builtin tool/provider's startup.
-const oauthOptions = {
-  ...options,
-  config: { project: false, content: JSON.stringify({ plugins: ["-*", "opencode.provider.openai"] }) },
-} as const
-
 // A failed Location build and recovery is a complete contract per endpoint, not one five-boot test.
 for (const resource of ["model", "integration", "permission", "form"] as const) {
   it.live(`returns LocationNotFoundError for a missing ${resource} folder and recovers once it exists`, () =>
@@ -164,6 +158,20 @@ function occupy(port: number, cancel = false) {
     return requests
   })
 }
+
+// A server without its own config directory reads the developer's global config, whose remote MCP servers would
+// reach the network. Keep the OpenAI-only plugin set so unrelated providers stay out of these OAuth flows.
+const isolated = Effect.gen(function* () {
+  const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-openai-oauth-")))
+  return yield* ServerFetch.make({
+    ...options,
+    config: {
+      ...options.config,
+      directory: config.path,
+      content: JSON.stringify({ plugins: ["-*", "opencode.provider.openai"] }),
+    },
+  })
+})
 
 const connectOpenAI = (handler: Handler) =>
   Effect.gen(function* () {
@@ -445,7 +453,7 @@ it.live("returns 404 when a previously readable file is deleted", () =>
 it.live("cancels a stale OpenAI OAuth callback server before falling back", () =>
   Effect.gen(function* () {
     const requests = yield* occupy(1455, true)
-    const handler = yield* ServerFetch.make(oauthOptions)
+    const handler = yield* isolated
     const response = yield* connectOpenAI(handler)
 
     expect(response.status).toBe(200)
@@ -459,7 +467,7 @@ it.live("falls back to port 1457 when OpenAI OAuth port 1455 remains busy", () =
   Effect.gen(function* () {
     const captured = yield* oauthWarnings
     const requests = yield* occupy(1455)
-    const handler = yield* ServerFetch.make(oauthOptions)
+    const handler = yield* isolated
     const response = yield* connectOpenAI(handler)
 
     expect(response.status).toBe(200)
@@ -478,7 +486,7 @@ it.live(
       const captured = yield* oauthWarnings
       yield* occupy(1455)
       yield* occupy(1457)
-      const handler = yield* ServerFetch.make(oauthOptions)
+      const handler = yield* isolated
       const response = yield* connectOpenAI(handler)
 
       expect(response.status).toBe(400)

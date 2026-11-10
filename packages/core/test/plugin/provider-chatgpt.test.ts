@@ -265,8 +265,15 @@ describe("ChatGPTPlugin", () => {
     }),
   )
 
-  for (const source of ["http", "stream"] as const) {
-    it.effect(`keeps retrying ChatGPT usage limits from ${source} failures`, () =>
+  // The fork's retry policy lets a provider hook promote a terminal failure but not veto a
+  // retryable one, so ChatGPT usage-limit codes (including the workplace code upstream added)
+  // keep retrying with backoff instead of stopping at the plugin's no-retry decision.
+  for (const [source, code] of [
+    ["http", "subscription_sharing_usage_limit_exceeded"],
+    ["stream", "subscription_sharing_usage_limit_exceeded"],
+    ["http", "subscription_sharing_workplace_individual_usage_limit_exceeded"],
+  ] as const) {
+    it.effect(`keeps retrying ChatGPT usage limits (${code}) from ${source} failures`, () =>
       Effect.gen(function* () {
         const credentials = yield* Credential.Service
         yield* credentials.create({
@@ -284,10 +291,10 @@ describe("ChatGPTPlugin", () => {
         const hooks = yield* PluginHooks.Service
         const body =
           source === "http"
-            ? JSON.stringify({ error: { code: "subscription_sharing_usage_limit_exceeded" } })
+            ? JSON.stringify({ error: { code } })
             : JSON.stringify({
                 type: "response.failed",
-                response: { error: { code: "subscription_sharing_usage_limit_exceeded" } },
+                response: { error: { code } },
               })
         const cause = new AIError({
           reason: new RateLimitError({

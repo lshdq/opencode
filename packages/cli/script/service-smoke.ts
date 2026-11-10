@@ -2,6 +2,7 @@
 
 import { NodeFileSystem } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
+import { MCP_CLIENT_PATH } from "@opencode/protocol/groups/mcp"
 import { ServerInfo } from "@opencode/protocol/groups/server"
 import { Effect, Schema } from "effect"
 import fs from "node:fs/promises"
@@ -73,6 +74,7 @@ export async function runServiceSmoke(binary: string, inherited = process.env) {
     const serverInfo = await waitForReady(info.url, headers)
     if (serverInfo.pid !== info.pid || serverInfo.version !== info.version)
       throw new Error("Server info does not match registration")
+    await verifyClientMcpSocket(info.url, token)
     await verifyWebUi(info.url)
     const tokenInfo = await loopbackRequest(new URL(`/api/info?auth_token=${token}`, info.url), {
       signal: AbortSignal.timeout(5_000),
@@ -200,6 +202,25 @@ export async function runServiceSmoke(binary: string, inherited = process.env) {
     }
     throw new Error("Compiled service did not discover the created plugin")
   }
+}
+
+// Bun once bundled the WebSocket server away, so every upgrade failed only in the compiled binary.
+async function verifyClientMcpSocket(url: string, token: string) {
+  const endpoint = new URL(`${MCP_CLIENT_PATH}?name=smoke&auth_token=${token}`, url)
+  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:"
+  const socket = new WebSocket(endpoint)
+  const message = await new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Compiled service sent no client MCP initialize")), 5_000)
+    socket.onmessage = (event) => {
+      clearTimeout(timeout)
+      resolve(String(event.data))
+    }
+    socket.onerror = () => {
+      clearTimeout(timeout)
+      reject(new Error("Compiled service rejected the client MCP socket"))
+    }
+  }).finally(() => socket.close())
+  if (!message.includes('"initialize"')) throw new Error("Compiled service did not initialize the client MCP socket")
 }
 
 async function waitForReady(url: string, headers: HeadersInit) {

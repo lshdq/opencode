@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, test } from "bun:test"
 import {
   AIError,
   AuthenticationError,
@@ -7,6 +7,7 @@ import {
   RateLimitError,
   TransportError,
 } from "@opencode/ai/effect"
+import { ModelRetry } from "@opencode/core/model-retry"
 import { Agent } from "@opencode/schema/agent"
 import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/core/provider"
@@ -14,13 +15,31 @@ import type { PluginHooks } from "@opencode/core/plugin/hooks"
 import { SessionSchema } from "@opencode/core/session/schema"
 import { SessionRunnerRetry } from "@opencode/core/session/runner/retry"
 import { toSessionError } from "@opencode/core/session/to-session-error"
-import { Clock, Effect, Ref } from "effect"
+import { Clock, Duration, Effect, Ref } from "effect"
+import { TestClock } from "effect/testing"
 import { it } from "./lib/effect"
 
 const timeout = new AIError({
   reason: new TransportError({ message: "Timed out", transport: "http", operation: "request", code: "Timeout" }),
 })
 const internal = new AIError({ reason: new ProviderInternalError({ message: "internal" }) })
+const dnsFailure = new AIError({
+  reason: new TransportError({
+    message: "getaddrinfo ENOTFOUND opencode.ai",
+    transport: "http",
+    operation: "request",
+    code: "ENOTFOUND",
+    url: "https://opencode.ai/zen/v1/responses",
+  }),
+})
+const refused = new AIError({
+  reason: new TransportError({
+    message: "Unable to connect",
+    transport: "http",
+    operation: "request",
+    code: "ECONNREFUSED",
+  }),
+})
 
 const input = (cause: AIError) => ({
   cause,
@@ -296,4 +315,55 @@ describe("SessionRunnerRetry.policy", () => {
       expect(yield* policy({ ...input(permanent), hook })).toMatchObject({ retry: true })
     }),
   )
+
+  // The fork's policy has no attempt allowance: an unreachable host keeps retrying with gaps
+  // clamped by the local backoff cap, so verify a bounded window instead of waiting for a stop.
+  it.effect("keeps retrying an unreachable host with gaps of at most 30 seconds", () =>
+    Effect.gen(function* () {
+      const policy = yield* SessionRunnerRetry.policy(SessionSchema.ID.make("ses_retry"))
+      const delays: number[] = []
+      for (let index = 0; index < 150; index++) {
+        const decision = yield* policy(input(dnsFailure))
+        if (!decision.retry) throw new Error("unreachable host must keep retrying")
+        delays.push(decision.delay)
+        yield* TestClock.adjust(Duration.millis(decision.delay))
+      }
+      expect(Math.max(...delays)).toBeLessThanOrEqual(30_000)
+    }),
+  )
+
+  it.effect("keeps a refused connection retrying with transient failures", () =>
+    Effect.gen(function* () {
+      expect(ModelRetry.isUnreachable(refused)).toBe(false)
+      expect(yield* decisions(refused, 12)).toEqual(Array(12).fill(true))
+    }),
+  )
+})
+
+describe("ModelRetry.retryOneShot", () => {
+  it.effect("doesn't replay a call whose response was cut off by the network going down", () =>
+    Effect.gen(function* () {
+      let calls = 0
+      const cutOff = new AIError({
+        reason: new TransportError({
+          message: "Network is down",
+          transport: "http",
+          operation: "read",
+          code: "ENETDOWN",
+        }),
+      })
+      yield* ModelRetry.retryOneShot(Effect.suspend(() => (calls++, Effect.fail(cutOff)))).pipe(Effect.flip)
+      expect(calls).toBe(1)
+    }),
+  )
+})
+
+describe("toSessionError", () => {
+  test("names the network when the provider's host can't be reached", () => {
+    expect(toSessionError(dnsFailure)).toEqual({
+      type: "provider.transport",
+      message: "Can't reach opencode.ai. Check the network connection. (getaddrinfo ENOTFOUND opencode.ai)",
+    })
+    expect(toSessionError(refused)).toEqual({ type: "provider.transport", message: "Unable to connect" })
+  })
 })
