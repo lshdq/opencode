@@ -49,12 +49,23 @@ const preferences = {
 }
 
 // Each test fakes only the parts of the SDK, data store and coordinator that the notification state reads.
-const createState = (input: { sdk: object; data: object; coordinator: object }) =>
+const createState = (input: {
+  sdk: object
+  data: object
+  coordinator: object
+  muted?: (id: string) => boolean
+  preferencesLoaded?: Promise<unknown>
+}) =>
   // SAFETY: the fakes cover every member the notification state reaches in that test.
   createServerNotificationState({
     key: server,
+    muted: () => false,
     ...input,
-    sdk: { api: { session: { active: async () => ({}) } }, ...input.sdk },
+    sdk: {
+      api: { session: { active: async () => ({}) } },
+      connection: { status: () => "connected" },
+      ...input.sdk,
+    },
   } as never)
 
 const waitFor = async (predicate: () => boolean, description: string) => {
@@ -155,6 +166,7 @@ test.each(
       "resolved",
       "auto approve",
       "root tab",
+      "muted root",
       "no tab",
       "disposed",
     ].map((scenario) => ({ ...request, scenario })),
@@ -183,6 +195,7 @@ test.each(
 
   const dispose = createRoot((dispose) => {
     createState({
+      muted: (id) => options.scenario === "muted root" && id === "root",
       sdk: {
         scope: ServerScope.local,
         connection: { status: () => "connected" },
@@ -250,7 +263,7 @@ test.each(
     await Promise.all(deliveries.map((run) => run()))
 
     const suppressed =
-      ["resolved", "disposed", "no tab"].includes(options.scenario) ||
+      ["resolved", "disposed", "no tab", "muted root"].includes(options.scenario) ||
       (options.scenario === "auto approve" && options.kind === "permission")
 
     expect(alerts).toEqual(!suppressed && options.scenario !== "notifications disabled" ? [options.title] : [])
@@ -269,10 +282,12 @@ test.each(
 test.each([
   ["session.execution.succeeded", "notification.session.responseReady.title"],
   ["session.execution.failed", "notification.session.error.title"],
-] as const)("system alert for %s requires an open session tab", async (type, title) => {
+] as const)("system alert for %s requires an open tab and loaded, unmuted preferences", async (type, title) => {
   alerts.length = 0
   tabs.store = [{ type: "session", server, sessionId: "another-session" }]
   const listeners = new Array<(event: OpenCodeEvent) => void>()
+  let muted = false
+  const preferencesLoaded = Promise.withResolvers<void>()
 
   const emit = (id: string) =>
     listeners.forEach((listener) =>
@@ -282,6 +297,8 @@ test.each([
 
   const dispose = createRoot((dispose) => {
     createState({
+      muted: () => muted,
+      preferencesLoaded: preferencesLoaded.promise,
       sdk: {
         scope: ServerScope.local,
         connection: { status: () => "connected" },
@@ -306,6 +323,16 @@ test.each([
 
   tabs.store = [{ type: "session", server, sessionId: session.id }]
   emit("event-2")
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(alerts).toEqual([])
+
+  muted = true
+  preferencesLoaded.resolve()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(alerts).toEqual([])
+
+  muted = false
+  emit("event-3")
   await new Promise((resolve) => setTimeout(resolve, 0))
   expect(alerts).toEqual([title])
   dispose()
@@ -720,7 +747,11 @@ test("reuses successful hydration while a deferred completion settles", async ()
   expect(sessionSyncs).toBe(1)
 
   emit({ type: "session.execution.started", id: "cached-root-started", data: { sessionID: session.id } } as never)
-  emit({ type: "session.execution.succeeded", id: "cached-root-complete-again", data: { sessionID: session.id } } as never)
+  emit({
+    type: "session.execution.succeeded",
+    id: "cached-root-complete-again",
+    data: { sessionID: session.id },
+  } as never)
   await waitFor(() => alerts.length === 2, "notification after a new execution")
   expect(sessionSyncs).toBe(2)
   dispose()
@@ -908,7 +939,11 @@ test("flushes deferred completion after reconnecting clears", async () => {
       },
     },
   } as never)
-  emit({ type: "session.execution.succeeded", id: "reconnecting-root-complete", data: { sessionID: session.id } } as never)
+  emit({
+    type: "session.execution.succeeded",
+    id: "reconnecting-root-complete",
+    data: { sessionID: session.id },
+  } as never)
   await waitFor(() => reconnectSyncs === 1, "initial shell hydration")
   expect(alerts).toEqual([])
 

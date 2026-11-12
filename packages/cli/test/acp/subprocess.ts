@@ -58,6 +58,7 @@ export type AcpProcess = {
     predicate: (params: T) => boolean,
     timeoutMs?: number,
   ) => Promise<JsonRpcNotification<T>>
+  readonly waitForMessage: (predicate: Waiter["predicate"], description: string) => Promise<JsonRpcMessage>
   readonly close: () => Promise<number>
   readonly stderr: () => string
   readonly [Symbol.asyncDispose]: () => Promise<void>
@@ -377,6 +378,7 @@ function spawnAcp(input: { readonly env: Record<string, string | undefined> }): 
       }
       return notification
     },
+    waitForMessage: (predicate, description) => take(predicate, 10_000, description),
     async close() {
       if (!inputClosed) {
         inputClosed = true

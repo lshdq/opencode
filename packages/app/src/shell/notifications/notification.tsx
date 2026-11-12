@@ -1,6 +1,11 @@
 import { createEffect, createMemo, createSignal, onCleanup, untrack } from "solid-js"
 import { Schema } from "effect"
-import { isSessionNotFoundError, type LocationRef, type OpenCodeEvent, type SessionInfo } from "@opencode/client/promise"
+import {
+  isSessionNotFoundError,
+  type LocationRef,
+  type OpenCodeEvent,
+  type SessionInfo,
+} from "@opencode/client/promise"
 import type { ServerSDK } from "@/runtime/server/client"
 import type { Data } from "@opencode/client/solid"
 import { usePlatform } from "@/runtime/platform/platform"
@@ -92,10 +97,7 @@ type DeferredCompletion = {
   generation: number
 }
 
-type TerminalEvent = Extract<
-  OpenCodeEvent,
-  { type: "session.execution.succeeded" | "session.execution.failed" }
->
+type TerminalEvent = Extract<OpenCodeEvent, { type: "session.execution.succeeded" | "session.execution.failed" }>
 
 type LifecycleEvent = Extract<
   OpenCodeEvent,
@@ -131,6 +133,8 @@ export function createServerNotificationState(input: {
   data: Data
   key: ServerConnection.Key
   coordinator: ReturnType<typeof createNotificationCoordinator>
+  muted: (sessionID: string) => boolean
+  preferencesLoaded?: Promise<unknown>
 }) {
   const platform = usePlatform()
   const settings = useSettings()
@@ -227,11 +231,7 @@ export function createServerNotificationState(input: {
 
   const isCurrentCompletion = (sessionID: string, eventID: string, generation: number, attempt: number) => {
     const marker = terminal.get(sessionID)
-    return (
-      isCurrentAttempt(attempt) &&
-      marker?.eventID === eventID &&
-      marker?.generation === generation
-    )
+    return isCurrentAttempt(attempt) && marker?.eventID === eventID && marker?.generation === generation
   }
 
   const legacyTarget = Persist.serverGlobal(input.sdk.scope, "notification")
@@ -376,8 +376,7 @@ export function createServerNotificationState(input: {
 
   const roots = (directory: string) =>
     sessionList().filter(
-      (session) =>
-        !session.parentID && session.time.archived === undefined && session.location.directory === directory,
+      (session) => !session.parentID && session.time.archived === undefined && session.location.directory === directory,
     )
 
   const view = (sessionID: string) => {
@@ -397,17 +396,18 @@ export function createServerNotificationState(input: {
   }
 
   // Loading the session keeps a background completion visible in the server-derived unread state.
-  const lookup = (sessionID: string) => {
+  const lookup = async (sessionID: string) => {
+    if (input.preferencesLoaded) await input.preferencesLoaded
     const session = input.data.session.get(sessionID)
 
     if (session) {
       failedLookups.delete(sessionID)
-      return Promise.resolve(session)
+      return session
     }
 
     if (!input.data.session.sync) {
       failedLookups.delete(sessionID)
-      return Promise.resolve(undefined)
+      return undefined
     }
     const existing = lookingUp.get(sessionID)
     if (existing) return existing
@@ -421,8 +421,7 @@ export function createServerNotificationState(input: {
       })
       .catch(() => {
         failedLookups.add(sessionID)
-        if (failedLookups.size > MAX_TERMINAL_MARKERS)
-          failedLookups.delete(failedLookups.values().next().value!)
+        if (failedLookups.size > MAX_TERMINAL_MARKERS) failedLookups.delete(failedLookups.values().next().value!)
         return undefined
       })
     lookingUp.set(sessionID, request)
@@ -611,7 +610,9 @@ export function createServerNotificationState(input: {
   const syncLocations = async (locations: Map<string, LocationRef>) => {
     if (!input.data.shell?.sync) return true
 
-    const results = await Promise.allSettled([...locations.values()].map((location) => input.data.shell?.sync?.(location)))
+    const results = await Promise.allSettled(
+      [...locations.values()].map((location) => input.data.shell?.sync?.(location)),
+    )
     return results.every((result) => result.status === "fulfilled")
   }
 
@@ -648,7 +649,8 @@ export function createServerNotificationState(input: {
     const locations = new Map<string, LocationRef>()
     for (const sessionID of discovered) addLocation(locations, input.data.session.get(sessionID)?.location)
     for (const session of sessionList()) {
-      if (session.id === rootID || input.data.session.root?.(session.id) === rootID) addLocation(locations, session.location)
+      if (session.id === rootID || input.data.session.root?.(session.id) === rootID)
+        addLocation(locations, session.location)
     }
     for (const shell of shells.values()) {
       if (shell.ownerSessionID === rootID || shell.ancestors.has(rootID)) addLocation(locations, shell.location)
@@ -751,7 +753,8 @@ export function createServerNotificationState(input: {
 
     if (pendingLifecycleEvents.some((event) => isDescendant(event.data.sessionID, sessionID))) return true
 
-    if ([...shells.values()].some((shell) => shell.ownerSessionID === sessionID || shell.ancestors.has(sessionID))) return true
+    if ([...shells.values()].some((shell) => shell.ownerSessionID === sessionID || shell.ancestors.has(sessionID)))
+      return true
 
     return [sessionID, ...descendants].some((candidateID) =>
       listShellsBySession(candidateID).some((shell) => shell.status === "running"),
@@ -764,6 +767,10 @@ export function createServerNotificationState(input: {
 
     if (marker?.eventID !== eventID || marker.generation !== generation) return
     marker.processed = true
+    if (input.muted(sessionID)) {
+      pruneTerminal()
+      return
+    }
     if (hasOpenTab) marker.notified = true
 
     if (hasOpenTab && settings.sounds.agentEnabled()) {
@@ -831,11 +838,7 @@ export function createServerNotificationState(input: {
           const marker = terminal.get(sessionID)
           if (marker?.type === "session.execution.failed") {
             const session = await lookup(sessionID)
-            if (
-              deleted.has(sessionID) ||
-              !session ||
-              !isCurrentCompletion(sessionID, eventID, generation, attempt)
-            )
+            if (deleted.has(sessionID) || !session || !isCurrentCompletion(sessionID, eventID, generation, attempt))
               return
 
             deferred.delete(sessionID)
@@ -843,9 +846,8 @@ export function createServerNotificationState(input: {
             return
           }
 
-          const hydrated = await hydrateForCompletion(
-            sessionID,
-            () => isCurrentCompletion(sessionID, eventID, generation, attempt),
+          const hydrated = await hydrateForCompletion(sessionID, () =>
+            isCurrentCompletion(sessionID, eventID, generation, attempt),
           )
           if (!isCurrentCompletion(sessionID, eventID, generation, attempt) || !hydrated) return
 
@@ -866,11 +868,7 @@ export function createServerNotificationState(input: {
           notifySessionIdle(sessionID, eventID, generation, session)
         } finally {
           settlingDeferred.delete(sessionID)
-          if (
-            isCurrentAttempt(attempt) &&
-            deferred.has(sessionID) &&
-            deferredRevision !== revision
-          )
+          if (isCurrentAttempt(attempt) && deferred.has(sessionID) && deferredRevision !== revision)
             scheduleDeferredFlush()
           else if (isCurrentAttempt(attempt) && deferred.has(sessionID)) scheduleDeferredRecovery()
         }
@@ -925,17 +923,15 @@ export function createServerNotificationState(input: {
       }
       if (!isCurrentCompletion(sessionID, eventID, generation, attempt)) return
       if (!isCurrentRootCompletion(sessionID, eventID, generation, session)) {
-        if (session.parentID || parentID(sessionID) !== undefined)
-          markTerminalProcessed(sessionID, eventID, generation)
+        if (session.parentID || parentID(sessionID) !== undefined) markTerminalProcessed(sessionID, eventID, generation)
         return
       }
 
       const marker = terminal.get(sessionID)
       if (marker?.eventID === eventID && marker.generation === generation) marker.idle = session.time?.idle
 
-      const hydrated = await hydrateForCompletion(
-        sessionID,
-        () => isCurrentCompletion(sessionID, eventID, generation, attempt),
+      const hydrated = await hydrateForCompletion(sessionID, () =>
+        isCurrentCompletion(sessionID, eventID, generation, attempt),
       )
       if (!isCurrentCompletion(sessionID, eventID, generation, attempt)) return
       if (!isCurrentRootCompletion(sessionID, eventID, generation, session)) return
@@ -962,7 +958,7 @@ export function createServerNotificationState(input: {
     }
 
     const session = input.data.session.get(sessionID)
-    if (session) {
+    if (session && !input.preferencesLoaded) {
       void process(session).finally(() => {
         if (!isCurrentAttempt(attempt) || !deferred.has(sessionID)) return
         if (deferredRevision !== (deferredSetRevision ?? revision)) scheduleDeferredFlush()
@@ -987,6 +983,11 @@ export function createServerNotificationState(input: {
   ) => {
     const process = (session: SessionInfo | undefined) => {
       if (!isCurrentCompletion(sessionID, eventID, generation, attempt) || deleted.has(sessionID)) return
+
+      if (input.muted(sessionID)) {
+        markTerminalProcessed(sessionID, eventID, generation)
+        return
+      }
 
       const hasOpenTab = sessionIDHasOpenTab(tabs.store, input.key, sessionID)
       const marker = terminal.get(sessionID)
@@ -1021,7 +1022,7 @@ export function createServerNotificationState(input: {
     }
 
     const session = input.data.session.get(sessionID)
-    if (session) {
+    if (session && !input.preferencesLoaded) {
       process(session)
       return
     }
@@ -1045,7 +1046,7 @@ export function createServerNotificationState(input: {
     const category = kind === "question" || kind === "mcp-elicitation" ? "questions" : "permissions"
 
     const pending = () => {
-      if (disposed.value) return false
+      if (disposed.value || input.muted(sessionID) || input.muted(input.data.session.root(sessionID))) return false
 
       if (kind !== "permission") return input.data.session.form.list(sessionID)?.some((form) => form.id === requestID)
 
@@ -1302,9 +1303,7 @@ export function createServerNotificationState(input: {
       return true
     }
 
-    const roots = new Set(
-      affected.map((sessionID) => input.data.session.root?.(sessionID) ?? sessionID),
-    )
+    const roots = new Set(affected.map((sessionID) => input.data.session.root?.(sessionID) ?? sessionID))
     const hydration = await Promise.allSettled([...roots].map((rootID) => hydrateRoot(rootID)))
     if (disposed.value) return { success: false, progressed: false, retry: false }
     if (!isCurrent()) {
@@ -1313,14 +1312,26 @@ export function createServerNotificationState(input: {
     }
     if (hydration.some((result) => result.status === "rejected" || !result.value)) {
       if (!disposed.value && isCurrent())
-        restoreLifecycleOverflow(new Set(affected), terminalEvents, pendingEvents, pendingOverflowed, snapshotGenerations)
+        restoreLifecycleOverflow(
+          new Set(affected),
+          terminalEvents,
+          pendingEvents,
+          pendingOverflowed,
+          snapshotGenerations,
+        )
       return { success: false, progressed: false, retry: false }
     }
 
     synchronize(true)
     if (!replayPendingLifecycleEvents()) {
       if (isCurrent())
-        restoreLifecycleOverflow(new Set(affected), terminalEvents, pendingEvents, pendingOverflowed, snapshotGenerations)
+        restoreLifecycleOverflow(
+          new Set(affected),
+          terminalEvents,
+          pendingEvents,
+          pendingOverflowed,
+          snapshotGenerations,
+        )
       else restoreIfInvalidated()
       return { success: false, progressed: false, retry: false }
     }
@@ -1370,11 +1381,7 @@ export function createServerNotificationState(input: {
       }
 
       const marker = terminal.get(sessionID)
-      if (
-        marker &&
-        marker.generation === snapshotGeneration &&
-        (marker.idle === undefined || marker.idle >= idle)
-      ) {
+      if (marker && marker.generation === snapshotGeneration && (marker.idle === undefined || marker.idle >= idle)) {
         overflowedSessions.delete(sessionID)
         if (event && overflowedTerminalEvents.get(sessionID)?.event.id === event.event.id)
           overflowedTerminalEvents.delete(sessionID)

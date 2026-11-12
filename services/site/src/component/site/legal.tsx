@@ -21,7 +21,7 @@ import {
   type LegalNode,
 } from "~/lib/legal"
 import { legalSummaries } from "~/lib/legal/summaries"
-import { AnalyticsChoice } from "./analytics-choice"
+import { analyticsChoice } from "./analytics-choice"
 import { CheckIcon, Chevron, CopyIcon, DownloadIcon, ExternalArrow, NewTab } from "./icons"
 import { copySelection } from "~/lib/clipboard"
 import { architectLabelCases, architectRules, legalHistoryViews, legalPrintStyles, siteSettings } from "./settings"
@@ -51,7 +51,7 @@ const feedTitle = "OpenCode legal updates"
  * every legal document and the document's sections. Above the text: the dates, History, Save as
  * PDF and a plain-language summary. Settings › Legal history (or `?historyView=` for review links)
  * picks where History shows: inline above the text, or in place of it (tabs, a toggle, the Contents
- * rail), or in a side drawer.
+ * rail), or in a side drawer. The static pages drive the same markup from src/client/islands/legal.ts.
  */
 export function LegalDocument(props: { document: LegalDocumentContent }) {
   const i18n = useI18n()
@@ -683,12 +683,15 @@ function LegalBody(props: {
 }) {
   if (typeof props.node === "string") return props.node
   const node = props.node
-  // Shown in the browser only; a static page's script renders it into this host (src/client/islands/legal.ts).
+  // Shown in the browser only, rendered into this host (analytics-choice.ts); a static page's script
+  // renders it from src/client/islands/legal.ts.
   if (node[0] === "analytics-choice")
-    return staticRender() ? (
-      <div data-slot="analytics-choice-host" style={{ display: "contents" }} />
-    ) : (
-      <AnalyticsChoice />
+    return (
+      <div
+        data-slot="analytics-choice-host"
+        style={{ display: "contents" }}
+        ref={(host) => onMount(() => analyticsChoice(host))}
+      />
     )
   if (published(node)) return <LegalElement node={node} anchors={props.anchors} />
   // A note to the legal reviewers in a draft: shown only with Settings › Legal review notes.

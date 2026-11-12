@@ -172,7 +172,7 @@ export const Info = Schema.Struct({
         description: "Show user attachment and tool-result images in the session transcript",
       }),
       tps: Schema.optional(Schema.Boolean).annotate({
-        description: "Show average tokens per second",
+        description: "Show output tokens per second while the model streams",
       }),
       timestamps: Schema.optional(Schema.Boolean).annotate({
         description: "Show assistant message creation timestamps",
