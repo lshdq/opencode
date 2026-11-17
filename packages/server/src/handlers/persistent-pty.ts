@@ -22,6 +22,7 @@ import { makeJob } from "./job"
 import { makeMediaGet } from "./media"
 import { type Outbound, runPtySocket } from "./pty-socket"
 import { makeSchedule } from "./schedule"
+import { makeTaskQueue } from "./task-queue"
 
 export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experimental", (handlers) =>
   Effect.gen(function* () {
@@ -32,6 +33,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
     const job = yield* makeJob
     const mediaGet = yield* makeMediaGet
     const schedule = yield* makeSchedule
+    const taskQueue = yield* makeTaskQueue
 
     return handlers
       .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
@@ -49,6 +51,14 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle("schedule.pause", (ctx) => schedule.pause(ctx.params.scheduleID))
       .handle("schedule.resume", (ctx) => schedule.resume(ctx.params.scheduleID))
       .handle("schedule.delete", (ctx) => schedule.remove(ctx.params.scheduleID))
+      .handle("taskQueue.create", (ctx) => taskQueue.create(ctx.payload))
+      .handle("taskQueue.list", (ctx) => taskQueue.list(ctx.query))
+      .handle("taskQueue.get", (ctx) => taskQueue.get(ctx.params.queueID))
+      .handle("taskQueue.start", (ctx) => taskQueue.start(ctx.params.queueID))
+      .handle("taskQueue.heartbeat", (ctx) => taskQueue.heartbeat(ctx.params.queueID))
+      .handle("taskQueue.stop", (ctx) => taskQueue.stop(ctx.params.queueID, ctx.payload))
+      .handle("taskQueue.resume", (ctx) => taskQueue.resume(ctx.params.queueID))
+      .handle("taskQueue.delete", (ctx) => taskQueue.remove(ctx.params.queueID))
       .handle(
         "persistentPty.read",
         Effect.fn(function* (ctx) {

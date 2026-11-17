@@ -343,6 +343,15 @@ export class ScheduleNotFoundError extends Schema.TaggedError<ScheduleNotFoundEr
   { httpApiStatus: 404 },
 ) {}
 
+export class TaskQueueNotFoundError extends Schema.TaggedError<TaskQueueNotFoundError>()(
+  "TaskQueueNotFoundError",
+  {
+    queueID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
 export class ArtifactNotFoundError extends Schema.TaggedError<ArtifactNotFoundError>()(
   "ArtifactNotFoundError",
   {

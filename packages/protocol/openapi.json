@@ -10169,6 +10169,7 @@
                     "form.cancelled",
                     "websearch.updated",
                     "artifact.updated",
+                    "taskqueue.updated",
                     "session.status",
                     "session.idle",
                     "tui.prompt.append",
@@ -10280,6 +10281,7 @@
                           "form.cancelled",
                           "websearch.updated",
                           "artifact.updated",
+                          "taskqueue.updated",
                           "session.status",
                           "session.idle",
                           "tui.prompt.append",
@@ -13477,6 +13479,668 @@
         "summary": "List background jobs"
       }
     },
+    "/api/experimental/task-queue": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.taskQueue.create",
+        "parameters": [],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/TaskQueue.Info"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Create a queue of tasks that run serially and unattended, each task in its own session in the queue's directory. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "summary": "Create task queue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskQueue.CreateInput"
+              }
+            }
+          },
+          "required": true
+        }
+      },
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.taskQueue.list",
+        "parameters": [
+          {
+            "name": "directory",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/AbsolutePath_1"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TaskQueue.Info"
+                      }
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "List a directory's queues, oldest first. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "summary": "List task queues"
+      }
+    },
+    "/api/experimental/task-queue/{queueID}": {
+      "get": {
+        "tags": ["experimental"],
+        "operationId": "experimental.taskQueue.get",
+        "parameters": [
+          {
+            "name": "queueID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/TaskQueue.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/TaskQueue.Info"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "TaskQueueNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/TaskQueueNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Read one queue with its tasks. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "summary": "Get task queue"
+      },
+      "delete": {
+        "tags": ["experimental"],
+        "operationId": "experimental.taskQueue.delete",
+        "parameters": [
+          {
+            "name": "queueID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/TaskQueue.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "<No Content>"
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "TaskQueueNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/TaskQueueNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Delete a queue and its tasks. A running queue must be stopped first. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "summary": "Delete task queue"
+      }
+    },
+    "/api/experimental/task-queue/{queueID}/start": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.taskQueue.start",
+        "parameters": [
+          {
+            "name": "queueID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/TaskQueue.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/TaskQueue.Info"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "TaskQueueNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/TaskQueueNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Start a queued queue: its tasks run one at a time until done or stopped. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "summary": "Start task queue"
+      }
+    },
+    "/api/experimental/task-queue/{queueID}/heartbeat": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.taskQueue.heartbeat",
+        "parameters": [
+          {
+            "name": "queueID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/TaskQueue.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/TaskQueue.Info"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "TaskQueueNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/TaskQueueNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Extend a running queue's owner lease; a lease the owner stops renewing stops the queue like a user stop. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "summary": "Renew task queue lease"
+      }
+    },
+    "/api/experimental/task-queue/{queueID}/stop": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.taskQueue.stop",
+        "parameters": [
+          {
+            "name": "queueID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/TaskQueue.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/TaskQueue.Info"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "TaskQueueNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/TaskQueueNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Stop a queue owned by this server and wait for its task tree and background work to stop. The interrupted task keeps its session for a later resume. A non-running queue is returned unchanged. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "summary": "Stop task queue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskQueue.StopPayload"
+              }
+            }
+          },
+          "required": true
+        }
+      }
+    },
+    "/api/experimental/task-queue/{queueID}/resume": {
+      "post": {
+        "tags": ["experimental"],
+        "operationId": "experimental.taskQueue.resume",
+        "parameters": [
+          {
+            "name": "queueID",
+            "in": "path",
+            "schema": {
+              "$ref": "#/components/schemas/TaskQueue.ID"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/TaskQueue.Info"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "ForbiddenError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "TaskQueueNotFoundError | LocationNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/TaskQueueNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "description": "Continue the interrupted and pending tasks of a stopped or interrupted queue without revisiting earlier blocked tasks. Explicitly resuming a done queue retries its blocked and failed tasks in their original sessions; completed tasks are never repeated. Only one batch may run in a canonical directory. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "summary": "Resume task queue"
+      }
+    },
     "/api/shell": {
       "get": {
         "tags": ["shell"],
@@ -15826,6 +16490,10 @@
       "AbsolutePath": {
         "type": "string"
       },
+      "AbsolutePath_1": {
+        "type": "string",
+        "description": "List the queues created for this directory."
+      },
       "Agent.Color": {
         "type": "string"
       },
@@ -16566,6 +17234,17 @@
             },
             "additionalProperties": false
           },
+          "retry": {
+            "type": "object",
+            "properties": {
+              "max_delay": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": false
+          },
           "skills": {
             "type": "array",
             "items": {
@@ -16677,6 +17356,9 @@
                 "type": "boolean"
               },
               "mcp_events": {
+                "type": "boolean"
+              },
+              "task_queue": {
                 "type": "boolean"
               },
               "part_rows": {
@@ -25043,6 +25725,199 @@
       "Snapshot.ID": {
         "type": "string"
       },
+      "TaskQueue.CreateInput": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "directory": {
+            "$ref": "#/components/schemas/AbsolutePath"
+          },
+          "tasks": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/TaskQueue.TaskInput"
+              }
+            ],
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/TaskQueue.TaskInput"
+            }
+          }
+        },
+        "required": ["directory", "tasks"],
+        "additionalProperties": false
+      },
+      "TaskQueue.ID": {
+        "type": "string",
+        "pattern": "^tq_"
+      },
+      "TaskQueue.Info": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/TaskQueue.ID"
+          },
+          "title": {
+            "type": "string"
+          },
+          "directory": {
+            "$ref": "#/components/schemas/AbsolutePath"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskQueue.Status"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "currentTaskID": {
+            "$ref": "#/components/schemas/TaskQueue.TaskID"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskQueue.Task"
+            }
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "updated": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": ["created", "updated"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "directory", "status", "tasks", "time"],
+        "additionalProperties": false
+      },
+      "TaskQueue.Status": {
+        "type": "string",
+        "enum": ["queued", "running", "done", "stopped", "interrupted"]
+      },
+      "TaskQueue.StopPayload": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the queue stopped, recorded on the queue; defaults to a user stop."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TaskQueue.Task": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/TaskQueue.TaskID"
+          },
+          "title": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TaskQueue.TaskStatus"
+          },
+          "position": {
+            "type": "integer",
+            "maximum": 9007199254740991,
+            "exclusiveMinimum": 0
+          },
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "rounds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "reason": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "updated": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": ["created", "updated"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["id", "title", "prompt", "status", "position", "rounds", "time"],
+        "additionalProperties": false
+      },
+      "TaskQueue.TaskID": {
+        "type": "string",
+        "pattern": "^tqt_"
+      },
+      "TaskQueue.TaskInput": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": ["title", "prompt"],
+        "additionalProperties": false
+      },
+      "TaskQueue.TaskStatus": {
+        "type": "string",
+        "enum": ["pending", "running", "interrupted", "completed", "failed", "blocked", "cancelled"]
+      },
+      "TaskQueueNotFoundErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["TaskQueueNotFoundError"]
+          },
+          "queueID": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "queueID", "message"],
+        "additionalProperties": false
+      },
       "TokenUsage.Info": {
         "type": "object",
         "properties": {
@@ -25598,6 +26473,9 @@
           },
           {
             "$ref": "#/components/schemas/artifact.updated"
+          },
+          {
+            "$ref": "#/components/schemas/taskqueue.updated"
           },
           {
             "$ref": "#/components/schemas/SessionStatusUpdated"
@@ -30527,6 +31405,77 @@
             "not": {
               "type": "null"
             }
+          }
+        },
+        "required": ["id", "created", "type", "data"],
+        "additionalProperties": false
+      },
+      "taskqueue.updated": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Event.ID"
+          },
+          "created": {
+            "type": "number"
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["taskqueue.updated"]
+          },
+          "location": {
+            "$ref": "#/components/schemas/Location.Ref"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/TaskQueue.ID"
+              },
+              "title": {
+                "type": "string"
+              },
+              "directory": {
+                "$ref": "#/components/schemas/AbsolutePath"
+              },
+              "status": {
+                "$ref": "#/components/schemas/TaskQueue.Status"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "currentTaskID": {
+                "$ref": "#/components/schemas/TaskQueue.TaskID"
+              },
+              "tasks": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TaskQueue.Task"
+                }
+              },
+              "time": {
+                "type": "object",
+                "properties": {
+                  "created": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "updated": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": ["created", "updated"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["id", "directory", "status", "tasks", "time"],
+            "additionalProperties": false
           }
         },
         "required": ["id", "created", "type", "data"],

@@ -271,6 +271,22 @@ import type {
   ExperimentalArtifactsViewOutput,
   ExperimentalJobListInput,
   ExperimentalJobListOutput,
+  ExperimentalTaskQueueCreateInput,
+  ExperimentalTaskQueueCreateOutput,
+  ExperimentalTaskQueueListInput,
+  ExperimentalTaskQueueListOutput,
+  ExperimentalTaskQueueGetInput,
+  ExperimentalTaskQueueGetOutput,
+  ExperimentalTaskQueueStartInput,
+  ExperimentalTaskQueueStartOutput,
+  ExperimentalTaskQueueHeartbeatInput,
+  ExperimentalTaskQueueHeartbeatOutput,
+  ExperimentalTaskQueueStopInput,
+  ExperimentalTaskQueueStopOutput,
+  ExperimentalTaskQueueResumeInput,
+  ExperimentalTaskQueueResumeOutput,
+  ExperimentalTaskQueueDeleteInput,
+  ExperimentalTaskQueueDeleteOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1701,6 +1717,99 @@ export function make(options: ClientOptions) {
             },
             requestOptions,
           ).then((value) => value.data),
+      },
+      taskQueue: {
+        create: (input: ExperimentalTaskQueueCreateInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalTaskQueueCreateOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/task-queue`,
+              body: { title: input["title"], directory: input["directory"], tasks: input["tasks"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401, 403, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        list: (input: ExperimentalTaskQueueListInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalTaskQueueListOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/task-queue`,
+              query: { directory: input["directory"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401, 403, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        get: (input: ExperimentalTaskQueueGetInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalTaskQueueGetOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/task-queue/${encodeURIComponent(input.queueID)}`,
+              successStatus: 200,
+              declaredStatuses: [400, 401, 403, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        start: (input: ExperimentalTaskQueueStartInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalTaskQueueStartOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/task-queue/${encodeURIComponent(input.queueID)}/start`,
+              successStatus: 200,
+              declaredStatuses: [400, 401, 403, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        heartbeat: (input: ExperimentalTaskQueueHeartbeatInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalTaskQueueHeartbeatOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/task-queue/${encodeURIComponent(input.queueID)}/heartbeat`,
+              successStatus: 200,
+              declaredStatuses: [400, 401, 403, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        stop: (input: ExperimentalTaskQueueStopInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalTaskQueueStopOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/task-queue/${encodeURIComponent(input.queueID)}/stop`,
+              body: { reason: input["reason"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401, 403, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        resume: (input: ExperimentalTaskQueueResumeInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalTaskQueueResumeOutput }>(
+            {
+              method: "POST",
+              path: `/api/experimental/task-queue/${encodeURIComponent(input.queueID)}/resume`,
+              successStatus: 200,
+              declaredStatuses: [400, 401, 403, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        delete: (input: ExperimentalTaskQueueDeleteInput, requestOptions?: RequestOptions) =>
+          request<ExperimentalTaskQueueDeleteOutput>(
+            {
+              method: "DELETE",
+              path: `/api/experimental/task-queue/${encodeURIComponent(input.queueID)}`,
+              successStatus: 204,
+              declaredStatuses: [400, 401, 403, 404],
+              empty: true,
+            },
+            requestOptions,
+          ),
       },
       migration: {
         v1: {

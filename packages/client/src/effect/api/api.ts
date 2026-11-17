@@ -40,6 +40,7 @@ import type { Pty } from "@opencode/schema/pty"
 import type { Schedule } from "@opencode/schema/schedule"
 import type { Artifact } from "@opencode/schema/artifact"
 import type { Job } from "@opencode/schema/job"
+import type { TaskQueue } from "@opencode/schema/task-queue"
 import type { Reference } from "@opencode/schema/reference"
 import type { Worktree } from "@opencode/schema/worktree"
 import type { Vcs } from "@opencode/schema/vcs"
@@ -2154,6 +2155,7 @@ export type EventSubscribeInput = {
         | "form.cancelled"
         | "websearch.updated"
         | "artifact.updated"
+        | "taskqueue.updated"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -2526,6 +2528,58 @@ export type ExperimentalJobListOperation<E = never> = (
   input?: ExperimentalJobListInput,
 ) => Effect.Effect<ExperimentalJobListOutput, E>
 
+export type ExperimentalTaskQueueCreateInput = {
+  readonly title?: string | undefined
+  readonly directory: AbsolutePath
+  readonly tasks: readonly [TaskQueue.TaskInput, ...Array<TaskQueue.TaskInput>]
+}
+export type ExperimentalTaskQueueCreateOutput = TaskQueue.Info
+export type ExperimentalTaskQueueCreateOperation<E = never> = (
+  input: ExperimentalTaskQueueCreateInput,
+) => Effect.Effect<ExperimentalTaskQueueCreateOutput, E>
+
+export type ExperimentalTaskQueueListInput = { readonly directory: AbsolutePath }
+export type ExperimentalTaskQueueListOutput = ReadonlyArray<TaskQueue.Info>
+export type ExperimentalTaskQueueListOperation<E = never> = (
+  input: ExperimentalTaskQueueListInput,
+) => Effect.Effect<ExperimentalTaskQueueListOutput, E>
+
+export type ExperimentalTaskQueueGetInput = { readonly queueID: TaskQueue.ID }
+export type ExperimentalTaskQueueGetOutput = TaskQueue.Info
+export type ExperimentalTaskQueueGetOperation<E = never> = (
+  input: ExperimentalTaskQueueGetInput,
+) => Effect.Effect<ExperimentalTaskQueueGetOutput, E>
+
+export type ExperimentalTaskQueueStartInput = { readonly queueID: TaskQueue.ID }
+export type ExperimentalTaskQueueStartOutput = TaskQueue.Info
+export type ExperimentalTaskQueueStartOperation<E = never> = (
+  input: ExperimentalTaskQueueStartInput,
+) => Effect.Effect<ExperimentalTaskQueueStartOutput, E>
+
+export type ExperimentalTaskQueueHeartbeatInput = { readonly queueID: TaskQueue.ID }
+export type ExperimentalTaskQueueHeartbeatOutput = TaskQueue.Info
+export type ExperimentalTaskQueueHeartbeatOperation<E = never> = (
+  input: ExperimentalTaskQueueHeartbeatInput,
+) => Effect.Effect<ExperimentalTaskQueueHeartbeatOutput, E>
+
+export type ExperimentalTaskQueueStopInput = { readonly queueID: TaskQueue.ID; readonly reason?: string | undefined }
+export type ExperimentalTaskQueueStopOutput = TaskQueue.Info
+export type ExperimentalTaskQueueStopOperation<E = never> = (
+  input: ExperimentalTaskQueueStopInput,
+) => Effect.Effect<ExperimentalTaskQueueStopOutput, E>
+
+export type ExperimentalTaskQueueResumeInput = { readonly queueID: TaskQueue.ID }
+export type ExperimentalTaskQueueResumeOutput = TaskQueue.Info
+export type ExperimentalTaskQueueResumeOperation<E = never> = (
+  input: ExperimentalTaskQueueResumeInput,
+) => Effect.Effect<ExperimentalTaskQueueResumeOutput, E>
+
+export type ExperimentalTaskQueueDeleteInput = { readonly queueID: TaskQueue.ID }
+export type ExperimentalTaskQueueDeleteOutput = void
+export type ExperimentalTaskQueueDeleteOperation<E = never> = (
+  input: ExperimentalTaskQueueDeleteInput,
+) => Effect.Effect<ExperimentalTaskQueueDeleteOutput, E>
+
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
     readonly read: ExperimentalPersistentPtyReadOperation<E>
@@ -2556,6 +2610,16 @@ export interface ExperimentalApi<E = never> {
     readonly delete: ExperimentalArtifactsDeleteOperation<E>
   }
   readonly job: { readonly list: ExperimentalJobListOperation<E> }
+  readonly taskQueue: {
+    readonly create: ExperimentalTaskQueueCreateOperation<E>
+    readonly list: ExperimentalTaskQueueListOperation<E>
+    readonly get: ExperimentalTaskQueueGetOperation<E>
+    readonly start: ExperimentalTaskQueueStartOperation<E>
+    readonly heartbeat: ExperimentalTaskQueueHeartbeatOperation<E>
+    readonly stop: ExperimentalTaskQueueStopOperation<E>
+    readonly resume: ExperimentalTaskQueueResumeOperation<E>
+    readonly delete: ExperimentalTaskQueueDeleteOperation<E>
+  }
 }
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }

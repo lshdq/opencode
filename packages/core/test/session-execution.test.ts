@@ -30,6 +30,8 @@ import { ID } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
 import { daemonShells } from "./fixture/shell-daemon"
 import { SubagentCompletion } from "@opencode/core/session/subagent-completion"
+import { TaskQueue } from "@opencode/schema/task-queue"
+import { TaskQueueTable, TaskQueueTaskTable } from "@opencode/core/task-queue/sql"
 import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, LayerMap, Logger, Scope } from "effect"
 import { eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
@@ -41,6 +43,283 @@ const it = testEffect(
 )
 
 describe("SessionExecution lifecycle", () => {
+  // TC-027: deleted queue rows cannot make retained root/descendant claims or shell/image
+  // outboxes recoverable. An unrelated root still resumes through the real sweep/coordinator.
+  it.effect(
+    "restart fences deleted queue tombstones including shell and image recovery, but resumes an ordinary claim",
+    () =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const root = Session.ID.make("ses_deleted_queue_root")
+        const child = Session.ID.make("ses_deleted_queue_child")
+        const grandchild = Session.ID.make("ses_deleted_queue_grandchild")
+        const ordinary = Session.ID.make("ses_deleted_queue_ordinary")
+        yield* seedSessions(database, [root, ordinary], { time_suspended: 1 })
+        yield* seedSessions(database, [child], { parent_id: root, time_suspended: 1 })
+        yield* seedSessions(database, [grandchild], { parent_id: child, time_suspended: 1 })
+        yield* database.db
+          .update(SessionTable)
+          .set({ metadata: { source: "taskqueue" } })
+          .where(eq(SessionTable.id, root))
+          .run()
+          .pipe(Effect.orDie)
+        const queueID = TaskQueue.ID.create()
+        yield* database.db
+          .insert(TaskQueueTable)
+          .values({ id: queueID, directory: AbsolutePath.make("/project"), status: "stopped" })
+          .run()
+          .pipe(Effect.orDie)
+        yield* database.db
+          .insert(TaskQueueTaskTable)
+          .values({
+            id: TaskQueue.TaskID.create(),
+            queue_id: queueID,
+            position: 1,
+            title: "Deleted task",
+            prompt: "work",
+            session_id: root,
+            status: "interrupted",
+          })
+          .run()
+          .pipe(Effect.orDie)
+        yield* database.db.delete(TaskQueueTable).where(eq(TaskQueueTable.id, queueID)).run().pipe(Effect.orDie)
+        yield* database.db
+          .insert(JobTable)
+          .values([
+            {
+              notification_id: SessionMessage.ID.create(),
+              id: "deleted-queue-shell",
+              session_id: root,
+              kind: "shell",
+              status: "running",
+              recovery: { kind: "shell", sessionID: root, shellID: "sh_deleted_queue", command: "work" },
+            },
+            {
+              notification_id: SessionMessage.ID.create(),
+              id: "deleted-queue-image",
+              session_id: grandchild,
+              kind: "image",
+              status: "completed",
+              output: "saved image",
+              recovery: { kind: "image", sessionID: grandchild, path: "/image.png", model: "test/painter" },
+            },
+          ])
+          .run()
+          .pipe(Effect.orDie)
+        const before = yield* database.db.select().from(JobTable).all().pipe(Effect.orDie)
+        const started = yield* Deferred.make<void>()
+        const drained: Session.ID[] = []
+        const scope = yield* Scope.make()
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+        const context = yield* buildExecution(scope, ({ sessionID }) =>
+          Effect.sync(() => drained.push(sessionID)).pipe(
+            Effect.andThen(Deferred.succeed(started, undefined)),
+            Effect.asVoid,
+          ),
+        )
+        yield* Context.get(context, SessionRestart.Service).resumeSuspendedSessions
+        yield* Deferred.await(started)
+        const execution = Context.get(context, SessionExecution.Service)
+        yield* execution.awaitIdle(ordinary)
+        for (const id of [root, child, grandchild]) {
+          yield* execution.wake(id)
+          yield* execution.resume(id)
+          expect(yield* SessionInbox.list(database.db, id)).toEqual([])
+          expect(yield* attempts(database, id)).toBe(0)
+        }
+        expect(drained).toEqual([ordinary])
+        expect(yield* claims(database)).toEqual({ [root]: true, [child]: true, [grandchild]: true, [ordinary]: false })
+        expect(yield* database.db.select().from(JobTable).all().pipe(Effect.orDie)).toEqual(before)
+      }),
+  )
+
+  it.effect(
+    "restart preserves queue root/descendant claims and jobs without resuming them, while ordinary recovery runs",
+    () =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const root = Session.ID.make("ses_queue_restart_root")
+        const child = Session.ID.make("ses_queue_restart_child")
+        const grandchild = Session.ID.make("ses_queue_restart_grandchild")
+        const ordinary = Session.ID.make("ses_queue_restart_ordinary")
+        const fork = Session.ID.make("ses_queue_restart_independent_fork")
+        const forkChild = Session.ID.make("ses_queue_restart_fork_child")
+        yield* seedSessions(database, [root, ordinary, fork], { time_suspended: 1 })
+        yield* seedSessions(database, [child], { parent_id: root, time_suspended: 1 })
+        yield* seedSessions(database, [grandchild], { parent_id: child, time_suspended: 1 })
+        yield* seedSessions(database, [forkChild], { parent_id: fork, time_suspended: 1 })
+        yield* database.db
+          .update(SessionTable)
+          .set({
+            metadata: { source: "taskqueue" },
+            fork_session_id: root,
+            fork_boundary: { type: "through", messageID: SessionMessage.ID.create() },
+          })
+          .where(eq(SessionTable.id, fork))
+          .run()
+          .pipe(Effect.orDie)
+        yield* database.db
+          .update(SessionTable)
+          .set({ metadata: { source: "taskqueue" } })
+          .where(eq(SessionTable.id, forkChild))
+          .run()
+          .pipe(Effect.orDie)
+        const queueID = TaskQueue.ID.create()
+        yield* database.db
+          .insert(TaskQueueTable)
+          .values({ id: queueID, directory: AbsolutePath.make("/project"), status: "interrupted" })
+          .run()
+          .pipe(Effect.orDie)
+        yield* database.db
+          .insert(TaskQueueTaskTable)
+          .values({
+            id: TaskQueue.TaskID.create(),
+            queue_id: queueID,
+            position: 1,
+            title: "Owned task",
+            prompt: "work",
+            session_id: root,
+            status: "interrupted",
+          })
+          .run()
+          .pipe(Effect.orDie)
+        yield* database.db
+          .insert(JobTable)
+          .values({
+            notification_id: SessionMessage.ID.create(),
+            id: grandchild,
+            session_id: child,
+            child_session_id: grandchild,
+            kind: "subagent",
+            status: "running",
+            recovery: {
+              kind: "subagent",
+              parentSessionID: child,
+              childSessionID: grandchild,
+              agent: "build",
+              description: "Grandchild",
+            },
+          })
+          .run()
+          .pipe(Effect.orDie)
+        const started = yield* Deferred.make<void>()
+        const drained: Session.ID[] = []
+        const scope = yield* Scope.make()
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+        const context = yield* buildExecution(scope, ({ sessionID }) =>
+          Effect.sync(() => drained.push(sessionID)).pipe(
+            Effect.flatMap(() => (drained.length === 2 ? Deferred.succeed(started, undefined) : Effect.void)),
+            Effect.asVoid,
+          ),
+        )
+        yield* Context.get(context, SessionRestart.Service).resumeSuspendedSessions
+        yield* Deferred.await(started)
+        const execution = Context.get(context, SessionExecution.Service)
+        yield* execution.awaitIdle(ordinary)
+        yield* execution.awaitIdle(fork)
+        expect(drained.toSorted()).toEqual([ordinary, fork].toSorted())
+        expect(yield* claims(database)).toEqual({
+          [root]: true,
+          [child]: true,
+          [grandchild]: true,
+          [ordinary]: false,
+          [fork]: false,
+          [forkChild]: false,
+        })
+        expect(yield* attempts(database, root)).toBe(0)
+        expect(yield* attempts(database, grandchild)).toBe(0)
+        const jobs = yield* Job.Service
+        expect(yield* jobs.pendingBackground).toHaveLength(1)
+        // Even explicit raw execution/late notification wake cannot bypass the suspended batch's fence.
+        yield* execution.resume(root)
+        yield* execution.wake(child)
+        yield* execution.wake(grandchild)
+        expect(yield* execution.active).toEqual(new Set())
+        expect(drained.toSorted()).toEqual([ordinary, fork].toSorted())
+      }),
+  )
+
+  it.effect(
+    "queue stop closes real execution admission before cleanup and late notifications cannot revive its tree",
+    () =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const root = Session.ID.make("ses_queue_wake_root")
+        const child = Session.ID.make("ses_queue_wake_child")
+        yield* seedSessions(database, [root])
+        yield* seedSessions(database, [child], { parent_id: root })
+        const queueID = TaskQueue.ID.create()
+        const taskID = TaskQueue.TaskID.create()
+        yield* database.db
+          .insert(TaskQueueTable)
+          .values({
+            id: queueID,
+            directory: AbsolutePath.make("/project"),
+            status: "running",
+            owner_pid: process.pid,
+            run_id: "run-1",
+            lease_expires_at: Number.MAX_SAFE_INTEGER,
+          })
+          .run()
+          .pipe(Effect.orDie)
+        yield* database.db
+          .insert(TaskQueueTaskTable)
+          .values({
+            id: taskID,
+            queue_id: queueID,
+            position: 1,
+            title: "Owned task",
+            prompt: "work",
+            session_id: root,
+            status: "running",
+            accepting: true,
+          })
+          .run()
+          .pipe(Effect.orDie)
+        const started = yield* Deferred.make<void>()
+        const cleanup = yield* Deferred.make<void>()
+        const drained: Session.ID[] = []
+        const scope = yield* Scope.make()
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+        const context = yield* buildExecution(scope, ({ sessionID }) =>
+          Effect.gen(function* () {
+            drained.push(sessionID)
+            yield* Deferred.succeed(started, undefined)
+            yield* Effect.never.pipe(Effect.ensuring(Deferred.await(cleanup)))
+          }),
+        )
+        const execution = Context.get(context, SessionExecution.Service)
+        yield* execution.resume(root).pipe(Effect.forkIn(scope))
+        yield* Deferred.await(started)
+        yield* database.db
+          .update(TaskQueueTable)
+          .set({ closing: true })
+          .where(eq(TaskQueueTable.id, queueID))
+          .run()
+          .pipe(Effect.orDie)
+        yield* execution.interrupt(root)
+        const idle = yield* execution.awaitIdle(root).pipe(Effect.forkScoped)
+        expect(idle.pollUnsafe()).toBeUndefined()
+        yield* Context.get(context, Session.Service).synthetic({
+          sessionID: child,
+          text: "late shell notification",
+          metadata: { notice: "shell" },
+        })
+        yield* execution.wake(root)
+        yield* Deferred.succeed(cleanup, undefined)
+        yield* Fiber.join(idle)
+        yield* database.db
+          .update(TaskQueueTable)
+          .set({ status: "stopped", closing: false })
+          .where(eq(TaskQueueTable.id, queueID))
+          .run()
+          .pipe(Effect.orDie)
+        yield* execution.wake(child)
+        yield* execution.resume(child)
+        expect(drained).toEqual([root])
+        expect(yield* execution.active).toEqual(new Set())
+      }),
+  )
   test("classifies success and typed failure terminals", () => {
     expect(SessionExecution.terminal(Exit.succeed(undefined))).toEqual({ type: "succeeded" })
     expect(

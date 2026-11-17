@@ -10,6 +10,7 @@ import { noTimeoutFetch } from "@opencode/util/no-timeout-fetch"
 import { ClipboardProvider, useClipboard } from "./context/clipboard"
 import { LogProvider, type LogSink } from "./context/log"
 import { ExitProvider, useExit } from "./context/exit"
+import { TaskQueueProvider } from "./context/task-queue"
 import { EpilogueProvider } from "./context/epilogue"
 import { epilogue, type SessionEpilogue } from "./util/presentation"
 import { Selection } from "./util/selection"
@@ -428,32 +429,34 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                           <ThemeErrorToast />
                                                           <ClientMcp />
                                                           <LocalProvider>
-                                                            <PromptStashProvider>
-                                                              <DialogProvider>
-                                                                <FrecencyProvider>
-                                                                  <PromptHistoryProvider>
-                                                                    <PromptRefProvider>
-                                                                      <EditorContextProvider>
-                                                                        <AttentionProvider>
-                                                                          <UpdateNotificationProvider
-                                                                            updater={input.updater}
-                                                                          >
-                                                                            <PanelProvider>
-                                                                              <PluginProvider
-                                                                                packages={input.packages}
-                                                                                directories={pluginDirectories}
-                                                                              >
-                                                                                <App />
-                                                                              </PluginProvider>
-                                                                            </PanelProvider>
-                                                                          </UpdateNotificationProvider>
-                                                                        </AttentionProvider>
-                                                                      </EditorContextProvider>
-                                                                    </PromptRefProvider>
-                                                                  </PromptHistoryProvider>
-                                                                </FrecencyProvider>
-                                                              </DialogProvider>
-                                                            </PromptStashProvider>
+                                                            <TaskQueueProvider>
+                                                              <PromptStashProvider>
+                                                                <DialogProvider>
+                                                                  <FrecencyProvider>
+                                                                    <PromptHistoryProvider>
+                                                                      <PromptRefProvider>
+                                                                        <EditorContextProvider>
+                                                                          <AttentionProvider>
+                                                                            <UpdateNotificationProvider
+                                                                              updater={input.updater}
+                                                                            >
+                                                                              <PanelProvider>
+                                                                                <PluginProvider
+                                                                                  packages={input.packages}
+                                                                                  directories={pluginDirectories}
+                                                                                >
+                                                                                  <App />
+                                                                                </PluginProvider>
+                                                                              </PanelProvider>
+                                                                            </UpdateNotificationProvider>
+                                                                          </AttentionProvider>
+                                                                        </EditorContextProvider>
+                                                                      </PromptRefProvider>
+                                                                    </PromptHistoryProvider>
+                                                                  </FrecencyProvider>
+                                                                </DialogProvider>
+                                                              </PromptStashProvider>
+                                                            </TaskQueueProvider>
                                                           </LocalProvider>
                                                         </ThemeProvider>
                                                       </SessionTerminalsProvider>

@@ -15,6 +15,8 @@ export async function createAppFixture(
     config?: Config.Info
     args?: TuiInput["args"]
     fetch?: FetchHandler
+    service?: TuiInput["server"]["service"]
+    auth?: TuiInput["server"]["endpoint"]["auth"]
     // A renderer whose owner already set up its terminal, such as the simulation renderer.
     setup?: TestRendererSetup
   } = {},
@@ -39,7 +41,7 @@ export async function createAppFixture(
   const task = Effect.runPromise(
     run({
       app: { name: "test", version: "test", channel: "test" },
-      server: { endpoint: { url: server.url.toString() } },
+      server: { endpoint: { url: server.url.toString(), auth: input.auth }, service: input.service },
       config: {
         get: async () => config,
         update: async (mutate) => {

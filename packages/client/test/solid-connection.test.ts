@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { createRoot } from "solid-js"
-import { createClientConnection } from "../src/solid"
-import { OpenCode, type OpenCodeEvent } from "../src/promise"
+import { createClientConnection, type ClientConnectionOptions } from "../src/solid"
+import { OpenCode, type OpenCodeClient, type OpenCodeEvent } from "../src/promise"
 
 const connected = { id: "evt_connected", created: 1, type: "server.connected", data: {} }
 
@@ -178,4 +178,70 @@ test("a reconnect does not ask the volatile event stream to replay", async () =>
   } finally {
     ctx.dispose()
   }
+})
+
+test("buffered connected and data events retain their SDK through A-B-A2 same-URL replacements", async () => {
+  const a = server()
+  const b = server()
+  const a2 = server()
+  const received: { id: string; source: OpenCodeClient; arity: number }[] = []
+  let resolutions = 0
+  const ctx = createRoot((dispose) => ({ dispose, connection: createClientConnection(a.api, {
+    // Existing coalescing option: several real decoder streams share a batch.
+    flushInterval: 80,
+    reconnect: async () => ++resolutions === 1 ? b.api : a2.api,
+    onEvent(event, source) { received.push({ id: event.id, source, arity: arguments.length }) },
+  }) }))
+  try {
+    await until(() => a.streams.length === 1)
+    a.streams[0].write(`data: ${JSON.stringify({ ...connected, id: "evt_A" })}\n\n`)
+    a.streams[0].close()
+    await until(() => b.streams.length === 1)
+    b.streams[0].write(`data: ${JSON.stringify({ ...connected, id: "evt_B" })}\n\ndata: ${JSON.stringify({ id: "evt_B_data", created: 2, type: "plugin.updated", data: {} })}\n\n`)
+    await until(() => ctx.connection.internal.history().filter((event) => event.data.status === "connected").length === 2)
+    ctx.connection.internal.resync("TC036 switch the second stream")
+    await until(() => a2.streams.length === 1)
+    a2.streams[0].write(`data: ${JSON.stringify({ ...connected, id: "evt_A2" })}\n\ndata: ${JSON.stringify({ id: "evt_A2_data", created: 3, type: "plugin.updated", data: {} })}\n\n`)
+    await until(() => received.length === 5)
+    expect(received).toEqual([
+      { id: "evt_A", source: a.api, arity: 2 },
+      { id: "evt_B", source: b.api, arity: 2 },
+      { id: "evt_B_data", source: b.api, arity: 2 },
+      { id: "evt_A2", source: a2.api, arity: 2 },
+      { id: "evt_A2_data", source: a2.api, arity: 2 },
+    ])
+    expect(resolutions).toBe(2)
+    expect(a.streams[0].aborted).toBe(true)
+    expect(b.streams[0].aborted).toBe(true)
+  } finally { ctx.dispose() }
+})
+
+test("disposal drops buffered source entries while legacy one-argument onEvent remains assignable and usable", async () => {
+  const discarded = server()
+  const sentinel = server()
+  const events: OpenCodeEvent[] = []
+  const stale: OpenCodeEvent[] = []
+  const legacy: ClientConnectionOptions["onEvent"] = (event) => { events.push(event) }
+  const ctx = createRoot((dispose) => ({ dispose, connection: createClientConnection(discarded.api, {
+    flushInterval: 50, onEvent(event) { stale.push(event) },
+  }) }))
+  let cleanup: (() => void) | undefined
+  try {
+    await until(() => discarded.streams.length === 1)
+    discarded.streams[0].write(`data: ${JSON.stringify(connected)}\n\n`)
+    await until(() => ctx.connection.status() === "connected")
+    ctx.dispose()
+    const next = createRoot((dispose) => ({ dispose, connection: createClientConnection(sentinel.api, {
+      flushInterval: 50, onEvent: legacy,
+    }) }))
+    cleanup = next.dispose
+    await until(() => sentinel.streams.length === 1)
+    // This real later flush is the barrier; no fixed sleep or fake global clock.
+    sentinel.streams[0].write(`data: ${JSON.stringify(connected)}\n\n`)
+    await until(() => events.length === 1)
+    expect(stale).toEqual([])
+    expect(events).toEqual([connected])
+    expect(legacy.length).toBe(1)
+    expect(discarded.streams[0].aborted).toBe(true)
+  } finally { ctx.dispose(); cleanup?.() }
 })

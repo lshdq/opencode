@@ -290,6 +290,42 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
         );
       `)
       yield* tx.run(`
+        CREATE TABLE \`task_queue\` (
+          \`id\` text PRIMARY KEY,
+          \`title\` text,
+          \`directory\` text NOT NULL,
+          \`status\` text DEFAULT 'queued' NOT NULL,
+          \`reason\` text,
+          \`owner_boot\` text,
+          \`owner_pid\` integer,
+          \`run_id\` text,
+          \`closing\` integer DEFAULT false NOT NULL,
+          \`lease_expires_at\` integer,
+          \`current_task_id\` text,
+          \`time_created\` integer NOT NULL,
+          \`time_updated\` integer NOT NULL
+        );
+      `)
+      yield* tx.run(`
+        CREATE TABLE \`task_queue_task\` (
+          \`id\` text PRIMARY KEY,
+          \`queue_id\` text NOT NULL,
+          \`position\` integer NOT NULL,
+          \`title\` text NOT NULL,
+          \`prompt\` text NOT NULL,
+          \`status\` text DEFAULT 'pending' NOT NULL,
+          \`session_id\` text,
+          \`accepting\` integer DEFAULT false NOT NULL,
+          \`rounds\` integer DEFAULT 0 NOT NULL,
+          \`stalls\` integer DEFAULT 0 NOT NULL,
+          \`reason\` text,
+          \`summary\` text,
+          \`time_created\` integer NOT NULL,
+          \`time_updated\` integer NOT NULL,
+          CONSTRAINT \`fk_task_queue_task_queue_id_task_queue_id_fk\` FOREIGN KEY (\`queue_id\`) REFERENCES \`task_queue\`(\`id\`) ON DELETE CASCADE
+        );
+      `)
+      yield* tx.run(`
         CREATE TABLE \`workspace\` (
           \`id\` text PRIMARY KEY,
           \`provider\` text NOT NULL,
@@ -347,6 +383,10 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
       yield* tx.run(
         `CREATE INDEX \`session_v2_time_suspended_idx\` ON \`session_v2\` (\`time_suspended\`) WHERE "session_v2"."time_suspended" is not null;`,
       )
+      yield* tx.run(`CREATE INDEX \`task_queue_status_idx\` ON \`task_queue\` (\`status\`);`)
+      yield* tx.run(`CREATE INDEX \`task_queue_directory_idx\` ON \`task_queue\` (\`directory\`);`)
+      yield* tx.run(`CREATE INDEX \`task_queue_task_queue_idx\` ON \`task_queue_task\` (\`queue_id\`,\`position\`);`)
+      yield* tx.run(`CREATE INDEX \`task_queue_task_session_idx\` ON \`task_queue_task\` (\`session_id\`);`)
     })
   },
 }

@@ -306,6 +306,21 @@ export type FormWhen1 = { key: string; op: "eq" | "neq"; value: string | number 
 
 export type FormValue1 = string | number | boolean | Array<string>
 
+export type TaskQueueID = string
+
+export type TaskQueueStatus = "queued" | "running" | "done" | "stopped" | "interrupted"
+
+export type TaskQueueTaskID = string
+
+export type TaskQueueTaskStatus =
+  | "pending"
+  | "running"
+  | "interrupted"
+  | "completed"
+  | "failed"
+  | "blocked"
+  | "cancelled"
+
 export type SessionStatus =
   | { type: "idle" }
   | {
@@ -928,6 +943,19 @@ export type FormMultiselectField1 = {
 }
 
 export type FormAnswer1 = { [x: string]: FormValue1 }
+
+export type TaskQueueTask = {
+  id: TaskQueueTaskID
+  title: string
+  prompt: string
+  status: TaskQueueTaskStatus
+  position: number
+  sessionID?: SessionID
+  rounds: number
+  reason?: string
+  summary?: string
+  time: { created: number; updated: number }
+}
 
 export type ScheduleWhenIn = { type: "in"; in: ScheduleDuration; tz?: string }
 
@@ -2265,6 +2293,35 @@ export type FormReplied = {
   data: { id: FormID; sessionID: string; answer: FormAnswer1 }
 }
 
+export type TaskqueueUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "taskqueue.updated"
+  location?: LocationRef
+  data: {
+    id: TaskQueueID
+    title?: string
+    directory: AbsolutePath
+    status: TaskQueueStatus
+    reason?: string
+    currentTaskID?: TaskQueueTaskID
+    tasks: Array<TaskQueueTask>
+    time: { created: number; updated: number }
+  }
+}
+
+export type TaskQueueInfo = {
+  id: TaskQueueID
+  title?: string
+  directory: AbsolutePath
+  status: TaskQueueStatus
+  reason?: string
+  currentTaskID?: TaskQueueTaskID
+  tasks: Array<TaskQueueTask>
+  time: { created: number; updated: number }
+}
+
 export type ScheduleWhen = ScheduleWhenIn | ScheduleWhenAt | ScheduleWhenEvery | ScheduleWhenCron
 
 export type ArtifactContent = { info: ArtifactInfo; files: { [x: string]: string } }
@@ -2593,6 +2650,7 @@ export type ConfigEntry =
           shell_timeout_background?: boolean
           console_watches?: boolean
           mcp_events?: boolean
+          task_queue?: boolean
           part_rows?: boolean
           image_generate?: boolean | { model?: string | { providerID: string; model: string; variant?: string } }
           subagent_depth?: number
@@ -2971,6 +3029,7 @@ export type V2Event =
   | FormCancelled
   | WebsearchUpdated
   | ArtifactUpdated
+  | TaskqueueUpdated
   | SessionStatusUpdated
   | SessionIdle
   | TuiPromptAppend
@@ -3283,6 +3342,14 @@ export type ArtifactNotFoundError = {
 }
 export const isArtifactNotFoundError = (value: unknown): value is ArtifactNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ArtifactNotFoundError"
+
+export type TaskQueueNotFoundError = {
+  readonly _tag: "TaskQueueNotFoundError"
+  readonly queueID: string
+  readonly message: string
+}
+export const isTaskQueueNotFoundError = (value: unknown): value is TaskQueueNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "TaskQueueNotFoundError"
 
 export type ShellNotFoundError = { readonly _tag: "ShellNotFoundError"; readonly id: string; readonly message: string }
 export const isShellNotFoundError = (value: unknown): value is ShellNotFoundError =>
@@ -4470,6 +4537,7 @@ export type EventSubscribeInput = {
         | "form.cancelled"
         | "websearch.updated"
         | "artifact.updated"
+        | "taskqueue.updated"
         | "session.status"
         | "session.idle"
         | "tui.prompt.append"
@@ -4754,6 +4822,45 @@ export type ExperimentalJobListInput = {
 }
 
 export type ExperimentalJobListOutput = { data: Array<JobInfo> }["data"]
+
+export type ExperimentalTaskQueueCreateInput = {
+  readonly title?: string | undefined
+  readonly directory: string
+  readonly tasks: readonly [
+    { readonly title: string; readonly prompt: string },
+    ...Array<{ readonly title: string; readonly prompt: string }>,
+  ]
+}
+
+export type ExperimentalTaskQueueCreateOutput = { data: TaskQueueInfo }["data"]
+
+export type ExperimentalTaskQueueListInput = { readonly directory: string }
+
+export type ExperimentalTaskQueueListOutput = { data: Array<TaskQueueInfo> }["data"]
+
+export type ExperimentalTaskQueueGetInput = { readonly queueID: string }
+
+export type ExperimentalTaskQueueGetOutput = { data: TaskQueueInfo }["data"]
+
+export type ExperimentalTaskQueueStartInput = { readonly queueID: string }
+
+export type ExperimentalTaskQueueStartOutput = { data: TaskQueueInfo }["data"]
+
+export type ExperimentalTaskQueueHeartbeatInput = { readonly queueID: string }
+
+export type ExperimentalTaskQueueHeartbeatOutput = { data: TaskQueueInfo }["data"]
+
+export type ExperimentalTaskQueueStopInput = { readonly queueID: string; readonly reason?: string | undefined }
+
+export type ExperimentalTaskQueueStopOutput = { data: TaskQueueInfo }["data"]
+
+export type ExperimentalTaskQueueResumeInput = { readonly queueID: string }
+
+export type ExperimentalTaskQueueResumeOutput = { data: TaskQueueInfo }["data"]
+
+export type ExperimentalTaskQueueDeleteInput = { readonly queueID: string }
+
+export type ExperimentalTaskQueueDeleteOutput = void
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 

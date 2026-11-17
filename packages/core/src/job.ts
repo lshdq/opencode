@@ -89,6 +89,8 @@ type Active = {
 
 type State = {
   jobs: SynchronizedRef.SynchronizedRef<Map<string, Active>>
+  /** Cancellation may outlive its visible row (a notice can consume it while finalizers still run). */
+  cancellations: Map<Scope.Closeable, { job: Active; done: Deferred.Deferred<void> }>
   generations: Ref.Ref<number>
   scope: Scope.Scope
 }
@@ -99,6 +101,7 @@ type FinishResult = {
   cancel?: Effect.Effect<void>
   scope?: Scope.Closeable
   generation?: Scope.Closeable
+  cancellation?: Deferred.Deferred<void>
 }
 
 type BackgroundResult = {
@@ -239,6 +242,7 @@ export const make = Effect.gen(function* () {
   const db = (yield* Database.Service).db
   const state: State = {
     jobs: yield* SynchronizedRef.make(new Map()),
+    cancellations: new Map(),
     generations: yield* Ref.make(0),
     scope: yield* Scope.Scope,
   }
@@ -523,36 +527,54 @@ export const make = Effect.gen(function* () {
   })
 
   const cancelInternal = Effect.fnUntraced(function* (id: string, persist = true) {
-    const completed_at = yield* Clock.currentTimeMillis
-    const result = yield* SynchronizedRef.modifyEffect(
-      state.jobs,
-      Effect.fnUntraced(function* (jobs): Effect.fn.Return<readonly [FinishResult, Map<string, Active>]> {
-        const job = jobs.get(id)
-        if (!job) return [{}, jobs]
-        if (job.info.status !== "running") return [{ info: snapshot(job), generation: job.scope }, jobs]
-        const next = {
-          ...job,
-          blockingSessions: new Map<SessionSchema.ID, number>(),
-          cancelledByCaller: persist,
-          info: {
-            ...job.info,
-            status: "cancelled" as const,
-            completed_at,
-          },
-        }
-        // Settling work owns its outbox row: the settlement commit writes or deletes it.
-        if (persist && !job.settling) yield* persistBackground(next)
-        return [
-          { info: snapshot(next), done: job.done, scope: job.scope, generation: job.scope, cancel: job.cancel },
-          new Map(jobs).set(id, next),
-        ]
+    return yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const completed_at = yield* Clock.currentTimeMillis
+        const result = yield* SynchronizedRef.modifyEffect(
+          state.jobs,
+          Effect.fnUntraced(function* (jobs): Effect.fn.Return<readonly [FinishResult, Map<string, Active>]> {
+            const job = jobs.get(id)
+            if (!job) return [{}, jobs]
+            if (job.info.status !== "running") return [{ info: snapshot(job), generation: job.scope }, jobs]
+            const next = {
+              ...job,
+              blockingSessions: new Map<SessionSchema.ID, number>(),
+              cancelledByCaller: persist,
+              info: {
+                ...job.info,
+                status: "cancelled" as const,
+                completed_at,
+              },
+            }
+            // Settling work owns its outbox row: the settlement commit writes or deletes it.
+            if (persist && !job.settling) yield* persistBackground(next)
+            const cancellation = yield* Deferred.make<void>()
+            state.cancellations.set(job.scope, { job, done: cancellation })
+            return [
+              { info: snapshot(next), done: job.done, scope: job.scope, generation: job.scope, cancel: job.cancel, cancellation },
+              new Map(jobs).set(id, next),
+            ]
+          }),
+        )
+        // Cancelled is not proof of settlement. Even a failing hook must close the work scope before
+        // releasing its receipt; a notice may already have consumed the visible registry entry.
+        yield* restore(result.cancel ?? Effect.void).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              if (result.info && result.done) yield* Deferred.succeed(result.done, result.info)
+              if (result.scope) yield* Scope.close(result.scope, Exit.void)
+              if (result.generation) yield* consume(id, result.generation)
+            }).pipe(
+              Effect.ensuring(Effect.gen(function* () {
+                if (result.cancellation) yield* Deferred.succeed(result.cancellation, undefined)
+                if (result.scope) state.cancellations.delete(result.scope)
+              })),
+            ),
+          ),
+        )
+        return result.info
       }),
     )
-    if (result.cancel) yield* result.cancel
-    if (result.info && result.done) yield* Deferred.succeed(result.done, result.info)
-    if (result.scope) yield* Scope.close(result.scope, Exit.void)
-    if (result.generation) yield* consume(id, result.generation)
-    return result.info
   })
 
   const cancel: Interface["cancel"] = Effect.fn("Job.cancel")((id) => cancelInternal(id, true))
@@ -562,6 +584,13 @@ export const make = Effect.gen(function* () {
       .filter((job) => job.info.status === "running" && matchesSession(job, sessionID))
       .map((job) => job.info.id)
     const cancelled = yield* Effect.forEach(ids, (id) => cancelInternal(id, false))
+    // A concurrent cancellation can already have changed the status, or its notice may have removed
+    // the registry entry. Join its actual cleanup before deleting durable rows or reporting the Session clear.
+    yield* Effect.forEach(
+      [...state.cancellations.values()].filter((item) => matchesSession(item.job, sessionID)),
+      (item) => Deferred.await(item.done),
+      { discard: true },
+    )
     yield* db
       .delete(JobTable)
       .where(or(eq(JobTable.session_id, sessionID), eq(JobTable.child_session_id, sessionID)))

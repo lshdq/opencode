@@ -22,6 +22,9 @@ import sessionInboxMigration from "@opencode/core/database/migration/20260812181
 import sessionViewedStateMigration from "@opencode/core/database/migration/20260819222447_session_viewed_state"
 import azureCliCredentialMigration from "@opencode/core/database/migration/20261007190000_azure_cli_external_credential"
 import dropSessionPendingMigration from "@opencode/core/database/migration/20261025154125_drop_session_pending"
+import taskQueueMigration from "@opencode/core/database/migration/20261113063324_task_queue"
+import taskQueueFencingMigration from "@opencode/core/database/migration/20261116060551_task_queue_fencing"
+import taskQueueSessionIndexMigration from "@opencode/core/database/migration/20261116065026_task_queue_session_index"
 import { Global } from "@opencode/util/global"
 
 const run = <A, E>(
@@ -134,6 +137,51 @@ const staleJournalClient = (filename: string) =>
   ).pipe(Layer.provide(SqliteClient.layer({ filename, disableWAL: true })), Layer.provide(Reactivity.layer))
 
 describe("DatabaseMigration", () => {
+  test("upgrades existing task queue rows with closed admission defaults and idempotent migration registration", async () => {
+    await run(
+      Effect.gen(function* () {
+        const db = yield* makeDb
+        yield* db.run(sql`PRAGMA foreign_keys = ON`)
+        yield* DatabaseMigration.applyOnly(db, [taskQueueMigration])
+        yield* db.run(
+          sql`INSERT INTO task_queue (id, directory, status, owner_boot, lease_expires_at, time_created, time_updated) VALUES ('tq_old', '/project', 'running', 'old-boot', 99, 1, 2)`,
+        )
+        yield* db.run(
+          sql`INSERT INTO task_queue_task (id, queue_id, position, title, prompt, status, session_id, rounds, time_created, time_updated) VALUES ('tqt_old', 'tq_old', 1, 'Task', 'Work', 'running', 'ses_old', 2, 1, 2)`,
+        )
+        const queueMigrations = [taskQueueMigration, taskQueueFencingMigration, taskQueueSessionIndexMigration]
+        expect(migrations.filter((migration) => queueMigrations.some((item) => item.id === migration.id))).toEqual(
+          queueMigrations,
+        )
+        yield* DatabaseMigration.applyOnly(db, queueMigrations)
+        yield* DatabaseMigration.applyOnly(db, queueMigrations)
+        expect(
+          yield* db.get(
+            sql`SELECT status, owner_boot, owner_pid, run_id, closing, lease_expires_at FROM task_queue WHERE id = 'tq_old'`,
+          ),
+        ).toEqual({
+          status: "running",
+          owner_boot: "old-boot",
+          owner_pid: null,
+          run_id: null,
+          closing: 0,
+          lease_expires_at: 99,
+        })
+        expect(
+          yield* db.get(sql`SELECT status, session_id, rounds, accepting FROM task_queue_task WHERE id = 'tqt_old'`),
+        ).toEqual({ status: "running", session_id: "ses_old", rounds: 2, accepting: 0 })
+        expect(yield* db.all(sql`SELECT name FROM pragma_index_info('task_queue_task_session_idx')`)).toEqual([
+          { name: "session_id" },
+        ])
+        expect(yield* db.all(sql`SELECT id FROM migration ORDER BY id`)).toEqual(
+          queueMigrations.map((migration) => ({ id: migration.id })),
+        )
+        yield* db.run(sql`DELETE FROM task_queue WHERE id = 'tq_old'`)
+        expect(yield* db.all(sql`SELECT id FROM task_queue_task`)).toEqual([])
+      }),
+    )
+  })
+
   test("defaults missing workspace names while preserving legacy workspace data", async () => {
     await run(
       Effect.gen(function* () {
@@ -202,10 +250,9 @@ describe("DatabaseMigration", () => {
 
     await Effect.runPromise(
       Effect.all(
-        [
-          Database.layer({ path: filename }),
-          Database.layer({ path: filename }),
-        ].map((layer) => Effect.scoped(Layer.build(layer))),
+        [Database.layer({ path: filename }), Database.layer({ path: filename })].map((layer) =>
+          Effect.scoped(Layer.build(layer)),
+        ),
         { concurrency: "unbounded" },
       ).pipe(Effect.provideService(Global.Service, Global.make({ data: tmp.path }))),
     )
@@ -296,9 +343,9 @@ describe("DatabaseMigration", () => {
       Effect.gen(function* () {
         const db = yield* makeDb
         yield* DatabaseMigration.applyOnly(db, [raced])
-        expect(
-          yield* db.get(sql`SELECT id FROM ${sql.identifier("migration")} WHERE id = ${raced.id}`),
-        ).toEqual({ id: raced.id })
+        expect(yield* db.get(sql`SELECT id FROM ${sql.identifier("migration")} WHERE id = ${raced.id}`)).toEqual({
+          id: raced.id,
+        })
       }).pipe(
         Effect.provideService(Global.Service, global),
         Effect.provide(staleJournalClient(filename)),

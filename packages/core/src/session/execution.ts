@@ -14,6 +14,7 @@ import { SessionRunner } from "./runner/index.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
 import { toSessionError } from "./to-session-error.js"
+import { TaskQueueOwnership } from "../task-queue/ownership.js"
 
 export interface Interface {
   /** Snapshots active execution owned by this process. */
@@ -90,7 +91,10 @@ export const layer = Layer.effect(
       jobs,
       inbox,
       wake: (sessionID) =>
-        Effect.suspend(() => (holder.coordinator ? holder.coordinator.wake(sessionID) : Effect.void)),
+        Effect.gen(function* () {
+          if (holder.coordinator && (yield* TaskQueueOwnership.admitted(db, store, sessionID)))
+            yield* holder.coordinator.wake(sessionID)
+        }),
       draining: Effect.suspend<ReadonlySet<SessionSchema.ID>, never, never>(() =>
         holder.coordinator ? holder.coordinator.draining : Effect.succeed(new Set<SessionSchema.ID>()),
       ),
@@ -104,6 +108,7 @@ export const layer = Layer.effect(
       promotable: SessionInbox.Promotable = "input",
       stepped = false,
     ): Effect.fn.Return<void, SessionRunner.RunError> {
+      if (!(yield* TaskQueueOwnership.admitted(db, store, sessionID))) return
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(new Error(`Session not found: ${sessionID}`))
       const result = yield* SessionRunner.Service.use((runner) =>
@@ -194,8 +199,14 @@ export const layer = Layer.effect(
             yield* coordinator.wake(sessionID, "steer")
           return interrupted
         }),
-      resume: coordinator.run,
-      wake: coordinator.wake,
+      resume: (sessionID) =>
+        TaskQueueOwnership.admitted(db, store, sessionID).pipe(
+          Effect.flatMap((allowed) => (allowed ? coordinator.run(sessionID) : Effect.void)),
+        ),
+      wake: (sessionID) =>
+        TaskQueueOwnership.admitted(db, store, sessionID).pipe(
+          Effect.flatMap((allowed) => (allowed ? coordinator.wake(sessionID) : Effect.void)),
+        ),
       awaitIdle: coordinator.awaitIdle,
     })
   }),

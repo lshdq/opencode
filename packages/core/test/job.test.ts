@@ -17,6 +17,114 @@ import { testEffect } from "./lib/effect"
 const it = testEffect(AppNodeBuilder.build(LayerNode.group([Job.node, Database.node, Global.node])))
 
 describe("Job", () => {
+  it.effect("interrupting a cancellation caller still settles its work scope and cleanup receipt", () =>
+    Effect.gen(function* () {
+      const jobs = yield* Job.Service
+      const sessionID = SessionSchema.ID.make("ses_cancel_caller_interrupted")
+      const started = yield* Deferred.make<void>()
+      const cancelling = yield* Deferred.make<void>()
+      const stopped = yield* Deferred.make<void>()
+      const job = yield* jobs.start({
+        id: "interrupted-cancellation-caller",
+        type: "test",
+        metadata: { sessionID },
+        run: Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(stopped, undefined)),
+        ),
+        cancel: Deferred.succeed(cancelling, undefined).pipe(Effect.andThen(Effect.never)),
+      })
+      yield* Deferred.await(started)
+      const caller = yield* jobs.cancel(job.id).pipe(Effect.forkScoped)
+      yield* Deferred.await(cancelling)
+      yield* Fiber.interrupt(caller)
+      expect(yield* Deferred.isDone(stopped)).toBe(true)
+      yield* jobs.cancelSession(sessionID)
+      expect(yield* jobs.get(job.id)).toBeUndefined()
+    }),
+  )
+
+  it.live("session cancellation joins actual cleanup even after a cancelled notification consumed its registry entry", () =>
+    Effect.gen(function* () {
+      const jobs = yield* Job.Service
+      const sessionID = SessionSchema.ID.make("ses_cancel_consumed")
+      const started = yield* Deferred.make<void>()
+      const cleaning = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const job = yield* jobs.start({
+        id: "consumed-cancellation",
+        type: "shell",
+        background: true,
+        recovery: { kind: "shell", sessionID, shellID: "sh_consumed", command: "work" },
+        run: Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(cleaning, undefined).pipe(Effect.andThen(Deferred.await(release)))),
+        ),
+      })
+      yield* Deferred.await(started)
+      const cancelling = yield* jobs.cancel(job.id).pipe(Effect.forkScoped)
+      yield* Effect.addFinalizer(() => Deferred.succeed(release, undefined).pipe(Effect.asVoid))
+      yield* Deferred.await(cleaning)
+      if (!job.notificationID) return yield* Effect.die("missing background notification identity")
+      yield* jobs.completeBackground(job.notificationID)
+      expect(yield* jobs.get(job.id)).toBeUndefined()
+      const cleanup = yield* jobs.cancelSession(sessionID).pipe(Effect.forkScoped)
+      yield* Effect.yieldNow.pipe(Effect.repeat({ times: 20 }))
+      expect(cleanup.pollUnsafe()).toBeUndefined()
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(cancelling)
+      yield* Fiber.join(cleanup)
+    }),
+  )
+
+  it.live("a failed cancellation hook still stops the work before a session cleanup can forget its row", () =>
+    Effect.gen(function* () {
+      const jobs = yield* Job.Service
+      const sessionID = SessionSchema.ID.make("ses_cancel_hook_failure")
+      const started = yield* Deferred.make<void>()
+      const stopped = yield* Deferred.make<void>()
+      const job = yield* jobs.start({
+        id: "failing-cancel-hook",
+        type: "test",
+        metadata: { sessionID },
+        run: Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(stopped, undefined)),
+        ),
+        cancel: Effect.die(new Error("cancellation hook failed")),
+      })
+      yield* Deferred.await(started)
+      const waiter = yield* jobs.wait({ id: job.id }).pipe(Effect.forkScoped)
+      expect(Exit.isFailure(yield* jobs.cancelSession(sessionID).pipe(Effect.exit))).toBe(true)
+      expect(yield* Deferred.isDone(stopped)).toBe(true)
+      expect((yield* Fiber.join(waiter)).info?.status).toBe("cancelled")
+      yield* jobs.cancelSession(sessionID)
+      expect(yield* jobs.get(job.id)).toBeUndefined()
+    }),
+  )
+
+  it.effect("a failing cancellation hook still closes the work before its cancelled entry can be forgotten", () =>
+    Effect.gen(function* () {
+      const jobs = yield* Job.Service
+      const started = yield* Deferred.make<void>()
+      const finished = yield* Deferred.make<void>()
+      yield* jobs.start({
+        id: "cancel-hook-failure",
+        type: "test",
+        run: Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Deferred.succeed(finished, undefined)),
+        ),
+        cancel: Effect.die(new Error("the cancellation hook failed")),
+      })
+      yield* Deferred.await(started)
+      const exit = yield* jobs.cancel("cancel-hook-failure").pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(yield* Deferred.isDone(finished)).toBe(true)
+      expect((yield* jobs.wait({ id: "cancel-hook-failure" })).info?.status).toBe("cancelled")
+    }),
+  )
+
   it.live("tracks process-local work through explicit observation", () =>
     Effect.gen(function* () {
       const jobs = yield* Job.Service

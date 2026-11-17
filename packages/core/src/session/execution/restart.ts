@@ -20,6 +20,9 @@ import { ImageNotice } from "../../image/notice.js"
 import { ShellResult } from "../../shell/result.js"
 import { SubagentCompletion } from "../subagent-completion.js"
 import { SubagentJob } from "../subagent-job.js"
+import { and, isNotNull } from "drizzle-orm"
+import { SessionTable } from "../sql.js"
+import { TaskQueueOwnership } from "../../task-queue/ownership.js"
 
 const CONTINUE_AFTER_SERVER_RESTART =
   "The server restarted while you were working. Continue from where you left off without repeating completed work."
@@ -88,11 +91,15 @@ export const layer = (options?: Options) =>
       const maxAttempts = options?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
 
       const wake = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
+        if (yield* TaskQueueOwnership.find(db, store, sessionID)) return
         const owner = yield* store.get(sessionID)
         if (owner && !owner.revert) yield* execution.wake(sessionID)
       })
 
       const prepareResume = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
+        // Queue work is resumed only by an explicit batch resume with a new owner lease.
+        // This also fences descendants and a live standalone owner's claims in the same database.
+        if (yield* TaskQueueOwnership.find(db, store, sessionID)) return false
         // Durable before the resume runs, so a crash inside the resumed turn is
         // counted by the next sweep and the budget cannot be dodged.
         const attempts = yield* store.countResume(sessionID)
@@ -367,7 +374,15 @@ export const layer = (options?: Options) =>
       return Service.of({
         resumeSuspendedSessions: Effect.gen(function* () {
           const active = yield* execution.active
-          const pending = yield* jobs.pendingBackground
+          const pending = yield* Effect.filter(yield* jobs.pendingBackground, (background) =>
+            TaskQueueOwnership.find(
+              db,
+              store,
+              background.recovery.kind === "subagent"
+                ? background.recovery.childSessionID
+                : background.recovery.sessionID,
+            ).pipe(Effect.map((owned) => !owned)),
+          )
           const children = pending.flatMap((background) =>
             background.status === "running" && background.recovery.kind === "subagent"
               ? [background.recovery.childSessionID]
@@ -375,7 +390,10 @@ export const layer = (options?: Options) =>
           )
           // Early notices wait for recovery's accounting, including Sessions that exhaust their budget.
           const suspended = new Set(
-            [...(yield* store.listSuspended()), ...children].filter((sessionID) => !active.has(sessionID)),
+            yield* Effect.filter(
+              [...(yield* store.listSuspended()), ...children].filter((sessionID) => !active.has(sessionID)),
+              (sessionID) => TaskQueueOwnership.find(db, store, sessionID).pipe(Effect.map((owned) => !owned)),
+            ),
           )
           const state = { defer: true }
           const wakes = new Set<SessionSchema.ID>()
@@ -400,7 +418,16 @@ export const layer = (options?: Options) =>
                 Effect.uninterruptible,
               ),
           }
-          yield* store.releaseChildClaims(children)
+          const claimedChildren = yield* db
+            .select({ id: SessionTable.id })
+            .from(SessionTable)
+            .where(and(isNotNull(SessionTable.parent_id), isNotNull(SessionTable.time_suspended)))
+            .all()
+            .pipe(Effect.orDie)
+          const protectedChildren = yield* Effect.filter(claimedChildren, (child) =>
+            TaskQueueOwnership.find(db, store, child.id).pipe(Effect.map((owned) => owned !== undefined)),
+          )
+          yield* store.releaseChildClaims([...children, ...protectedChildren.map((child) => child.id)])
           const recoverable = Effect.fnUntraced(function* (background: Job.Background) {
             return (yield* jobs.get(background.id))?.status !== "running"
           })

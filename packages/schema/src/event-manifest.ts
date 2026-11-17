@@ -32,6 +32,7 @@ import { Shell } from "./shell.js"
 import { Skill } from "./skill.js"
 import { SessionEvent } from "./session-event.js"
 import { SessionStatusEvent } from "./session-status-event.js"
+import { TaskQueue } from "./task-queue.js"
 import { TuiEvent } from "./tui-event.js"
 import { VcsEvent } from "./vcs-event.js"
 import { WorkspaceEvent } from "./workspace-event.js"
@@ -67,6 +68,7 @@ const featureDefinitions = Event.inventory(
   ...Form.Event.Definitions,
   ...WebSearch.Event.Definitions,
   ...Artifact.Event.Definitions,
+  ...TaskQueue.Event.Definitions,
 )
 
 export const ServerDefinitions = Event.inventory(

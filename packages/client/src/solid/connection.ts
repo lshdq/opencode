@@ -15,7 +15,8 @@ export type ClientConnectionEvent = {
 
 export type ClientConnectionOptions = {
   readonly reconnect?: (signal: AbortSignal) => Promise<OpenCodeClient>
-  readonly onEvent: (event: OpenCodeEvent) => void
+  /** The SDK that received this event, retained through buffering and reconnects. */
+  readonly onEvent: (event: OpenCodeEvent, source: OpenCodeClient) => void
   readonly flushInterval?: number
   readonly pageLifecycle?: boolean
   /**
@@ -47,7 +48,7 @@ export function createClientConnection(initialApi: OpenCodeClient, options: Clie
     error?: string
   }>({ status: "connecting", attempt: 0 })
   let api = initialApi
-  let pending: OpenCodeEvent[] = []
+  let pending: { event: OpenCodeEvent; source: OpenCodeClient }[] = []
   let flushTimer: ReturnType<typeof setTimeout> | undefined
   let stream: AbortController | undefined
   let current: AbortController | undefined
@@ -62,18 +63,19 @@ export function createClientConnection(initialApi: OpenCodeClient, options: Clie
     if (history.length > connectionHistoryLimit) history.shift()
   }
 
-  function publish(event: OpenCodeEvent) {
-    pending.push(event)
+  function publish(event: OpenCodeEvent, source: OpenCodeClient) {
+    pending.push({ event, source })
     if (flushTimer) return
     flushTimer = setTimeout(() => {
       flushTimer = undefined
       const events = pending
       pending = []
-      batch(() => events.forEach(options.onEvent))
+      batch(() => events.forEach((entry) => options.onEvent(entry.event, entry.source)))
     }, options.flushInterval ?? 10)
   }
 
   async function connect(signal: AbortSignal, attempt: number) {
+    const source = api
     let connectedAt: number | undefined
     const request = new AbortController()
     current = request
@@ -94,7 +96,7 @@ export function createClientConnection(initialApi: OpenCodeClient, options: Clie
     try {
       record(attempt === 0 ? "connecting" : "reconnecting", attempt)
       options.log?.info?.("event stream connecting", { attempt })
-      const iterator = api.event.subscribe({ signal: request.signal, onActivity: touch })[Symbol.asyncIterator]()
+      const iterator = source.event.subscribe({ signal: request.signal, onActivity: touch })[Symbol.asyncIterator]()
       const first = await iterator.next()
       if (signal.aborted) return { error: undefined, connectedAt }
       if (first.done)
@@ -111,7 +113,7 @@ export function createClientConnection(initialApi: OpenCodeClient, options: Clie
       connectedAt = Date.now()
       touch()
       options.log?.info?.("event stream connected")
-      publish(first.value)
+      publish(first.value, source)
       setConnection({ status: "connected", attempt: 0, error: undefined })
 
       while (!signal.aborted) {
@@ -130,7 +132,7 @@ export function createClientConnection(initialApi: OpenCodeClient, options: Clie
             aggregateID: event.value.durable.aggregateID,
             seq: event.value.durable.seq,
           })
-        publish(event.value)
+        publish(event.value, source)
       }
       return { error: undefined, connectedAt }
     } catch (error) {
