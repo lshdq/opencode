@@ -6,6 +6,7 @@ export type PanelTarget = {
   readonly plugin: string
   readonly name: string
   readonly sessionID: string
+  readonly autoFocus?: boolean
 }
 
 export function createPanelState() {

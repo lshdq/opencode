@@ -12,7 +12,7 @@ test.each([
   const a = source(addressA)
   const b = source(addressB)
   let current = a
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, () => () => {}, () => current.address)
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, () => () => {}, () => current.address)
   const pa = owner.acquire("tq_fixture", "start")
   current = b
   const pb = owner.acquire("tq_fixture", "resume")
@@ -37,7 +37,7 @@ test("canonical host, default port and fragment changes retain pending work with
   const a = source("http://LOCALHOST:80/#old")
   const b = source("http://localhost/#new")
   let current = a
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, () => () => {}, () => current.address)
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, () => () => {}, () => current.address)
   const pending = owner.acquire("tq_fixture", "start")
   try {
     current = b
@@ -60,7 +60,7 @@ test.each(["start", "resume"] as const)("without a URL, exact resource identity 
   const b = source(a.address)
   let current = a
   const timers = new Set<() => void>()
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, (tick) => {
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, (tick) => {
     timers.add(tick)
     return () => { timers.delete(tick) }
   })
@@ -87,7 +87,7 @@ test.each(["start", "resume"] as const)("without a URL, exact resource identity 
 test("failed and terminal source groups leave no old end facts or renewal timer for later explicit work", async () => {
   const timers = new Set<() => void>()
   let current = source("http://fixture.invalid/0")
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, (tick) => {
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, (tick) => {
     timers.add(tick)
     return () => { timers.delete(tick) }
   }, () => current.address)

@@ -9,7 +9,7 @@ test.each(["start", "resume"] as const)("current B cannot intercept A's pending 
   await using b = await endpoint("B", false, "running")
   let current = a
   const ticks = new Set<() => void>()
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => current.url)
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => current.url)
   const pending = owner.acquire("tq_fixture", action)
   try {
     await a.requested.promise
@@ -36,7 +36,7 @@ test.each((["start", "resume"] as const).flatMap((action) => (["A-first", "B-fir
   await using b = await endpoint("B", true)
   let current = a
   const ticks = new Set<() => void>()
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => current.url)
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => current.url)
   const pa = owner.acquire("tq_fixture", action)
   const settledA = pa.then((info) => info, () => undefined)
   let pb: Promise<TaskQueueInfo> | undefined
@@ -89,7 +89,7 @@ test.each((["start", "resume"] as const).flatMap((action) => (["A-first", "B-fir
 test.each(["start", "resume"] as const)("same endpoint SDK and credential refresh keeps an effective %s owner", async (action) => {
   await using source = await endpoint("same", false)
   const ticks = new Set<() => void>()
-  const owner = createTaskQueueOwner(() => source.api.experimental.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => source.url)
+  const owner = createTaskQueueOwner(() => source.api.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => source.url)
   try {
     await owner.acquire("tq_fixture", action)
     source.rotate()
@@ -108,7 +108,7 @@ test("B terminal facts cannot cancel A eligibility, and source-bound renewal rep
   await using b = await endpoint("B", true)
   let current = a
   const ticks = new Set<() => void>()
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => current.url)
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => current.url)
   const pa = owner.acquire("tq_fixture", "start")
   let pb: Promise<TaskQueueInfo> | undefined
   try {
@@ -141,7 +141,7 @@ test.each((["start", "resume"] as const).flatMap((action) => ([true, false] as c
   await using a = await endpoint("A", true)
   await using b = await endpoint("B", true)
   let current = a
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, () => () => {}, () => current.url)
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, () => () => {}, () => current.url)
   const observeA = owner.observer()
   const pa = owner.acquire("tq_fixture", action)
   let pb: Promise<TaskQueueInfo> | undefined
@@ -176,7 +176,7 @@ test.each((["start", "resume"] as const).flatMap((action) => ([true, false] as c
 test.each(["start", "resume"] as const)("same canonical endpoint deduplicates a pending %s across credential refresh", async (action) => {
   await using source = await endpoint("same", true)
   let url = `${source.url}#old-stream`
-  const owner = createTaskQueueOwner(() => source.api.experimental.taskQueue, () => () => {}, () => url)
+  const owner = createTaskQueueOwner(() => source.api.taskQueue, () => () => {}, () => url)
   const request = owner.acquire("tq_fixture", action)
   try {
     await source.requested.promise
@@ -202,7 +202,7 @@ test("a delayed terminal A heartbeat cannot revoke B and each source has only on
   await using b = await endpoint("B", false, "queued", true)
   let current = a
   const ticks = new Set<() => void>()
-  const owner = createTaskQueueOwner(() => current.api.experimental.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => current.url)
+  const owner = createTaskQueueOwner(() => current.api.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => current.url)
   try {
     await owner.acquire("tq_fixture", "start")
     current = b

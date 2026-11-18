@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { InputRenderable, TextareaRenderable } from "@opentui/core"
-import type { ExperimentalTaskQueueCreateInput } from "@opencode/client"
+import type { TaskQueueCreateInput } from "@opencode/client"
 import { createAppFixture } from "../fixture/app"
 import { taskQueue } from "../fixture/task-queue"
 import { createEventStream, createFetch, directory, json, type FetchHandler } from "../fixture/tui-client"
@@ -16,19 +16,19 @@ test.each((["start", "resume", "stop", "delete", "create"] as const).flatMap((ac
   const created = Promise.withResolvers<Response>()
   const old = taskQueue({ directory, title: "Obsolete operation", status: action === "resume" ? "stopped" : action === "stop" ? "running" : "queued" })
   const replacement = taskQueue({ directory, title: "Replacement control receipt" })
-  const payloads: ExperimentalTaskQueueCreateInput[] = []
+  const payloads: TaskQueueCreateInput[] = []
   await using app = await migration(async (url, request) => {
-    const selected = action === "create" ? request.method === "POST" && url.pathname === "/api/experimental/task-queue"
+    const selected = action === "create" ? request.method === "POST" && url.pathname === "/api/task-queue"
       : action === "delete" ? request.method === "DELETE" : url.pathname.endsWith(`/${action}`)
     if (selected) { requested.resolve(); return response.promise }
-    return json({ data: url.pathname === "/api/experimental/task-queue" ? [old] : old })
+    return json({ data: url.pathname === "/api/task-queue" ? [old] : old })
   }, async (url, request) => {
-    if (url.pathname === "/api/experimental/task-queue" && request.method === "POST") {
-      payloads.push(await request.json() as ExperimentalTaskQueueCreateInput)
+    if (url.pathname === "/api/task-queue" && request.method === "POST") {
+      payloads.push(await request.json() as TaskQueueCreateInput)
       submitted.resolve()
       return created.promise
     }
-    return json({ data: url.pathname === "/api/experimental/task-queue" ? [replacement] : replacement })
+    return json({ data: url.pathname === "/api/task-queue" ? [replacement] : replacement })
   })
   try {
     await app.ready
@@ -76,7 +76,7 @@ test.each((["start", "resume", "stop", "delete", "create"] as const).flatMap((ac
       expect(app.captureCharFrame()).toContain("创建中，暂不能修改")
       created.resolve(json({ data: { ...replacement, tasks: payloads[0].tasks.map((task) => ({ ...replacement.tasks[0], ...task })) } }))
       await app.waitForFrame((frame) => frame.includes(replacement.title!) && frame.includes("rounds"))
-      expect(payloads.map((input) => input.tasks)).toEqual([[{ title: "Preserved task", prompt: "完整描述\n第二行" }]])
+      expect(payloads.map((input) => input.tasks)).toEqual([[{ prompt: "Preserved task\n完整描述\n第二行" }]])
     }
     if (action !== "create") {
       // migrate() observes B's HTTP request, not its decoded list or mounted
@@ -104,18 +104,18 @@ test.each((["start", "resume", "stop", "delete", "create"] as const).flatMap((ac
 test.each(["editor", "draft"] as const)("a new SDK preserves same-directory unsubmitted %s content without replaying it", async (view) => {
   takeDraft(undefined)
   const info = taskQueue({ directory })
-  const payloads: ExperimentalTaskQueueCreateInput[] = []
+  const payloads: TaskQueueCreateInput[] = []
   let oldPosts = 0
   await using app = await migration((_url, request) => {
     if (request.method === "POST") oldPosts++
     return json({ data: [info] })
   }, async (url, request) => {
     if (request.method === "POST") {
-      const payload = await request.json() as ExperimentalTaskQueueCreateInput
+      const payload = await request.json() as TaskQueueCreateInput
       payloads.push(payload)
       return json({ data: { ...info, title: "Draft submitted to B", tasks: payload.tasks.map((task) => ({ ...info.tasks[0], ...task })) } })
     }
-    return json({ data: url.pathname === "/api/experimental/task-queue" ? [info] : { ...info, title: "Draft submitted to B" } })
+    return json({ data: url.pathname === "/api/task-queue" ? [info] : { ...info, title: "Draft submitted to B" } })
   })
   await app.ready
   await app.waitForFrame((frame) => frame.includes("commands"))
@@ -131,7 +131,7 @@ test.each(["editor", "draft"] as const)("a new SDK preserves same-directory unsu
   expect(oldPosts).toBe(0)
   if (view === "editor") {
     expect(app.renderer.currentFocusedEditor instanceof TextareaRenderable).toBe(true)
-    expect((app.renderer.currentFocusedEditor as TextareaRenderable).plainText).toBe("完整描述\n第二行")
+    expect((app.renderer.currentFocusedEditor as TextareaRenderable).plainText).toBe("Preserved task\n完整描述\n第二行")
     app.mockInput.pressKey("s", { ctrl: true })
     await app.waitForFrame((frame) => frame.includes("新建批次") && frame.includes("Preserved task"))
   }
@@ -139,7 +139,7 @@ test.each(["editor", "draft"] as const)("a new SDK preserves same-directory unsu
   await app.waitForFrame((frame) => frame.includes("创建前预览"))
   app.mockInput.pressKey("s", { ctrl: true })
   await app.waitForFrame((frame) => frame.includes("Draft submitted to B") && frame.includes("rounds"))
-  expect(payloads.map((input) => input.tasks)).toEqual([[{ title: "Preserved task", prompt: "完整描述\n第二行" }]])
+  expect(payloads.map((input) => input.tasks)).toEqual([[{ prompt: "Preserved task\n完整描述\n第二行" }]])
   expect(app.oldRequests).toHaveLength(oldCount)
   expect(app.rejected).toEqual([])
 })
@@ -153,15 +153,15 @@ test.each(["start", "resume", "stop", "delete", "create"] as const)("a current %
   let removed = false
   let current = info
   await using app = await createAppFixture({ width: 100, height: 30, config: { animations: false, tabs: { mode: "off" } }, fetch: (url, request) => {
-    if (!url.pathname.startsWith("/api/experimental/task-queue")) return undefined
-    const selected = action === "create" ? request.method === "POST" && url.pathname === "/api/experimental/task-queue"
+    if (!url.pathname.startsWith("/api/task-queue")) return undefined
+    const selected = action === "create" ? request.method === "POST" && url.pathname === "/api/task-queue"
       : action === "delete" ? request.method === "DELETE" : url.pathname.endsWith(`/${action}`)
     if (selected) {
       if (++attempts === 1) return json({ _tag: "ForbiddenError", message: "current operation refused" }, { status: 403 })
       requested.resolve()
       return response.promise
     }
-    return json({ data: url.pathname === "/api/experimental/task-queue" ? removed ? [] : [current] : current })
+    return json({ data: url.pathname === "/api/task-queue" ? removed ? [] : [current] : current })
   } })
   try {
     await app.ready
@@ -184,7 +184,7 @@ test.each(["start", "resume", "stop", "delete", "create"] as const)("a current %
     }
     const key = action === "resume" ? "e" : ["stop", "delete"].includes(action) ? "x" : "s"
     app.mockInput.pressKey(key, { ctrl: true })
-    await app.waitForFrame((frame) => frame.includes("experimental.task_queue"))
+    await app.waitForFrame((frame) => frame.includes("检查访问权限"))
     expect(attempts).toBe(1)
     app.mockInput.pressKey(key, { ctrl: true })
     await requested.promise
@@ -193,13 +193,13 @@ test.each(["start", "resume", "stop", "delete", "create"] as const)("a current %
     app.mockInput.pressKey(key, { ctrl: true })
     await app.renderOnce()
     expect(attempts).toBe(2)
-    expect(app.captureCharFrame()).not.toContain("experimental.task_queue")
+    expect(app.captureCharFrame()).not.toContain("检查访问权限")
     removed = action === "delete"
     current = { ...info, status: ["start", "resume"].includes(action) ? "running" : action === "stop" ? "stopped" : "queued", time: { created: 1, updated: 2 } }
     response.resolve(action === "delete" ? new Response(null, { status: 204 }) : json({ data: current }))
     await app.waitForFrame((frame) => action === "delete" ? frame.includes("暂无批次") : frame.includes("rounds") && !frame.includes("正在处理"))
     expect(attempts).toBe(2)
-    expect(app.captureCharFrame()).not.toContain("experimental.task_queue")
+    expect(app.captureCharFrame()).not.toContain("检查访问权限")
   } finally {
     response.resolve(action === "delete" ? new Response(null, { status: 204 }) : json({ data: current }))
   }
@@ -216,8 +216,8 @@ async function migration(previous: FetchHandler, replacement: FetchHandler) {
   const calls = createFetch((url, request) => {
     if (request.headers.get("authorization") !== expected) { rejected.push(url.pathname); return new Response(null, { status: 401 }) }
     if (url.pathname === "/api/plugin") plugin.resolve()
-    if (!url.pathname.startsWith("/api/experimental/task-queue")) return undefined
-    if (url.pathname === "/api/experimental/task-queue" && request.method === "GET") listed.resolve()
+    if (!url.pathname.startsWith("/api/task-queue")) return undefined
+    if (url.pathname === "/api/task-queue" && request.method === "GET") listed.resolve()
     return replacement(url, request)
   }, events)
   const server = Bun.serve({ port: 0, fetch: (request) => calls.fetch(request) })
@@ -225,7 +225,7 @@ async function migration(previous: FetchHandler, replacement: FetchHandler) {
   const app = await createAppFixture({ width: 100, height: 30, config: { animations: false, tabs: { mode: "off" } },
     service: { reconnect: async () => ({ url: server.url.toString(), auth }), restart: async () => {} },
     fetch: (url, request) => {
-      if (!url.pathname.startsWith("/api/experimental/task-queue")) return undefined
+      if (!url.pathname.startsWith("/api/task-queue")) return undefined
       oldRequests.push(`${request.method} ${url.pathname}`)
       return migrated ? new Response(null, { status: 503 }) : previous(url, request)
     },
@@ -254,11 +254,8 @@ async function openTasks(app: Awaited<ReturnType<typeof createAppFixture>>, titl
 
 async function addTask(app: Awaited<ReturnType<typeof createAppFixture>>, save = true) {
   app.mockInput.pressKey("a", { ctrl: true })
-  await app.waitForFrame((frame) => frame.includes("添加任务") && app.renderer.currentFocusedEditor?.id === "task-queue-title")
-  await app.mockInput.typeText("Preserved task")
-  app.mockInput.pressTab()
-  await app.waitFor(() => app.renderer.currentFocusedEditor?.id === "task-queue-prompt")
-  await app.mockInput.pasteBracketedText("完整描述\n第二行")
+  await app.waitForFrame((frame) => frame.includes("添加任务") && app.renderer.currentFocusedEditor?.id === "task-queue-prompt")
+  await app.mockInput.pasteBracketedText("Preserved task\n完整描述\n第二行")
   if (!save) return
   app.mockInput.pressKey("s", { ctrl: true })
   await app.waitForFrame((frame) => frame.includes("新建批次") && frame.includes("Preserved task"))

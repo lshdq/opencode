@@ -20,7 +20,7 @@ test.each(["success", "failure"] as const)("a replaced connection discards the o
   } })
   const newServer = Bun.serve({ port: 0, fetch: () => json({ data: [replacement] }) })
   let client = OpenCode.make({ baseUrl: oldServer.url.toString() })
-  const feed = createTaskQueueFeed(() => client.experimental.taskQueue)
+  const feed = createTaskQueueFeed(() => client.taskQueue)
   let detail: Promise<void> | undefined
   try {
     feed.directory(previous.directory)

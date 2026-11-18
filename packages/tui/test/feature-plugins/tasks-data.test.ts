@@ -61,10 +61,10 @@ test("done is not all-success, and failed/blocked work can be resumed explicitly
 test("a real generated client's Forbidden response has an actionable disabled message", async () => {
   const calls = createFetch(() => json({ _tag: "ForbiddenError", message: "disabled" }, { status: 403 }))
   const client = OpenCode.make({ baseUrl: "http://fixture", fetch: calls.fetch })
-  const feed = createTaskQueueFeed(() => client.experimental.taskQueue)
+  const feed = createTaskQueueFeed(() => client.taskQueue)
   feed.directory("D:\\project")
   await feed.load()
-  expect(feed.error()).toContain("experimental.task_queue")
+  expect(feed.error()).toContain("检查访问权限")
   expect(taskQueueError(new Error("offline"))).toContain("offline")
   feed.dispose()
 })

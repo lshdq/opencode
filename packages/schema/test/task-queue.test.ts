@@ -50,6 +50,20 @@ describe("task queue contracts", () => {
     expect(() => decode({ directory: "/project", tasks: [] })).toThrow()
     expect(() => decode({ directory: "/project", tasks: [{ title: "", prompt: "do one" }] })).toThrow()
     expect(() => decode({ directory: "/project", tasks: [{ title: "One", prompt: "" }] })).toThrow()
+    expect(() => decode({ directory: "/project", tasks: [{ prompt: " \t\r\n　" }] })).toThrow()
+    const input = decode({ directory: "/project", tasks: [{ prompt: "\n 第一项 \n保留完整内容" }] })
+    expect(Schema.encodeSync(TaskQueue.CreateInput)(input).tasks).toEqual([{ prompt: "\n 第一项 \n保留完整内容" }])
+    expect(Schema.encodeSync(TaskQueue.TaskInput)(TaskQueue.TaskInput.make({ title: undefined, prompt: "Work" }))).toEqual({ prompt: "Work" })
+  })
+
+  test.each([
+    ["\r\n \t\r\n  修复接口 😀  \r\n后续完整内容", "修复接口 😀"],
+    ["\u2028\u2029名称\u2028内容", "名称"],
+    [" \n\t", ""],
+    ["中".repeat(80), "中".repeat(80)],
+    ["中".repeat(78) + "😀😀😀", "中".repeat(78) + "😀…"],
+  ])("derives a short Unicode-safe name from %j", (prompt, expected) => {
+    expect(TaskQueue.titleFromPrompt(prompt)).toBe(expected)
   })
 
   test("taskqueue.updated is a current public event carrying the full info", () => {

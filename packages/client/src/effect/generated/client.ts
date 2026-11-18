@@ -269,22 +269,22 @@ import type {
   ExperimentalArtifactsDeleteOutput,
   ExperimentalJobListInput,
   ExperimentalJobListOutput,
-  ExperimentalTaskQueueCreateInput,
-  ExperimentalTaskQueueCreateOutput,
-  ExperimentalTaskQueueListInput,
-  ExperimentalTaskQueueListOutput,
-  ExperimentalTaskQueueGetInput,
-  ExperimentalTaskQueueGetOutput,
-  ExperimentalTaskQueueStartInput,
-  ExperimentalTaskQueueStartOutput,
-  ExperimentalTaskQueueHeartbeatInput,
-  ExperimentalTaskQueueHeartbeatOutput,
-  ExperimentalTaskQueueStopInput,
-  ExperimentalTaskQueueStopOutput,
-  ExperimentalTaskQueueResumeInput,
-  ExperimentalTaskQueueResumeOutput,
-  ExperimentalTaskQueueDeleteInput,
-  ExperimentalTaskQueueDeleteOutput,
+  TaskQueueCreateInput,
+  TaskQueueCreateOutput,
+  TaskQueueListInput,
+  TaskQueueListOutput,
+  TaskQueueGetInput,
+  TaskQueueGetOutput,
+  TaskQueueStartInput,
+  TaskQueueStartOutput,
+  TaskQueueHeartbeatInput,
+  TaskQueueHeartbeatOutput,
+  TaskQueueStopInput,
+  TaskQueueStopOutput,
+  TaskQueueResumeInput,
+  TaskQueueResumeOutput,
+  TaskQueueDeleteInput,
+  TaskQueueDeleteOutput,
   ShellListInput,
   ShellListOutput,
   ShellCreateInput,
@@ -1731,77 +1731,6 @@ const EndpointExperimentalJobList = (raw: RawClient["server.experimental"]) => (
     ),
   )
 
-const EndpointExperimentalTaskQueueCreate =
-  (raw: RawClient["server.experimental"]) => (input: ExperimentalTaskQueueCreateInput) =>
-    preserveEffect<ExperimentalTaskQueueCreateOutput>()(
-      raw["taskQueue.create"]({
-        payload: { title: input["title"], directory: input["directory"], tasks: input["tasks"] },
-      }).pipe(
-        Effect.mapError(mapClientError),
-        Effect.map((value) => value.data),
-      ),
-    )
-
-const EndpointExperimentalTaskQueueList =
-  (raw: RawClient["server.experimental"]) => (input: ExperimentalTaskQueueListInput) =>
-    preserveEffect<ExperimentalTaskQueueListOutput>()(
-      raw["taskQueue.list"]({ query: { directory: input["directory"] } }).pipe(
-        Effect.mapError(mapClientError),
-        Effect.map((value) => value.data),
-      ),
-    )
-
-const EndpointExperimentalTaskQueueGet =
-  (raw: RawClient["server.experimental"]) => (input: ExperimentalTaskQueueGetInput) =>
-    preserveEffect<ExperimentalTaskQueueGetOutput>()(
-      raw["taskQueue.get"]({ params: { queueID: input["queueID"] } }).pipe(
-        Effect.mapError(mapClientError),
-        Effect.map((value) => value.data),
-      ),
-    )
-
-const EndpointExperimentalTaskQueueStart =
-  (raw: RawClient["server.experimental"]) => (input: ExperimentalTaskQueueStartInput) =>
-    preserveEffect<ExperimentalTaskQueueStartOutput>()(
-      raw["taskQueue.start"]({ params: { queueID: input["queueID"] } }).pipe(
-        Effect.mapError(mapClientError),
-        Effect.map((value) => value.data),
-      ),
-    )
-
-const EndpointExperimentalTaskQueueHeartbeat =
-  (raw: RawClient["server.experimental"]) => (input: ExperimentalTaskQueueHeartbeatInput) =>
-    preserveEffect<ExperimentalTaskQueueHeartbeatOutput>()(
-      raw["taskQueue.heartbeat"]({ params: { queueID: input["queueID"] } }).pipe(
-        Effect.mapError(mapClientError),
-        Effect.map((value) => value.data),
-      ),
-    )
-
-const EndpointExperimentalTaskQueueStop =
-  (raw: RawClient["server.experimental"]) => (input: ExperimentalTaskQueueStopInput) =>
-    preserveEffect<ExperimentalTaskQueueStopOutput>()(
-      raw["taskQueue.stop"]({ params: { queueID: input["queueID"] }, payload: { reason: input["reason"] } }).pipe(
-        Effect.mapError(mapClientError),
-        Effect.map((value) => value.data),
-      ),
-    )
-
-const EndpointExperimentalTaskQueueResume =
-  (raw: RawClient["server.experimental"]) => (input: ExperimentalTaskQueueResumeInput) =>
-    preserveEffect<ExperimentalTaskQueueResumeOutput>()(
-      raw["taskQueue.resume"]({ params: { queueID: input["queueID"] } }).pipe(
-        Effect.mapError(mapClientError),
-        Effect.map((value) => value.data),
-      ),
-    )
-
-const EndpointExperimentalTaskQueueDelete =
-  (raw: RawClient["server.experimental"]) => (input: ExperimentalTaskQueueDeleteInput) =>
-    preserveEffect<ExperimentalTaskQueueDeleteOutput>()(
-      raw["taskQueue.delete"]({ params: { queueID: input["queueID"] } }).pipe(Effect.mapError(mapClientError)),
-    )
-
 const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
   persistentPty: {
     read: EndpointExperimentalPersistentPtyRead(raw),
@@ -1832,16 +1761,80 @@ const adaptGroupExperimental = (raw: RawClient["server.experimental"]) => ({
     delete: EndpointExperimentalArtifactsDelete(raw),
   },
   job: { list: EndpointExperimentalJobList(raw) },
-  taskQueue: {
-    create: EndpointExperimentalTaskQueueCreate(raw),
-    list: EndpointExperimentalTaskQueueList(raw),
-    get: EndpointExperimentalTaskQueueGet(raw),
-    start: EndpointExperimentalTaskQueueStart(raw),
-    heartbeat: EndpointExperimentalTaskQueueHeartbeat(raw),
-    stop: EndpointExperimentalTaskQueueStop(raw),
-    resume: EndpointExperimentalTaskQueueResume(raw),
-    delete: EndpointExperimentalTaskQueueDelete(raw),
-  },
+})
+
+const EndpointTaskQueueCreate = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueCreateInput) =>
+  preserveEffect<TaskQueueCreateOutput>()(
+    raw["taskQueue.create"]({
+      payload: { title: input["title"], directory: input["directory"], tasks: input["tasks"] },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointTaskQueueList = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueListInput) =>
+  preserveEffect<TaskQueueListOutput>()(
+    raw["taskQueue.list"]({ query: { directory: input["directory"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointTaskQueueGet = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueGetInput) =>
+  preserveEffect<TaskQueueGetOutput>()(
+    raw["taskQueue.get"]({ params: { queueID: input["queueID"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointTaskQueueStart = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueStartInput) =>
+  preserveEffect<TaskQueueStartOutput>()(
+    raw["taskQueue.start"]({ params: { queueID: input["queueID"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointTaskQueueHeartbeat = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueHeartbeatInput) =>
+  preserveEffect<TaskQueueHeartbeatOutput>()(
+    raw["taskQueue.heartbeat"]({ params: { queueID: input["queueID"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointTaskQueueStop = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueStopInput) =>
+  preserveEffect<TaskQueueStopOutput>()(
+    raw["taskQueue.stop"]({ params: { queueID: input["queueID"] }, payload: { reason: input["reason"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointTaskQueueResume = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueResumeInput) =>
+  preserveEffect<TaskQueueResumeOutput>()(
+    raw["taskQueue.resume"]({ params: { queueID: input["queueID"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointTaskQueueDelete = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueDeleteInput) =>
+  preserveEffect<TaskQueueDeleteOutput>()(
+    raw["taskQueue.delete"]({ params: { queueID: input["queueID"] } }).pipe(Effect.mapError(mapClientError)),
+  )
+
+const adaptGroupTaskQueue = (raw: RawClient["server.taskQueue"]) => ({
+  create: EndpointTaskQueueCreate(raw),
+  list: EndpointTaskQueueList(raw),
+  get: EndpointTaskQueueGet(raw),
+  start: EndpointTaskQueueStart(raw),
+  heartbeat: EndpointTaskQueueHeartbeat(raw),
+  stop: EndpointTaskQueueStop(raw),
+  resume: EndpointTaskQueueResume(raw),
+  delete: EndpointTaskQueueDelete(raw),
 })
 
 const EndpointShellList = (raw: RawClient["server.shell"]) => (input?: ShellListInput) =>
@@ -2092,6 +2085,7 @@ const adaptClient = (raw: RawClient) => {
     rpc: adaptGroupRpc(raw["server.rpc"]),
     event: adaptGroupEvent(raw["server.event"]),
     pty: adaptGroupPty(raw["server.pty"]),
+    taskQueue: adaptGroupTaskQueue(raw["server.taskQueue"]),
     shell: adaptGroupShell(raw["server.shell"]),
     reference: adaptGroupReference(raw["server.reference"]),
     worktree: adaptGroupWorktree(raw["server.worktree"]),
@@ -2175,6 +2169,28 @@ const adaptClient = (raw: RawClient) => {
       watch: client.experimental.file.watch,
       /** @deprecated Use `client.experimental.file.unwatch`. Removed in the next minor. */
       unwatch: client.experimental.file.unwatch,
+    },
+    experimental: {
+      ...client.experimental,
+      /** @deprecated Use `client.taskQueue`. Removed in the next minor. */
+      taskQueue: {
+        /** @deprecated Use `client.taskQueue.create`. Removed in the next minor. */
+        create: client.taskQueue.create,
+        /** @deprecated Use `client.taskQueue.list`. Removed in the next minor. */
+        list: client.taskQueue.list,
+        /** @deprecated Use `client.taskQueue.get`. Removed in the next minor. */
+        get: client.taskQueue.get,
+        /** @deprecated Use `client.taskQueue.start`. Removed in the next minor. */
+        start: client.taskQueue.start,
+        /** @deprecated Use `client.taskQueue.heartbeat`. Removed in the next minor. */
+        heartbeat: client.taskQueue.heartbeat,
+        /** @deprecated Use `client.taskQueue.stop`. Removed in the next minor. */
+        stop: client.taskQueue.stop,
+        /** @deprecated Use `client.taskQueue.resume`. Removed in the next minor. */
+        resume: client.taskQueue.resume,
+        /** @deprecated Use `client.taskQueue.delete`. Removed in the next minor. */
+        delete: client.taskQueue.delete,
+      },
     },
     /** @deprecated Use `client.experimental.migration`. Removed in the next minor. */
     migration: {

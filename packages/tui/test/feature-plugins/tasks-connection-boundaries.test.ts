@@ -26,12 +26,12 @@ test.each((["list", "get", "create"] as const).flatMap((operation) => [
     return fail ? new Response(null, { status: 503 }) : json({ data: [replacement] })
   }).fetch })
   let client = previous
-  const feed = createTaskQueueFeed(() => client.experimental.taskQueue)
-  const submit = () => feed.created(client.experimental.taskQueue.create({ directory: old.directory, tasks: [{ title: "Submitted to A", prompt: "Full text" }] }))
+  const feed = createTaskQueueFeed(() => client.taskQueue)
+  const submit = () => feed.created(client.taskQueue.create({ directory: old.directory, tasks: [{ title: "Submitted to A", prompt: "Full text" }] }))
   let pending: Promise<void | TaskQueueInfo> | undefined
   try {
-    expect(previous.experimental.taskQueue).toBe(previous.experimental.taskQueue)
-    expect(next.experimental.taskQueue).not.toBe(previous.experimental.taskQueue)
+    expect(previous.taskQueue).toBe(previous.taskQueue)
+    expect(next.taskQueue).not.toBe(previous.taskQueue)
     feed.directory(old.directory)
     await feed.load()
     hold = true

@@ -1,12 +1,12 @@
 export * as TaskQueue from "./task-queue.js"
 
 import { randomUUID } from "node:crypto"
-import { realpath } from "node:fs/promises"
-import { and, asc, eq, inArray, isNull, notExists, sql } from "drizzle-orm"
+import { realpath, stat } from "node:fs/promises"
+import { and, asc, eq, inArray, isNull } from "drizzle-orm"
 import { Cause, Clock, Context, Effect, Fiber, Layer, Option, Schema, Scope, Stream } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { AbsolutePath } from "@opencode/schema/schema"
-import { CreateInput, Event, ID, Info, Status, TaskID, TaskInput, TaskStatus, type Task } from "@opencode/schema/task-queue"
+import { CreateInput, Event, ID, Info, Status, TaskID, TaskInput, TaskStatus, titleFromPrompt, type Task } from "@opencode/schema/task-queue"
 import { Form } from "./form.js"
 import { Permission } from "./permission.js"
 import { Bus } from "./bus.js"
@@ -407,15 +407,27 @@ export const make = Effect.gen(function* () {
     if (!resume && row.status !== "queued") return yield* new InvalidError({ reason: `Queue is ${row.status}; only a queued queue can start` })
     if (resume && (row.status === "running" || row.status === "queued" || !rows.some((task) => ["pending", "interrupted", "blocked", "failed"].includes(task.status))))
       return yield* new InvalidError({ reason: `Queue is ${row.status}; no stopped or unfinished tasks to resume` })
+    // A stored canonical path can later become a junction; never lock its old identity and execute elsewhere.
+    const directory = yield* canonicalDirectory(row.directory).pipe(Effect.mapError(() => new InvalidError({ reason: "The queue directory does not exist or is not a directory" })))
+    if (!sameDirectory(directory, row.directory))
+      return yield* new InvalidError({ reason: "The queue directory now resolves to a different location; restore the original directory or create a new queue" })
     const token = randomUUID()
     const now = yield* Clock.currentTimeMillis
-    // One atomic SQL statement is the directory-level CAS, also across separate connections/processes.
-    const occupied = db.select({ id: TaskQueueTable.id }).from(TaskQueueTable).where(and(directoryMatch(row.directory), eq(TaskQueueTable.status, "running")))
-    const won = yield* db.update(TaskQueueTable).set({ status: "running", closing: false, reason: null, owner_boot: boot, owner_pid: process.pid, run_id: token, lease_expires_at: now + LEASE_TTL, time_updated: now }).where(and(eq(TaskQueueTable.id, id), eq(TaskQueueTable.status, row.status), row.run_id === null ? isNull(TaskQueueTable.run_id) : eq(TaskQueueTable.run_id, row.run_id), notExists(occupied))).returning().get().pipe(Effect.orDie)
+    // SQLite NOCASE only folds ASCII. Check persisted spellings with the admission rule while
+    // holding the cross-connection write reservation; no filesystem work runs in this transaction.
+    const won = yield* db.transaction((tx) => Effect.gen(function* () {
+      const running = yield* tx.select({ directory: TaskQueueTable.directory }).from(TaskQueueTable).where(and(
+        eq(TaskQueueTable.status, "running"),
+        process.platform === "win32" ? undefined : eq(TaskQueueTable.directory, row.directory),
+      )).all()
+      if (running.some((queue) => sameDirectory(queue.directory, row.directory))) return
+      const claimed = yield* tx.update(TaskQueueTable).set({ status: "running", closing: false, reason: null, owner_boot: boot, owner_pid: process.pid, run_id: token, lease_expires_at: now + LEASE_TTL, time_updated: now }).where(and(eq(TaskQueueTable.id, id), eq(TaskQueueTable.status, row.status), row.run_id === null ? isNull(TaskQueueTable.run_id) : eq(TaskQueueTable.run_id, row.run_id))).returning().get()
+      // Resuming a stopped forward scan must not revisit earlier blocked tasks. Only a deliberate
+      // resume of the finished batch opens a retry pass, atomically with successful admission.
+      if (claimed && resume && row.status === "done") yield* tx.update(TaskQueueTaskTable).set({ status: "interrupted", accepting: false, rounds: 0, stalls: 0, reason: null, time_updated: now }).where(and(eq(TaskQueueTaskTable.queue_id, id), inArray(TaskQueueTaskTable.status, ["blocked", "failed"]))).run()
+      return claimed
+    }), { behavior: "immediate" }).pipe(Effect.orDie)
     if (!won) return yield* new InvalidError({ reason: "Another batch is already running in this directory, or the queue changed" })
-    // Resuming an interrupted forward scan must not revisit earlier blocked tasks. Only a deliberate
-    // resume of the finished batch opens a retry pass over its unfinished terminal items.
-    if (resume && row.status === "done") yield* db.update(TaskQueueTaskTable).set({ status: "interrupted", accepting: false, rounds: 0, stalls: 0, reason: null, time_updated: now }).where(and(eq(TaskQueueTaskTable.queue_id, id), inArray(TaskQueueTaskTable.status, ["blocked", "failed"]))).run().pipe(Effect.orDie)
     yield* publish(id)
     yield* spawn({ id, token })
     return yield* info(id)
@@ -424,19 +436,29 @@ export const make = Effect.gen(function* () {
   return Service.of({
     create: Effect.fn("TaskQueue.create")(function* (input) {
       if (!input.tasks.length) return yield* new InvalidError({ reason: "A queue needs at least one task" })
+      if (input.tasks.some((task) => !task.prompt.trim()))
+        return yield* new InvalidError({ reason: "A task needs non-blank content" })
       const directory = yield* canonicalDirectory(input.directory).pipe(Effect.mapError(() => new InvalidError({ reason: "The queue directory does not exist" })))
       const id = ID.create()
       const now = yield* Clock.currentTimeMillis
       yield* db.transaction((tx) => Effect.gen(function* () {
         yield* tx.insert(TaskQueueTable).values({ id, directory, title: input.title ?? null, time_created: now, time_updated: now }).run()
-        yield* tx.insert(TaskQueueTaskTable).values(input.tasks.map((task, index) => ({ id: TaskID.create(), queue_id: id, position: index + 1, title: task.title, prompt: task.prompt, time_created: now, time_updated: now }))).run()
+        yield* tx.insert(TaskQueueTaskTable).values(input.tasks.map((task, index) => ({ id: TaskID.create(), queue_id: id, position: index + 1, title: task.title ?? titleFromPrompt(task.prompt), prompt: task.prompt, time_created: now, time_updated: now }))).run()
       })).pipe(Effect.orDie)
       yield* publish(id)
       return yield* info(id).pipe(Effect.orDie)
     }),
     list: Effect.fn("TaskQueue.list")(function* (input) {
       const directory = input?.directory ? yield* canonicalDirectory(input.directory).pipe(Effect.orElseSucceed(() => input.directory)) : undefined
-      const rows = yield* db.select().from(TaskQueueTable).where(directory ? directoryMatch(directory) : undefined).orderBy(asc(TaskQueueTable.time_created), asc(TaskQueueTable.id)).all().pipe(Effect.orDie)
+      // Resolve only the request path, not every historical queue. Reuse the directory index to
+      // fetch all equivalent persisted spellings without rewriting them or caching filesystem state.
+      const directories = directory && process.platform === "win32"
+        ? (yield* db.selectDistinct({ directory: TaskQueueTable.directory }).from(TaskQueueTable).all().pipe(Effect.orDie))
+          .filter((row) => sameDirectory(row.directory, directory)).map((row) => row.directory)
+        : undefined
+      const rows = yield* db.select().from(TaskQueueTable).where(directory
+        ? directories ? inArray(TaskQueueTable.directory, directories) : eq(TaskQueueTable.directory, directory)
+        : undefined).orderBy(asc(TaskQueueTable.time_created), asc(TaskQueueTable.id)).all().pipe(Effect.orDie)
       return yield* Effect.forEach(rows, (row) => info(row.id).pipe(Effect.orDie))
     }),
     get: (id) => info(id),
@@ -471,13 +493,15 @@ function toInfo(row: QueueRow, tasks: readonly TaskRow[]): Info {
   return { id: row.id, ...(row.title === null ? {} : { title: row.title }), directory: row.directory, status: row.status,
     ...(row.reason === null ? {} : { reason: row.reason }), ...(row.current_task_id === null ? {} : { currentTaskID: row.current_task_id }), tasks: tasks.map(toTask), time: { created: row.time_created, updated: row.time_updated } }
 }
-/** Shared local directory identity for queue storage, locking, and the server's flag gate. */
-export const canonicalDirectory = (directory: AbsolutePath) => Effect.tryPromise(() => realpath(directory)).pipe(
-  Effect.map((value) => LocationServiceMap.canonical({ directory: AbsolutePath.make(value) }).directory),
-)
-const directoryMatch = (directory: AbsolutePath) => process.platform === "win32"
-  ? sql`${TaskQueueTable.directory} = ${directory} COLLATE NOCASE`
-  : eq(TaskQueueTable.directory, directory)
+/** Shared local directory identity for queue storage, locking, and server location validation. */
+export const canonicalDirectory = (directory: AbsolutePath) => Effect.tryPromise(async () => {
+  const value = await realpath(directory)
+  if (!(await stat(value)).isDirectory()) throw new Error("The queue path is not a directory")
+  return LocationServiceMap.canonical({ directory: AbsolutePath.make(value) }).directory
+})
+const sameDirectory = (left: AbsolutePath, right: AbsolutePath) => process.platform === "win32"
+  ? left.toLowerCase() === right.toLowerCase()
+  : left === right
 // EPERM/unknown errors mean "possibly alive", never permission to take over.
 const alive = (pid: number) => Effect.try({ try: () => { process.kill(pid, 0); return true }, catch: (error) => error }).pipe(Effect.orElseSucceed((error) => !(error instanceof Error && "code" in error && error.code === "ESRCH")))
 function taskIDOf(metadata: Record<string, unknown> | undefined) {

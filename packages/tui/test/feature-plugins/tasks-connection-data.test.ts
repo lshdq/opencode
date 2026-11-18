@@ -25,7 +25,7 @@ test.each([
   } })
   const b = Bun.serve({ port: 0, fetch: () => json({ data: [replacement] }) })
   let client = OpenCode.make({ baseUrl: a.url.toString() })
-  const feed = createTaskQueueFeed(() => client.experimental.taskQueue)
+  const feed = createTaskQueueFeed(() => client.taskQueue)
   let pending: Promise<void | TaskQueueInfo> | undefined
   try {
     feed.directory(old.directory)
@@ -34,7 +34,7 @@ test.each([
     // before the one deliberately delayed list request is armed.
     await initialized.promise
     hold = true
-    pending = operation === "list" ? feed.load() : feed.created(client.experimental.taskQueue.create({ directory: old.directory, tasks: [{ title: "Old submitted task", prompt: "Text" }] }))
+    pending = operation === "list" ? feed.load() : feed.created(client.taskQueue.create({ directory: old.directory, tasks: [{ title: "Old submitted task", prompt: "Text" }] }))
     await requested.promise
     client = OpenCode.make({ baseUrl: b.url.toString() })
     await feed.load()
@@ -58,7 +58,7 @@ test("canonical and deletion facts belong to one connection, including empty rep
   const a = Bun.serve({ port: 0, fetch: () => json({ data: [old] }) })
   const b = Bun.serve({ port: 0, fetch: (request) => json({ data: request.method === "POST" ? replacement : [] }) })
   let client = OpenCode.make({ baseUrl: a.url.toString() })
-  const feed = createTaskQueueFeed(() => client.experimental.taskQueue)
+  const feed = createTaskQueueFeed(() => client.taskQueue)
   try {
     feed.directory("/remote/alias")
     await feed.load()
@@ -68,7 +68,7 @@ test("canonical and deletion facts belong to one connection, including empty rep
     await feed.load()
     feed.update(old)
     expect(feed.items()).toEqual([])
-    await feed.created(client.experimental.taskQueue.create({ directory: "/remote/alias", tasks: [{ title: "New server", prompt: "Text" }] }))
+    await feed.created(client.taskQueue.create({ directory: "/remote/alias", tasks: [{ title: "New server", prompt: "Text" }] }))
     expect(feed.items()).toEqual([replacement])
     expect(feed.error()).toBeUndefined()
   } finally {
@@ -81,7 +81,7 @@ test("a connection checkpoint is invalid before reload and stays invalid after A
   const a = OpenCode.make({ baseUrl: "http://unused-a" })
   const b = OpenCode.make({ baseUrl: "http://unused-b" })
   let client = a
-  const feed = createTaskQueueFeed(() => client.experimental.taskQueue)
+  const feed = createTaskQueueFeed(() => client.taskQueue)
   try {
     const first = feed.capture()
     expect(first()).toBe(true)
@@ -103,7 +103,7 @@ test("a connection checkpoint is invalid before reload and stays invalid after A
 test("refresh on the same SDK preserves a submitted create checkpoint", async () => {
   const response = Promise.withResolvers<TaskQueueInfo>()
   const client = OpenCode.make({ baseUrl: "http://fixture", fetch: createFetch(() => json({ data: [] })).fetch })
-  const feed = createTaskQueueFeed(() => client.experimental.taskQueue)
+  const feed = createTaskQueueFeed(() => client.taskQueue)
   try {
     feed.directory("/remote/alias")
     const current = feed.capture()

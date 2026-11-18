@@ -26,7 +26,7 @@ test.each(["foreign", "same"] as const)("real authenticated %s stream stays outs
     function Capture() {
       const client = useClient()
       const owner = useTaskQueueOwner()
-      const feed = createTaskQueueFeed(() => client.api.experimental.taskQueue)
+      const feed = createTaskQueueFeed(() => client.api.taskQueue)
       const relay = createTaskQueueEvents({ on: client.event.on })
       const detach = relay.attach({ update: feed.update, load() { loads++; return feed.load() } }, client)
       client.event.on("server.connected", () => { initial.resolve() })

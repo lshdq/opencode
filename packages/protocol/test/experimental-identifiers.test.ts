@@ -22,3 +22,20 @@ test("routes under /api/experimental, and only those, have experimental.* identi
   expect(operations.length).toBeGreaterThan(100)
   expect(offenders).toEqual([])
 })
+
+test("task queues graduate to formal routes without experimental HTTP aliases", () => {
+  const paths = OpenApi.fromApi(ClientApi).paths
+  expect(Object.keys(paths).filter((path) => path.startsWith("/api/experimental/task-queue"))).toEqual([])
+  expect(Object.entries(paths).filter(([path]) => path.startsWith("/api/task-queue")).flatMap(([path, item]) =>
+    methods.flatMap((method) => item[method] ? [[method, path, item[method].operationId]] : []),
+  )).toEqual([
+    ["get", "/api/task-queue", "taskQueue.list"],
+    ["post", "/api/task-queue", "taskQueue.create"],
+    ["get", "/api/task-queue/{queueID}", "taskQueue.get"],
+    ["delete", "/api/task-queue/{queueID}", "taskQueue.delete"],
+    ["post", "/api/task-queue/{queueID}/start", "taskQueue.start"],
+    ["post", "/api/task-queue/{queueID}/heartbeat", "taskQueue.heartbeat"],
+    ["post", "/api/task-queue/{queueID}/stop", "taskQueue.stop"],
+    ["post", "/api/task-queue/{queueID}/resume", "taskQueue.resume"],
+  ])
+})

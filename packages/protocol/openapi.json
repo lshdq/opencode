@@ -13479,10 +13479,10 @@
         "summary": "List background jobs"
       }
     },
-    "/api/experimental/task-queue": {
+    "/api/task-queue": {
       "post": {
-        "tags": ["experimental"],
-        "operationId": "experimental.taskQueue.create",
+        "tags": ["taskQueue"],
+        "operationId": "taskQueue.create",
         "parameters": [],
         "security": [],
         "responses": {
@@ -13523,16 +13523,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "LocationNotFoundError",
             "content": {
@@ -13544,7 +13534,7 @@
             }
           }
         },
-        "description": "Create a queue of tasks that run serially and unattended, each task in its own session in the queue's directory. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "description": "Create a queue of tasks that run serially and unattended, each task in its own session in the queue's directory.",
         "summary": "Create task queue",
         "requestBody": {
           "content": {
@@ -13558,8 +13548,8 @@
         }
       },
       "get": {
-        "tags": ["experimental"],
-        "operationId": "experimental.taskQueue.list",
+        "tags": ["taskQueue"],
+        "operationId": "taskQueue.list",
         "parameters": [
           {
             "name": "directory",
@@ -13612,16 +13602,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "LocationNotFoundError",
             "content": {
@@ -13633,14 +13613,14 @@
             }
           }
         },
-        "description": "List a directory's queues, oldest first. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "description": "List a directory's queues, oldest first.",
         "summary": "List task queues"
       }
     },
-    "/api/experimental/task-queue/{queueID}": {
+    "/api/task-queue/{queueID}": {
       "get": {
-        "tags": ["experimental"],
-        "operationId": "experimental.taskQueue.get",
+        "tags": ["taskQueue"],
+        "operationId": "taskQueue.get",
         "parameters": [
           {
             "name": "queueID",
@@ -13690,16 +13670,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "TaskQueueNotFoundError | LocationNotFoundError",
             "content": {
@@ -13718,12 +13688,12 @@
             }
           }
         },
-        "description": "Read one queue with its tasks. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "description": "Read one queue with its tasks.",
         "summary": "Get task queue"
       },
       "delete": {
-        "tags": ["experimental"],
-        "operationId": "experimental.taskQueue.delete",
+        "tags": ["taskQueue"],
+        "operationId": "taskQueue.delete",
         "parameters": [
           {
             "name": "queueID",
@@ -13759,16 +13729,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "TaskQueueNotFoundError | LocationNotFoundError",
             "content": {
@@ -13787,14 +13747,14 @@
             }
           }
         },
-        "description": "Delete a queue and its tasks. A running queue must be stopped first. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "description": "Delete a queue and its tasks. A running queue must be stopped first.",
         "summary": "Delete task queue"
       }
     },
-    "/api/experimental/task-queue/{queueID}/start": {
+    "/api/task-queue/{queueID}/start": {
       "post": {
-        "tags": ["experimental"],
-        "operationId": "experimental.taskQueue.start",
+        "tags": ["taskQueue"],
+        "operationId": "taskQueue.start",
         "parameters": [
           {
             "name": "queueID",
@@ -13844,16 +13804,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "TaskQueueNotFoundError | LocationNotFoundError",
             "content": {
@@ -13872,14 +13822,14 @@
             }
           }
         },
-        "description": "Start a queued queue: its tasks run one at a time until done or stopped. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "description": "Start a queued queue: its tasks run one at a time until done or stopped.",
         "summary": "Start task queue"
       }
     },
-    "/api/experimental/task-queue/{queueID}/heartbeat": {
+    "/api/task-queue/{queueID}/heartbeat": {
       "post": {
-        "tags": ["experimental"],
-        "operationId": "experimental.taskQueue.heartbeat",
+        "tags": ["taskQueue"],
+        "operationId": "taskQueue.heartbeat",
         "parameters": [
           {
             "name": "queueID",
@@ -13929,16 +13879,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "TaskQueueNotFoundError | LocationNotFoundError",
             "content": {
@@ -13957,14 +13897,14 @@
             }
           }
         },
-        "description": "Extend a running queue's owner lease; a lease the owner stops renewing stops the queue like a user stop. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "description": "Extend a running queue's owner lease; a lease the owner stops renewing stops the queue like a user stop.",
         "summary": "Renew task queue lease"
       }
     },
-    "/api/experimental/task-queue/{queueID}/stop": {
+    "/api/task-queue/{queueID}/stop": {
       "post": {
-        "tags": ["experimental"],
-        "operationId": "experimental.taskQueue.stop",
+        "tags": ["taskQueue"],
+        "operationId": "taskQueue.stop",
         "parameters": [
           {
             "name": "queueID",
@@ -14014,16 +13954,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "TaskQueueNotFoundError | LocationNotFoundError",
             "content": {
@@ -14042,7 +13972,7 @@
             }
           }
         },
-        "description": "Stop a queue owned by this server and wait for its task tree and background work to stop. The interrupted task keeps its session for a later resume. A non-running queue is returned unchanged. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "description": "Stop a queue owned by this server and wait for its task tree and background work to stop. The interrupted task keeps its session for a later resume. A non-running queue is returned unchanged.",
         "summary": "Stop task queue",
         "requestBody": {
           "content": {
@@ -14056,10 +13986,10 @@
         }
       }
     },
-    "/api/experimental/task-queue/{queueID}/resume": {
+    "/api/task-queue/{queueID}/resume": {
       "post": {
-        "tags": ["experimental"],
-        "operationId": "experimental.taskQueue.resume",
+        "tags": ["taskQueue"],
+        "operationId": "taskQueue.resume",
         "parameters": [
           {
             "name": "queueID",
@@ -14109,16 +14039,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "TaskQueueNotFoundError | LocationNotFoundError",
             "content": {
@@ -14137,7 +14057,7 @@
             }
           }
         },
-        "description": "Continue the interrupted and pending tasks of a stopped or interrupted queue without revisiting earlier blocked tasks. Explicitly resuming a done queue retries its blocked and failed tasks in their original sessions; completed tasks are never repeated. Only one batch may run in a canonical directory. Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees.",
+        "description": "Continue the interrupted and pending tasks of a stopped or interrupted queue without revisiting earlier blocked tasks. Explicitly resuming a done queue retries its blocked and failed tasks in their original sessions; completed tasks are never repeated. Only one batch may run in a canonical directory.",
         "summary": "Resume task queue"
       }
     },
@@ -17325,6 +17245,9 @@
           "experimental": {
             "type": "object",
             "properties": {
+              "task_queue": {
+                "type": "boolean"
+              },
               "portable_shell_scanner": {
                 "type": "boolean"
               },
@@ -17356,9 +17279,6 @@
                 "type": "boolean"
               },
               "mcp_events": {
-                "type": "boolean"
-              },
-              "task_queue": {
                 "type": "boolean"
               },
               "part_rows": {
@@ -25891,10 +25811,10 @@
           },
           "prompt": {
             "type": "string",
-            "minLength": 1
+            "pattern": "\\S"
           }
         },
-        "required": ["title", "prompt"],
+        "required": ["prompt"],
         "additionalProperties": false
       },
       "TaskQueue.TaskStatus": {
@@ -31910,6 +31830,10 @@
     {
       "name": "persistentPty",
       "description": "Prototype persistent PTY routes."
+    },
+    {
+      "name": "taskQueue",
+      "description": "Serial task queues."
     },
     {
       "name": "shell",

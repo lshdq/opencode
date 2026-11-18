@@ -8,14 +8,14 @@ const context = createContext<ReturnType<typeof createTaskQueueOwner>>()
 /** Mounted once above routes, dialogs and plugin generations. Closing a view has no lease side effects. */
 export function TaskQueueProvider(props: ParentProps) {
   const client = useClient()
-  const owner = createTaskQueueOwner(() => client.api.experimental.taskQueue, undefined, () => client.url)
+  const owner = createTaskQueueOwner(() => client.api.taskQueue, undefined, () => client.url)
   const unregister = useTuiLifecycle().add(owner.shutdown)
   const unsubscribe = client.onReconnect((source) => {
-    owner.refresh({ api: source.api.experimental.taskQueue, url: source.url })
+    owner.refresh({ api: source.api.taskQueue, url: source.url })
   })
   const off = client.event.on("taskqueue.updated", (event) => {
     const source = client.event.source(event)
-    if (source) owner.observer({ api: source.api.experimental.taskQueue, url: source.url })(event.data)
+    if (source) owner.observer({ api: source.api.taskQueue, url: source.url })(event.data)
   })
   onCleanup(() => {
     off()

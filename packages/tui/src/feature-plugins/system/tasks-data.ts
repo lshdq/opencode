@@ -1,5 +1,5 @@
-import type { OpenCodeClient, TaskQueueInfo, TaskQueueTask } from "@opencode/client"
-import { createSignal } from "solid-js"
+import { ClientError, type OpenCodeClient, type TaskQueueInfo, type TaskQueueTask } from "@opencode/client"
+import { batch, createSignal } from "solid-js"
 import { errorMessage } from "../../util/error"
 
 export function sameTaskDirectory(left: string, right: string) {
@@ -23,23 +23,26 @@ export function canResumeTaskQueue(info: TaskQueueInfo) {
 
 export function taskQueueError(cause: unknown) {
   // HTTP errors are decoded at the client boundary; keep this one presentation check here.
-  if (typeof cause === "object" && cause !== null &&
-    (("status" in cause && cause.status === 403) || ("_tag" in cause && cause._tag === "ForbiddenError")))
-    return "任务队列不可用。请在服务端配置启用 experimental.task_queue，或检查访问权限。"
+  const error = cause instanceof ClientError ? cause.cause : cause
+  if (typeof error === "object" && error !== null &&
+    (("status" in error && error.status === 403) || ("_tag" in error && error._tag === "ForbiddenError")))
+    return "任务队列不可用，请检查访问权限。"
   return `无法访问任务队列：${errorMessage(cause)}`
 }
 
 /** The getter returns the stable SDK resource for the current connection, not a fresh wrapper. */
-export function createTaskQueueFeed(api: () => Pick<OpenCodeClient["experimental"]["taskQueue"], "list" | "get">) {
+export function createTaskQueueFeed(api: () => Pick<OpenCodeClient["taskQueue"], "list" | "get">) {
   const [items, setItems] = createSignal<TaskQueueInfo[]>([])
   const [error, setError] = createSignal<string>()
   const [loading, setLoading] = createSignal(false)
+  const [listed, setListed] = createSignal(false)
   const [connectionVersion, setConnectionVersion] = createSignal(0)
   const versions = new Map<string, number>()
   // A successful deletion wins over delayed SSE and reads in this directory/connection lifetime.
   const removed = new Set<string>()
   let directory = ""
   let canonical: string | undefined
+  let alias: string | undefined
   let epoch = 0
   let revision = 0
   let request = 0
@@ -49,11 +52,15 @@ export function createTaskQueueFeed(api: () => Pick<OpenCodeClient["experimental
     epoch++
     request++
     canonical = undefined
+    alias = undefined
     versions.clear()
     removed.clear()
-    setLoading(true)
-    setItems([])
-    setError(undefined)
+    batch(() => {
+      setListed(false)
+      setLoading(true)
+      setItems([])
+      setError(undefined)
+    })
   }
 
   function sync() {
@@ -73,13 +80,17 @@ export function createTaskQueueFeed(api: () => Pick<OpenCodeClient["experimental
   }
 
   const belongs = (value: string) => sameTaskDirectory(value, directory) ||
-    (canonical !== undefined && sameTaskDirectory(value, canonical))
+    (canonical !== undefined && sameTaskDirectory(value, canonical)) ||
+    (alias !== undefined && sameTaskDirectory(value, alias))
 
   // Only a successful directory-scoped request can confirm a server-side alias.
   // SSE/get cannot resolve a directory on the client's (possibly different) filesystem.
   function confirm(infos: readonly TaskQueueInfo[]) {
     const value = infos[0]?.directory
-    if (value && infos.every((info) => sameTaskDirectory(info.directory, value))) canonical = value
+    if (value && infos.every((info) => sameTaskDirectory(info.directory, value))) {
+      canonical = value
+      alias ??= directory
+    }
   }
 
   function update(info: TaskQueueInfo) {
@@ -88,6 +99,7 @@ export function createTaskQueueFeed(api: () => Pick<OpenCodeClient["experimental
     const previous = items().find((item) => item.id === info.id)
     if (previous && previous.time.updated > info.time.updated) return
     versions.set(info.id, ++revision)
+    setError(undefined)
     setItems((items) => [info, ...items.filter((item) => item.id !== info.id)].sort((a, b) => b.time.created - a.time.created))
   }
 
@@ -110,6 +122,7 @@ export function createTaskQueueFeed(api: () => Pick<OpenCodeClient["experimental
         })
       const changed = [...known.values()].filter((info) => (versions.get(info.id) ?? 0) > before)
       setItems([...fresh, ...changed].sort((a, b) => b.time.created - a.time.created))
+      setListed(true)
     }, (cause) => {
       if (valid() && attempt === request) setError(taskQueueError(cause))
     })
@@ -145,11 +158,24 @@ export function createTaskQueueFeed(api: () => Pick<OpenCodeClient["experimental
 
   return {
     items, error, loading, load, get, update, remove, created, capture, connection: connectionVersion,
+    // Unknown after a new SDK or a failed first read is not a deletion fact.
+    missing(queueID: string) {
+      return !items().some((info) => info.id === queueID) && (removed.has(queueID) || (listed() && !loading()))
+    },
+    sameDirectory(value: string) { sync(); return directory !== "" && belongs(value) },
     directory(value: string) {
+      sync()
+      if (directory !== "" && belongs(value)) {
+        // Keep the live spelling as the next SDK's request scope, but preserve
+        // this SDK's confirmed alias for same-identity Location transitions.
+        directory = value
+        return false
+      }
       directory = value
       reset()
       void load()
+      return true
     },
-    dispose() { epoch++; request++; removed.clear(); canonical = undefined },
+    dispose() { epoch++; request++; removed.clear(); canonical = undefined; alias = undefined },
   }
 }

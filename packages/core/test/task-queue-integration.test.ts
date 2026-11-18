@@ -1,9 +1,11 @@
 import path from "node:path"
+import fs from "node:fs/promises"
 import { expect } from "bun:test"
 import { LanguageModel, LLMClient } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
+import { Bus } from "@opencode/core/bus"
 import { Config } from "@opencode/core/config"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -19,11 +21,12 @@ import { Session } from "@opencode/core/session"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRunnerModel } from "@opencode/core/session/runner/model"
 import { SessionTitle } from "@opencode/core/session/title"
+import { SessionStore } from "@opencode/core/session/store"
 import { Snapshot } from "@opencode/core/snapshot"
 import { TaskQueue } from "@opencode/core/task-queue"
 import { Tool } from "@opencode/core/tool"
 import { LayerNode } from "@opencode/util/effect/layer-node"
-import { Deferred, Effect, Fiber, Layer, Schema } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Schema, Scope } from "effect"
 import { tmpdirScoped } from "./fixture/tmpdir"
 import { it } from "./lib/effect"
 
@@ -33,13 +36,17 @@ it.live(
   "real runner delivers queue input, continues the same Session and shares files without revisiting completed tasks",
   () =>
     Effect.gen(function* () {
-      const directory = AbsolutePath.make((yield* tmpdirScoped("qi-")).path)
+      const root = (yield* tmpdirScoped("qi-")).path
+      const directory = AbsolutePath.make(path.join(root, "project"))
+      yield* Effect.promise(() => fs.mkdir(directory))
       const llm = yield* TestLLM.Test
       const context = yield* Layer.build(
         AppNodeBuilder.build(
           LayerNode.group([
             TaskQueue.node,
+            Bus.node,
             Session.node,
+            SessionStore.node,
             SessionExecution.node,
             Database.node,
             Instance.node,
@@ -124,8 +131,8 @@ it.live(
         const queue = yield* queues.create({
           directory,
           tasks: [
-            { title: "Writer", prompt: "Write X then Y using queuefile" },
-            { title: "Reader", prompt: "Read X and Y using queuefile" },
+            { prompt: "Write X then Y using queuefile" },
+            { prompt: "Read X and Y using queuefile" },
             { title: "Approval", prompt: "Wait for external approval" },
           ],
         })
@@ -139,6 +146,9 @@ it.live(
         const originals = yield* Effect.forEach(done.tasks, (task) =>
           task.sessionID ? sessions.get(task.sessionID) : Effect.die("missing Session"),
         )
+        expect(originals.map((session) => session.title)).toEqual([
+          "Write X then Y using queuefile", "Read X and Y using queuefile", "Approval",
+        ])
         expect(
           originals.every((session) => session.parentID === undefined && session.location.directory === directory),
         ).toBe(true)
@@ -234,6 +244,17 @@ it.live(
         const grandchildRun = yield* execution.resume(grandchild.id).pipe(Effect.forkScoped)
         yield* llm.wait(19)
         expect(yield* execution.active).toEqual(new Set([running, grandchild.id]))
+        // TC-008: exercise real coordinator/Location cleanup after retargeting, not only a fake executor.
+        const target = path.join(root, "target")
+        yield* Effect.promise(async () => {
+          await fs.rename(directory, path.join(root, "saved"))
+          await fs.mkdir(target)
+        })
+        yield* Effect.acquireRelease(
+          Effect.promise(() => fs.symlink(target, directory, process.platform === "win32" ? "junction" : "dir")),
+          () => Effect.promise(() => fs.unlink(directory)),
+        )
+        expect(yield* TaskQueue.canonicalDirectory(directory)).toBe(AbsolutePath.make(target))
         const started = yield* Deferred.make<void>()
         const cancelling = yield* Deferred.make<void>()
         const release = yield* Deferred.make<void>()
@@ -272,6 +293,42 @@ it.live(
         expect(yield* jobs.get("queue-integration-image")).toBeUndefined()
         yield* execution.resume(grandchild.id)
         expect((yield* llm.requests()).length).toBe(19)
+
+        // A separately scoped real queue owner must also stop its run during shutdown despite drift.
+        const scope = yield* Scope.make()
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+        const closingQueues = yield* TaskQueue.make.pipe(Scope.provide(scope))
+        const closingDirectory = AbsolutePath.make(path.join(root, "closing"))
+        yield* Effect.promise(() => fs.mkdir(closingDirectory))
+        yield* Agent.Service.use((agents) => agents.transform((editor) =>
+          editor.update(Agent.defaultID, (agent) => {
+            agent.mode = "primary"
+            agent.permissions = [{ action: "*", resource: "*", effect: "allow" }]
+          }),
+        )).pipe(Effect.provide((yield* LocationServiceMap.Service).get({ directory: closingDirectory })))
+        const closing = yield* closingQueues.create({ directory: closingDirectory, tasks: [
+          { prompt: "Keep working until shutdown" }, { prompt: "Must remain pending" },
+        ] })
+        yield* llm.push(TestLLM.hangAfter())
+        yield* closingQueues.start(closing.id)
+        yield* llm.wait(20)
+        const closingSession = (yield* closingQueues.get(closing.id)).tasks[0]?.sessionID
+        if (!closingSession) return yield* Effect.die("shutdown task has no Session")
+        expect(yield* execution.active).toEqual(new Set([closingSession]))
+        yield* Effect.promise(() => fs.rmdir(closingDirectory))
+        yield* Effect.acquireRelease(
+          Effect.promise(() => fs.symlink(target, closingDirectory, process.platform === "win32" ? "junction" : "dir")),
+          () => Effect.promise(() => fs.unlink(closingDirectory)),
+        )
+        yield* Scope.close(scope, Exit.void)
+        const closed = yield* closingQueues.get(closing.id)
+        expect(closed).toMatchObject({ status: "stopped", reason: "server stopped", directory: closing.directory })
+        expect(closed.tasks.map((task) => task.status)).toEqual(["interrupted", "pending"])
+        expect(closed.tasks[0]?.sessionID).toBe(closingSession)
+        expect(closed.tasks[1]?.sessionID).toBeUndefined()
+        expect((yield* sessions.get(closingSession)).location.directory).toBe(closing.directory)
+        expect(yield* execution.active).toEqual(new Set())
+        expect((yield* llm.requests()).length).toBe(20)
       }).pipe(Effect.provide(context))
     }).pipe(Effect.provide(TestLLM.testLayer())),
 )

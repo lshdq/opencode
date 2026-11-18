@@ -95,12 +95,12 @@ async function setup(action: "start" | "resume", pendingA: boolean, otherB: bool
   const replacement = createFetch((url, request) => {
     if (request.headers.get("authorization") !== authorization(after.password)) { rejected.push(`new:${url.pathname}`); return new Response(null, { status: 401 }) }
     if (url.pathname === "/api/plugin") plugin.resolve()
-    if (!url.pathname.startsWith("/api/experimental/task-queue")) return undefined
+    if (!url.pathname.startsWith("/api/task-queue")) return undefined
     const method = url.pathname.split("/").at(-1)!
     if (["start", "resume", "stop", "heartbeat"].includes(method)) bControls.push(method)
     if (method === "start" || method === "resume") { bRequested.resolve(); return bReply.promise }
     if (method === "stop") infoB = { ...infoB, status: "stopped" }
-    return json({ data: url.pathname === "/api/experimental/task-queue" ? [infoB] : infoB })
+    return json({ data: url.pathname === "/api/task-queue" ? [infoB] : infoB })
   }, events)
   const server = Bun.serve({ port: 0, fetch: (request) => replacement.fetch(request) })
   const app = await createAppFixture({ width: 100, height: 30, config: { animations: false, tabs: { mode: "off" } }, auth: before,
@@ -109,7 +109,7 @@ async function setup(action: "start" | "resume", pendingA: boolean, otherB: bool
       aURL = url.origin
       if (same) return replacement.fetch(request)
       if (request.headers.get("authorization") !== authorization(before.password)) { rejected.push(`old:${url.pathname}`); return new Response(null, { status: 401 }) }
-      if (!url.pathname.startsWith("/api/experimental/task-queue")) return undefined
+      if (!url.pathname.startsWith("/api/task-queue")) return undefined
       const method = url.pathname.split("/").at(-1)!
       if (["start", "resume", "stop", "heartbeat"].includes(method)) aControls.push(method)
       if (method === "start" || method === "resume") {
@@ -118,7 +118,7 @@ async function setup(action: "start" | "resume", pendingA: boolean, otherB: bool
         infoA = { ...infoA, status: "running", time: { created: 1, updated: 99 } }
       }
       if (method === "stop") infoA = { ...infoA, status: "stopped" }
-      return json({ data: url.pathname === "/api/experimental/task-queue" ? [infoA] : infoA })
+      return json({ data: url.pathname === "/api/task-queue" ? [infoA] : infoA })
     },
   }).catch(async (cause) => { events.disconnect(); await server.stop(true); throw cause })
   let closed: Promise<void> | undefined

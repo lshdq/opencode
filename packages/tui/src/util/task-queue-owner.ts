@@ -1,6 +1,6 @@
 import type { OpenCodeClient, TaskQueueInfo } from "@opencode/client"
 
-type Api = Pick<OpenCodeClient["experimental"]["taskQueue"], "start" | "resume" | "heartbeat" | "stop">
+type Api = Pick<OpenCodeClient["taskQueue"], "start" | "resume" | "heartbeat" | "stop">
 type Origin = {
   key: string | Api
   api: Api

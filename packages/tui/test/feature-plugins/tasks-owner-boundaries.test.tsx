@@ -175,7 +175,7 @@ test.each(["path", "query"] as const)(
     })
     let current = endpoints[0]
     const owner = createTaskQueueOwner(
-      () => current.api.experimental.taskQueue,
+      () => current.api.taskQueue,
       () => () => {},
       () => current.url,
     )
@@ -227,7 +227,7 @@ test("canonical host case, default port and fragment keep pending ownership and 
   })
   let current = make("HTTP://Fixture.Example:80/gateway?tenant=A#before", "1")
   const owner = createTaskQueueOwner(
-    () => current.api.experimental.taskQueue,
+    () => current.api.taskQueue,
     () => () => {},
     () => current.url,
   )
@@ -266,7 +266,7 @@ test("without a URL the exact SDK resource is the fallback identity, not a guess
   })
   let api = OpenCode.make({ baseUrl: server.url.toString() })
   const owner = createTaskQueueOwner(
-    () => api.experimental.taskQueue,
+    () => api.taskQueue,
     () => () => {},
   )
   const pa = owner.acquire("tq_fixture", "start")

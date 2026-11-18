@@ -2528,58 +2528,6 @@ export type ExperimentalJobListOperation<E = never> = (
   input?: ExperimentalJobListInput,
 ) => Effect.Effect<ExperimentalJobListOutput, E>
 
-export type ExperimentalTaskQueueCreateInput = {
-  readonly title?: string | undefined
-  readonly directory: AbsolutePath
-  readonly tasks: readonly [TaskQueue.TaskInput, ...Array<TaskQueue.TaskInput>]
-}
-export type ExperimentalTaskQueueCreateOutput = TaskQueue.Info
-export type ExperimentalTaskQueueCreateOperation<E = never> = (
-  input: ExperimentalTaskQueueCreateInput,
-) => Effect.Effect<ExperimentalTaskQueueCreateOutput, E>
-
-export type ExperimentalTaskQueueListInput = { readonly directory: AbsolutePath }
-export type ExperimentalTaskQueueListOutput = ReadonlyArray<TaskQueue.Info>
-export type ExperimentalTaskQueueListOperation<E = never> = (
-  input: ExperimentalTaskQueueListInput,
-) => Effect.Effect<ExperimentalTaskQueueListOutput, E>
-
-export type ExperimentalTaskQueueGetInput = { readonly queueID: TaskQueue.ID }
-export type ExperimentalTaskQueueGetOutput = TaskQueue.Info
-export type ExperimentalTaskQueueGetOperation<E = never> = (
-  input: ExperimentalTaskQueueGetInput,
-) => Effect.Effect<ExperimentalTaskQueueGetOutput, E>
-
-export type ExperimentalTaskQueueStartInput = { readonly queueID: TaskQueue.ID }
-export type ExperimentalTaskQueueStartOutput = TaskQueue.Info
-export type ExperimentalTaskQueueStartOperation<E = never> = (
-  input: ExperimentalTaskQueueStartInput,
-) => Effect.Effect<ExperimentalTaskQueueStartOutput, E>
-
-export type ExperimentalTaskQueueHeartbeatInput = { readonly queueID: TaskQueue.ID }
-export type ExperimentalTaskQueueHeartbeatOutput = TaskQueue.Info
-export type ExperimentalTaskQueueHeartbeatOperation<E = never> = (
-  input: ExperimentalTaskQueueHeartbeatInput,
-) => Effect.Effect<ExperimentalTaskQueueHeartbeatOutput, E>
-
-export type ExperimentalTaskQueueStopInput = { readonly queueID: TaskQueue.ID; readonly reason?: string | undefined }
-export type ExperimentalTaskQueueStopOutput = TaskQueue.Info
-export type ExperimentalTaskQueueStopOperation<E = never> = (
-  input: ExperimentalTaskQueueStopInput,
-) => Effect.Effect<ExperimentalTaskQueueStopOutput, E>
-
-export type ExperimentalTaskQueueResumeInput = { readonly queueID: TaskQueue.ID }
-export type ExperimentalTaskQueueResumeOutput = TaskQueue.Info
-export type ExperimentalTaskQueueResumeOperation<E = never> = (
-  input: ExperimentalTaskQueueResumeInput,
-) => Effect.Effect<ExperimentalTaskQueueResumeOutput, E>
-
-export type ExperimentalTaskQueueDeleteInput = { readonly queueID: TaskQueue.ID }
-export type ExperimentalTaskQueueDeleteOutput = void
-export type ExperimentalTaskQueueDeleteOperation<E = never> = (
-  input: ExperimentalTaskQueueDeleteInput,
-) => Effect.Effect<ExperimentalTaskQueueDeleteOutput, E>
-
 export interface ExperimentalApi<E = never> {
   readonly persistentPty: {
     readonly read: ExperimentalPersistentPtyReadOperation<E>
@@ -2610,16 +2558,88 @@ export interface ExperimentalApi<E = never> {
     readonly delete: ExperimentalArtifactsDeleteOperation<E>
   }
   readonly job: { readonly list: ExperimentalJobListOperation<E> }
+
+  /** @deprecated Use `client.taskQueue`. Removed in the next minor. */
   readonly taskQueue: {
-    readonly create: ExperimentalTaskQueueCreateOperation<E>
-    readonly list: ExperimentalTaskQueueListOperation<E>
-    readonly get: ExperimentalTaskQueueGetOperation<E>
-    readonly start: ExperimentalTaskQueueStartOperation<E>
-    readonly heartbeat: ExperimentalTaskQueueHeartbeatOperation<E>
-    readonly stop: ExperimentalTaskQueueStopOperation<E>
-    readonly resume: ExperimentalTaskQueueResumeOperation<E>
-    readonly delete: ExperimentalTaskQueueDeleteOperation<E>
+    /** @deprecated Use `client.taskQueue.create`. Removed in the next minor. */
+    readonly create: TaskQueueCreateOperation<E>
+
+    /** @deprecated Use `client.taskQueue.list`. Removed in the next minor. */
+    readonly list: TaskQueueListOperation<E>
+
+    /** @deprecated Use `client.taskQueue.get`. Removed in the next minor. */
+    readonly get: TaskQueueGetOperation<E>
+
+    /** @deprecated Use `client.taskQueue.start`. Removed in the next minor. */
+    readonly start: TaskQueueStartOperation<E>
+
+    /** @deprecated Use `client.taskQueue.heartbeat`. Removed in the next minor. */
+    readonly heartbeat: TaskQueueHeartbeatOperation<E>
+
+    /** @deprecated Use `client.taskQueue.stop`. Removed in the next minor. */
+    readonly stop: TaskQueueStopOperation<E>
+
+    /** @deprecated Use `client.taskQueue.resume`. Removed in the next minor. */
+    readonly resume: TaskQueueResumeOperation<E>
+
+    /** @deprecated Use `client.taskQueue.delete`. Removed in the next minor. */
+    readonly delete: TaskQueueDeleteOperation<E>
   }
+}
+
+export type TaskQueueCreateInput = {
+  readonly title?: string | undefined
+  readonly directory: AbsolutePath
+  readonly tasks: readonly [TaskQueue.TaskInput, ...Array<TaskQueue.TaskInput>]
+}
+export type TaskQueueCreateOutput = TaskQueue.Info
+export type TaskQueueCreateOperation<E = never> = (
+  input: TaskQueueCreateInput,
+) => Effect.Effect<TaskQueueCreateOutput, E>
+
+export type TaskQueueListInput = { readonly directory: AbsolutePath }
+export type TaskQueueListOutput = ReadonlyArray<TaskQueue.Info>
+export type TaskQueueListOperation<E = never> = (input: TaskQueueListInput) => Effect.Effect<TaskQueueListOutput, E>
+
+export type TaskQueueGetInput = { readonly queueID: TaskQueue.ID }
+export type TaskQueueGetOutput = TaskQueue.Info
+export type TaskQueueGetOperation<E = never> = (input: TaskQueueGetInput) => Effect.Effect<TaskQueueGetOutput, E>
+
+export type TaskQueueStartInput = { readonly queueID: TaskQueue.ID }
+export type TaskQueueStartOutput = TaskQueue.Info
+export type TaskQueueStartOperation<E = never> = (input: TaskQueueStartInput) => Effect.Effect<TaskQueueStartOutput, E>
+
+export type TaskQueueHeartbeatInput = { readonly queueID: TaskQueue.ID }
+export type TaskQueueHeartbeatOutput = TaskQueue.Info
+export type TaskQueueHeartbeatOperation<E = never> = (
+  input: TaskQueueHeartbeatInput,
+) => Effect.Effect<TaskQueueHeartbeatOutput, E>
+
+export type TaskQueueStopInput = { readonly queueID: TaskQueue.ID; readonly reason?: string | undefined }
+export type TaskQueueStopOutput = TaskQueue.Info
+export type TaskQueueStopOperation<E = never> = (input: TaskQueueStopInput) => Effect.Effect<TaskQueueStopOutput, E>
+
+export type TaskQueueResumeInput = { readonly queueID: TaskQueue.ID }
+export type TaskQueueResumeOutput = TaskQueue.Info
+export type TaskQueueResumeOperation<E = never> = (
+  input: TaskQueueResumeInput,
+) => Effect.Effect<TaskQueueResumeOutput, E>
+
+export type TaskQueueDeleteInput = { readonly queueID: TaskQueue.ID }
+export type TaskQueueDeleteOutput = void
+export type TaskQueueDeleteOperation<E = never> = (
+  input: TaskQueueDeleteInput,
+) => Effect.Effect<TaskQueueDeleteOutput, E>
+
+export interface TaskQueueApi<E = never> {
+  readonly create: TaskQueueCreateOperation<E>
+  readonly list: TaskQueueListOperation<E>
+  readonly get: TaskQueueGetOperation<E>
+  readonly start: TaskQueueStartOperation<E>
+  readonly heartbeat: TaskQueueHeartbeatOperation<E>
+  readonly stop: TaskQueueStopOperation<E>
+  readonly resume: TaskQueueResumeOperation<E>
+  readonly delete: TaskQueueDeleteOperation<E>
 }
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
@@ -3076,6 +3096,78 @@ export type FileUnwatchOutput = ExperimentalFileUnwatchOutput
 /** @deprecated Use `ExperimentalFileUnwatchOperation`. Removed in the next minor. */
 export type FileUnwatchOperation<E = never> = ExperimentalFileUnwatchOperation<E>
 
+/** @deprecated Use `TaskQueueCreateInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueCreateInput = TaskQueueCreateInput
+
+/** @deprecated Use `TaskQueueCreateOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueCreateOutput = TaskQueueCreateOutput
+
+/** @deprecated Use `TaskQueueCreateOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueueCreateOperation<E = never> = TaskQueueCreateOperation<E>
+
+/** @deprecated Use `TaskQueueListInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueListInput = TaskQueueListInput
+
+/** @deprecated Use `TaskQueueListOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueListOutput = TaskQueueListOutput
+
+/** @deprecated Use `TaskQueueListOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueueListOperation<E = never> = TaskQueueListOperation<E>
+
+/** @deprecated Use `TaskQueueGetInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueGetInput = TaskQueueGetInput
+
+/** @deprecated Use `TaskQueueGetOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueGetOutput = TaskQueueGetOutput
+
+/** @deprecated Use `TaskQueueGetOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueueGetOperation<E = never> = TaskQueueGetOperation<E>
+
+/** @deprecated Use `TaskQueueStartInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueStartInput = TaskQueueStartInput
+
+/** @deprecated Use `TaskQueueStartOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueStartOutput = TaskQueueStartOutput
+
+/** @deprecated Use `TaskQueueStartOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueueStartOperation<E = never> = TaskQueueStartOperation<E>
+
+/** @deprecated Use `TaskQueueHeartbeatInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueHeartbeatInput = TaskQueueHeartbeatInput
+
+/** @deprecated Use `TaskQueueHeartbeatOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueHeartbeatOutput = TaskQueueHeartbeatOutput
+
+/** @deprecated Use `TaskQueueHeartbeatOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueueHeartbeatOperation<E = never> = TaskQueueHeartbeatOperation<E>
+
+/** @deprecated Use `TaskQueueStopInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueStopInput = TaskQueueStopInput
+
+/** @deprecated Use `TaskQueueStopOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueStopOutput = TaskQueueStopOutput
+
+/** @deprecated Use `TaskQueueStopOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueueStopOperation<E = never> = TaskQueueStopOperation<E>
+
+/** @deprecated Use `TaskQueueResumeInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueResumeInput = TaskQueueResumeInput
+
+/** @deprecated Use `TaskQueueResumeOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueResumeOutput = TaskQueueResumeOutput
+
+/** @deprecated Use `TaskQueueResumeOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueueResumeOperation<E = never> = TaskQueueResumeOperation<E>
+
+/** @deprecated Use `TaskQueueDeleteInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueDeleteInput = TaskQueueDeleteInput
+
+/** @deprecated Use `TaskQueueDeleteOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueDeleteOutput = TaskQueueDeleteOutput
+
+/** @deprecated Use `TaskQueueDeleteOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueueDeleteOperation<E = never> = TaskQueueDeleteOperation<E>
+
 /** @deprecated Use `ExperimentalMigrationV1StatusOutput`. Removed in the next minor. */
 export type MigrationV1StatusOutput = ExperimentalMigrationV1StatusOutput
 
@@ -3144,6 +3236,7 @@ export interface AppApi<E = never> {
   readonly rpc: RpcApi<E>
   readonly event: EventApi<E>
   readonly pty: PtyApi<E>
+  readonly taskQueue: TaskQueueApi<E>
   readonly shell: ShellApi<E>
   readonly reference: ReferenceApi<E>
   readonly worktree: WorktreeApi<E>

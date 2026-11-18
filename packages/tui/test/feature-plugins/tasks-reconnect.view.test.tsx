@@ -26,8 +26,8 @@ test.each(["success", "failure"] as const)("real reconnected task panel ignores 
       return new Response(null, { status: 401 })
     }
     if (url.pathname === "/api/plugin") connected.resolve()
-    if (url.pathname === "/api/experimental/task-queue") return json({ data: [replacement] })
-    if (url.pathname === `/api/experimental/task-queue/${replacement.id}`) {
+    if (url.pathname === "/api/task-queue") return json({ data: [replacement] })
+    if (url.pathname === `/api/task-queue/${replacement.id}`) {
       // This receipt exists only in the new HTTP detail response, not its list.
       return json({ data: { ...replacement, title: "Replacement detail receipt", time: { created: 1, updated: 2 } } })
     }
@@ -40,10 +40,10 @@ test.each(["success", "failure"] as const)("real reconnected task panel ignores 
       auth: { type: "basic", username: "fixture", password: "late-get-old-only" },
       service: { reconnect: async () => ({ url: server.url.toString(), auth }), restart: async () => {} },
       fetch: (url, request) => {
-        if (!url.pathname.startsWith("/api/experimental/task-queue")) return undefined
+        if (!url.pathname.startsWith("/api/task-queue")) return undefined
         oldRequests.push(`${request.method} ${url.pathname}`)
         if (migrating) return new Response(null, { status: 503 })
-        if (url.pathname === `/api/experimental/task-queue/${previous.id}`) {
+        if (url.pathname === `/api/task-queue/${previous.id}`) {
           requested.resolve()
           return response.promise
         }

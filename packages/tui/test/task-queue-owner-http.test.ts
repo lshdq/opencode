@@ -44,8 +44,8 @@ test.each([
   const b = OpenCode.make({ baseUrl: server.url.toString(), headers: { "x-test-owner": "B" } })
   const timersA = new Set<() => void>()
   const timersB = new Set<() => void>()
-  const ownerA = createTaskQueueOwner(() => a.experimental.taskQueue, (tick) => { timersA.add(tick); return () => { timersA.delete(tick) } })
-  const ownerB = createTaskQueueOwner(() => b.experimental.taskQueue, (tick) => { timersB.add(tick); return () => { timersB.delete(tick) } })
+  const ownerA = createTaskQueueOwner(() => a.taskQueue, (tick) => { timersA.add(tick); return () => { timersA.delete(tick) } })
+  const ownerB = createTaskQueueOwner(() => b.taskQueue, (tick) => { timersB.add(tick); return () => { timersB.delete(tick) } })
   const signal = new AbortController()
   const stream = a.event.subscribe({ signal: signal.signal })[Symbol.asyncIterator]()
   let starting: Promise<TaskQueueInfo> | undefined
@@ -64,7 +64,7 @@ test.each([
       ownerB.observe(event.data)
     }
     await observe("running", 2)
-    await b.experimental.taskQueue.stop({ queueID: info.id, reason: "B stops A before resuming" })
+    await b.taskQueue.stop({ queueID: info.id, reason: "B stops A before resuming" })
     await observe("stopped", 3)
     await ownerB.acquire(info.id, "resume")
     await observe("running", 4)

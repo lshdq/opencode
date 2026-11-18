@@ -58,6 +58,8 @@ test("real tasks keyboard keeps A's stop and session target after buffered B ter
     await app.waitForFrame((frame) => frame.includes("已停止") && frame.includes("A actual stopped"))
     app.mockInput.pressEnter()
     await sourceSignal(wire.navigated)
+    await app.waitForFrame((frame) => frame.includes("批次：A actual stopped"))
+    app.mockInput.pressEscape()
     await app.waitForFrame((frame) => frame.includes("Correct A session") && !frame.includes("A actual stopped"))
     navigation = app.captureCharFrame()
   } finally {

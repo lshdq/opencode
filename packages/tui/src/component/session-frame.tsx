@@ -136,6 +136,8 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
     prompt.current?.focus()
   }
   const focusRightPane = () => {
+    // Background panel mounts and fullscreen changes must yield to modal input.
+    if (dialog.stack.length > 0) return
     setActivePane("right")
     if (activePanel()) {
       panelNode?.focus()
@@ -365,6 +367,7 @@ export function SessionFrame(props: { sessionID: string; verticalTabsWidth: numb
                     onTarget={(node) => {
                       panelNode = node
                       if (node) {
+                        if (item.autoFocus === false && !fullscreen()) return
                         focusRightPane()
                         return
                       }

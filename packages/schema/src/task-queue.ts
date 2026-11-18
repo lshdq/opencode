@@ -76,9 +76,17 @@ export const Info = Schema.Struct({
 
 export interface TaskInput extends Schema.Schema.Type<typeof TaskInput> {}
 export const TaskInput = Schema.Struct({
-  title: Schema.String.check(Schema.isMinLength(1)),
-  prompt: Schema.String.check(Schema.isMinLength(1)),
+  /** Omit to derive a short name from the first non-empty prompt line. */
+  title: Schema.String.check(Schema.isMinLength(1)).pipe(optional),
+  prompt: Schema.String.check(Schema.isPattern(/\S/u)),
 }).annotate({ identifier: "TaskQueue.TaskInput" })
+
+/** Display-only name; the full prompt is stored unchanged. Empty prompts have no name. */
+export function titleFromPrompt(prompt: string) {
+  const line = prompt.split(/\r\n|[\n\r\u2028\u2029]/u).find((line) => line.trim())?.trim() ?? ""
+  const characters = Array.from(line)
+  return characters.length > 80 ? `${characters.slice(0, 79).join("")}…` : line
+}
 
 /** A queue as callers describe it: an ordered task list to run serially in one directory. */
 export const CreateInput = Schema.Struct({

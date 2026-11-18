@@ -1,29 +1,35 @@
-import { Flag } from "@opencode/core/flag"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { AbsolutePath } from "@opencode/core/schema"
 import { TaskQueue } from "@opencode/core/task-queue"
-import { ForbiddenError, InvalidRequestError, LocationNotFoundError, TaskQueueNotFoundError } from "@opencode/protocol/errors"
+import { InvalidRequestError, LocationNotFoundError, TaskQueueNotFoundError } from "@opencode/protocol/errors"
 import type { ListQuery, StopPayload } from "@opencode/protocol/groups/task-queue"
 import { Effect } from "effect"
-import { HttpApiSchema } from "effect/http-api"
+import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
+import { Api } from "../api"
 import { locationErrors } from "../location"
 
-/**
- * `taskQueue.*` in the `server.experimental` group. Every route needs experimental.task_queue in the config of the
- * directory the queue runs in: a queue carries its own directory, so unlike schedules (which follow their Session's
- * location) the flag is read by providing that directory's location services here. Resolve aliases before gating
- * create/list so their config identity matches storage and every ID-based operation.
- */
+export const TaskQueueHandler = HttpApiBuilder.group(Api, "server.taskQueue", (handlers) =>
+  Effect.gen(function* () {
+    const taskQueue = yield* makeTaskQueue
+    return handlers
+      .handle("taskQueue.create", (ctx) => taskQueue.create(ctx.payload))
+      .handle("taskQueue.list", (ctx) => taskQueue.list(ctx.query))
+      .handle("taskQueue.get", (ctx) => taskQueue.get(ctx.params.queueID))
+      .handle("taskQueue.start", (ctx) => taskQueue.start(ctx.params.queueID))
+      .handle("taskQueue.heartbeat", (ctx) => taskQueue.heartbeat(ctx.params.queueID))
+      .handle("taskQueue.stop", (ctx) => taskQueue.stop(ctx.params.queueID, ctx.payload))
+      .handle("taskQueue.resume", (ctx) => taskQueue.resume(ctx.params.queueID))
+      .handle("taskQueue.delete", (ctx) => taskQueue.remove(ctx.params.queueID))
+  }),
+)
+
 export const makeTaskQueue = Effect.gen(function* () {
   const queues = yield* TaskQueue.Service
   const locations = yield* LocationServiceMap.Service
 
-  const allowed = (directory: AbsolutePath) =>
-    Effect.gen(function* () {
-      const flags = yield* Flag.Service
-      if (yield* flags.enabled("task_queue")) return
-      return yield* new ForbiddenError({ message: disabledMessage })
-    }).pipe(
+  // Keep location validation (including non-directory paths) after removing the feature gate.
+  const ensureLocation = (directory: AbsolutePath) =>
+    Effect.void.pipe(
       Effect.provide(locations.get(LocationServiceMap.canonical({ directory }))),
       locationErrors,
     )
@@ -39,25 +45,24 @@ export const makeTaskQueue = Effect.gen(function* () {
       }),
     )
 
-  // A queue whose directory is gone, or whose directory has the flag off, reads as not found, forbidden, or
-  // location-not-found, like a schedule whose Session's location turned the flag off.
+  // ID-based operations still validate the queue's own location, not the caller's current directory.
   const find = (id: TaskQueue.ID) =>
     queues.get(id).pipe(
       Effect.mapError(missingQueue),
-      Effect.tap((info) => allowed(info.directory)),
+      Effect.tap((info) => resolveDirectory(info.directory).pipe(Effect.flatMap(ensureLocation))),
     )
 
   return {
     create: (payload: TaskQueue.CreateInput) =>
       Effect.gen(function* () {
         const directory = yield* resolveDirectory(payload.directory)
-        yield* allowed(directory)
+        yield* ensureLocation(directory)
         return { data: yield* queues.create({ ...payload, directory }).pipe(Effect.mapError(invalid)) }
       }),
     list: (query: ListQuery) =>
       Effect.gen(function* () {
         const directory = yield* resolveDirectory(query.directory)
-        yield* allowed(directory)
+        yield* ensureLocation(directory)
         return { data: yield* queues.list({ directory }) }
       }),
     get: (id: TaskQueue.ID) => find(id).pipe(Effect.map((data) => ({ data }))),
@@ -89,8 +94,6 @@ export const makeTaskQueue = Effect.gen(function* () {
       }),
   }
 })
-
-const disabledMessage = "The task queue is disabled; set experimental.task_queue in config"
 
 function resolveDirectory(directory: AbsolutePath) {
   return TaskQueue.canonicalDirectory(directory).pipe(

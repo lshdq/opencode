@@ -2,6 +2,11 @@
 
 Release notes for OpenCode V2, newest first.
 
+## Unreleased
+
+- Task queues are now always enabled; the deprecated `experimental.task_queue` setting is ignored. HTTP routes move from `/api/experimental/task-queue` to `/api/task-queue`, with `taskQueue.*` operation IDs and `client.taskQueue.*` methods. Deprecated SDK methods and types remain aliases until the next minor, but the old experimental HTTP routes are removed.
+- Task queue items only require prompt content. When `title` is omitted, a short name is derived from the first non-empty line without changing the stored prompt. Existing titles are preserved.
+
 ## v2.2.7 — 2026-11-10
 
 ### Highlights

@@ -1,27 +1,20 @@
 import { TaskQueue } from "@opencode/schema/task-queue"
 import { AbsolutePath } from "@opencode/schema/schema"
 import { Schema } from "effect"
-import { HttpApiEndpoint, HttpApiSchema, OpenApi } from "effect/http-api"
+import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api"
 import {
-  ForbiddenError,
   InvalidRequestError,
   LocationNotFoundError,
   TaskQueueNotFoundError,
 } from "../errors.js"
 
-const EXPERIMENTAL =
-  "Experimental: needs experimental.task_queue in the directory's config and may change without compatibility guarantees."
-const errors = [InvalidRequestError, TaskQueueNotFoundError, ForbiddenError, LocationNotFoundError] as const
+const errors = [InvalidRequestError, TaskQueueNotFoundError, LocationNotFoundError] as const
 const params = { queueID: TaskQueue.ID }
 const annotations = (identifier: string, summary: string, description: string) =>
   OpenApi.annotations({
-    // CamelCase like `experimental.persistentPty.*`: the generated SDK nests one level per identifier segment,
-    // so this spelling is what makes the client surface `client.experimental.taskQueue.*`.
-    identifier: `experimental.taskQueue.${identifier}`,
+    identifier: `taskQueue.${identifier}`,
     summary,
-    description: `${description} ${EXPERIMENTAL}`,
-    // The routes share the `server.experimental` group with the persistent PTY prototype; tag them on their own.
-    transform: (operation) => ({ ...operation, tags: ["experimental"] }),
+    description,
   })
 
 export const ListQuery = Schema.Struct({
@@ -36,12 +29,11 @@ export const StopPayload = Schema.Struct({
 }).annotate({ identifier: "TaskQueue.StopPayload" })
 export type StopPayload = typeof StopPayload.Type
 
-/** Lives in the `server.experimental` group (see `groups/experimental.ts`). */
-export const TaskQueueEndpoints = [
-  HttpApiEndpoint.post("taskQueue.create", "/api/experimental/task-queue", {
+export const TaskQueueGroup = HttpApiGroup.make("server.taskQueue").add(
+  HttpApiEndpoint.post("taskQueue.create", "/api/task-queue", {
     payload: TaskQueue.CreateInput,
     success: Schema.Struct({ data: TaskQueue.Info }),
-    error: [InvalidRequestError, ForbiddenError, LocationNotFoundError],
+    error: [InvalidRequestError, LocationNotFoundError],
   }).annotateMerge(
     annotations(
       "create",
@@ -49,24 +41,24 @@ export const TaskQueueEndpoints = [
       "Create a queue of tasks that run serially and unattended, each task in its own session in the queue's directory.",
     ),
   ),
-  HttpApiEndpoint.get("taskQueue.list", "/api/experimental/task-queue", {
+  HttpApiEndpoint.get("taskQueue.list", "/api/task-queue", {
     query: ListQuery,
     success: Schema.Struct({ data: Schema.Array(TaskQueue.Info) }),
-    error: [ForbiddenError, LocationNotFoundError],
+    error: [LocationNotFoundError],
   }).annotateMerge(annotations("list", "List task queues", "List a directory's queues, oldest first.")),
-  HttpApiEndpoint.get("taskQueue.get", "/api/experimental/task-queue/:queueID", {
+  HttpApiEndpoint.get("taskQueue.get", "/api/task-queue/:queueID", {
     params,
     success: Schema.Struct({ data: TaskQueue.Info }),
     error: errors,
   }).annotateMerge(annotations("get", "Get task queue", "Read one queue with its tasks.")),
-  HttpApiEndpoint.post("taskQueue.start", "/api/experimental/task-queue/:queueID/start", {
+  HttpApiEndpoint.post("taskQueue.start", "/api/task-queue/:queueID/start", {
     params,
     success: Schema.Struct({ data: TaskQueue.Info }),
     error: errors,
   }).annotateMerge(
     annotations("start", "Start task queue", "Start a queued queue: its tasks run one at a time until done or stopped."),
   ),
-  HttpApiEndpoint.post("taskQueue.heartbeat", "/api/experimental/task-queue/:queueID/heartbeat", {
+  HttpApiEndpoint.post("taskQueue.heartbeat", "/api/task-queue/:queueID/heartbeat", {
     params,
     success: Schema.Struct({ data: TaskQueue.Info }),
     error: errors,
@@ -77,7 +69,7 @@ export const TaskQueueEndpoints = [
       "Extend a running queue's owner lease; a lease the owner stops renewing stops the queue like a user stop.",
     ),
   ),
-  HttpApiEndpoint.post("taskQueue.stop", "/api/experimental/task-queue/:queueID/stop", {
+  HttpApiEndpoint.post("taskQueue.stop", "/api/task-queue/:queueID/stop", {
     params,
     payload: StopPayload,
     success: Schema.Struct({ data: TaskQueue.Info }),
@@ -89,7 +81,7 @@ export const TaskQueueEndpoints = [
       "Stop a queue owned by this server and wait for its task tree and background work to stop. The interrupted task keeps its session for a later resume. A non-running queue is returned unchanged.",
     ),
   ),
-  HttpApiEndpoint.post("taskQueue.resume", "/api/experimental/task-queue/:queueID/resume", {
+  HttpApiEndpoint.post("taskQueue.resume", "/api/task-queue/:queueID/resume", {
     params,
     success: Schema.Struct({ data: TaskQueue.Info }),
     error: errors,
@@ -100,11 +92,11 @@ export const TaskQueueEndpoints = [
       "Continue the interrupted and pending tasks of a stopped or interrupted queue without revisiting earlier blocked tasks. Explicitly resuming a done queue retries its blocked and failed tasks in their original sessions; completed tasks are never repeated. Only one batch may run in a canonical directory.",
     ),
   ),
-  HttpApiEndpoint.delete("taskQueue.delete", "/api/experimental/task-queue/:queueID", {
+  HttpApiEndpoint.delete("taskQueue.delete", "/api/task-queue/:queueID", {
     params,
     success: HttpApiSchema.NoContent,
     error: errors,
   }).annotateMerge(
     annotations("delete", "Delete task queue", "Delete a queue and its tasks. A running queue must be stopped first."),
   ),
-] as const
+).annotateMerge(OpenApi.annotations({ title: "taskQueue", description: "Serial task queues." }))

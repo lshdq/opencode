@@ -59,6 +59,7 @@ export const groupNames = {
   "server.event": "event",
   "server.pty": "pty",
   "server.experimental": "experimental",
+  "server.taskQueue": "taskQueue",
   "server.shell": "shell",
   "server.mcp": "mcp",
   "server.reference": "reference",
@@ -73,6 +74,12 @@ export const groupNames = {
 // id, because the URL is what callers depend on and an id can miss its `experimental.` prefix.
 export const clientNamespace = (endpoint: { readonly path: string }) =>
   endpoint.path === "/api/experimental" || endpoint.path.startsWith("/api/experimental/") ? "experimental" : undefined
+
+/** SDK-only compatibility until the next minor; the old experimental HTTP routes are not registered. */
+export const clientPreviousPath = (endpoint: { readonly path: string; readonly identifier: string }) =>
+  endpoint.path === "/api/task-queue" || endpoint.path.startsWith("/api/task-queue/")
+    ? { group: "experimental", path: ["experimental"], clientPath: ["taskQueue", endpoint.identifier.slice("taskQueue.".length)] as const }
+    : undefined
 
 export const promiseOmitEndpoints = new Set([
   "pty.connect",

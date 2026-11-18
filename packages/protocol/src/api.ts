@@ -3,6 +3,7 @@ import { HttpApi, HttpApiGroup, HttpApiMiddleware, OpenApi } from "effect/http-a
 import { SchemaErrorMiddleware } from "./middleware/schema-error.js"
 import { GenerateGroup } from "./groups/generate.js"
 import { ExperimentalGroup } from "./groups/experimental.js"
+import { TaskQueueGroup } from "./groups/task-queue.js"
 import { VoiceGroup } from "./groups/voice.js"
 import { MessageGroup } from "./groups/message.js"
 import { ModelGroup } from "./groups/model.js"
@@ -101,6 +102,7 @@ type ApiGroups<
   | typeof GenerateGroup
   | typeof VoiceGroup
   | typeof ExperimentalGroup
+  | typeof TaskQueueGroup
   | typeof CredentialGroup
   | typeof ProjectGroup
   | LocationGroups<LocationId>
@@ -188,6 +190,7 @@ const makeApiFromGroup = <
     .add(eventGroup)
     .add(makePtyGroup(locationMiddleware))
     .add(ExperimentalGroup)
+    .add(TaskQueueGroup)
     .add(ShellGroup.middleware(locationMiddleware))
     .add(ReferenceGroup.middleware(locationMiddleware))
     .add(WorktreeGroup)

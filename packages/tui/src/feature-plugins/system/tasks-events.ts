@@ -11,7 +11,7 @@ export function createTaskQueueEvents(data: Pick<Plugin.Context["data"], "on">) 
   function panel(event: OpenCodeEvent) {
     // Match the feed's exact SDK resource epoch, including credential refresh.
     // A missing source is not evidence that an event belongs to the live SDK.
-    if (!current || current.client.event.source(event)?.api.experimental.taskQueue !== current.client.api.experimental.taskQueue) return
+    if (!current || current.client.event.source(event)?.api.taskQueue !== current.client.api.taskQueue) return
     return current.panel
   }
   const off = [

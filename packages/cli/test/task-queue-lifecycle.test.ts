@@ -36,7 +36,6 @@ test.each(["stop-release", "kill-owner", "crash-server"] as const)(
       OPENCODE_DISABLE_FFF: "1",
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
         update: "disable",
-        experimental: { task_queue: true },
         model: "fixture/fixture",
         providers: {
           fixture: {
@@ -75,7 +74,7 @@ test.each(["stop-release", "kill-owner", "crash-server"] as const)(
       servers.push(endpoint)
       const client = clientFor(endpoint)
       expect((await client.server.info()).pid).toBe(endpoint.pid)
-      const queue = await client.experimental.taskQueue.create({
+      const queue = await client.taskQueue.create({
         directory: project,
         title: "Private lifecycle",
         tasks: [
@@ -84,7 +83,7 @@ test.each(["stop-release", "kill-owner", "crash-server"] as const)(
           { title: "TQ_LAST", prompt: "Reply OK for TQ_LAST; do not call tools." },
         ],
       })
-      await client.experimental.taskQueue.start({ queueID: queue.id })
+      await client.taskQueue.start({ queueID: queue.id })
       // A real outbound LLM request is held open. Merely seeing start's running response is insufficient.
       await model.wait("TQ_HOLD", 1)
       const running = await queueState(
@@ -118,7 +117,7 @@ test.each(["stop-release", "kill-owner", "crash-server"] as const)(
           .every((row) => row.time_suspended !== null)).toBe(true)
       }
       if (mode === "stop-release") {
-        const stopped = await client.experimental.taskQueue.stop({ queueID: queue.id, reason: "owner exited normally" })
+        const stopped = await client.taskQueue.stop({ queueID: queue.id, reason: "owner exited normally" })
         expect(stopped.status).toBe("stopped")
         expect(stopped.tasks[1]!.status).toBe("interrupted")
         owner.stdin.end()
@@ -191,9 +190,9 @@ test.each(["stop-release", "kill-owner", "crash-server"] as const)(
       expect((await reopened.session.active())[sessionID]).toBeUndefined()
       expect(claims(env.OPENCODE_DB, [sessionID, ...descendants]).every((row) => row.resume_attempts === 0)).toBe(true)
 
-      await reopened.experimental.taskQueue.resume({ queueID: queue.id })
+      await reopened.taskQueue.resume({ queueID: queue.id })
       await model.wait("TQ_HOLD", before.TQ_HOLD + 1)
-      expect((await reopened.experimental.taskQueue.get({ queueID: queue.id })).tasks[1]!.sessionID).toBe(sessionID)
+      expect((await reopened.taskQueue.get({ queueID: queue.id })).tasks[1]!.sessionID).toBe(sessionID)
       model.release("TQ_HOLD")
       const done = await queueState(reopened, queue.id, (value) => value.status === "done")
       expect(done.tasks.map((task) => task.status)).toEqual(["completed", "completed", "completed"])
@@ -319,9 +318,9 @@ function clientFor(info: Info) {
   return OpenCode.make({ baseUrl: info.url, headers: headers(info) })
 }
 async function queueState(client: OpenCodeClient, id: string, condition: (queue: TaskQueueInfo) => boolean) {
-  const result = { queue: await client.experimental.taskQueue.get({ queueID: id }) }
+  const result = { queue: await client.taskQueue.get({ queueID: id }) }
   await until(async () => {
-    result.queue = await client.experimental.taskQueue.get({ queueID: id })
+    result.queue = await client.taskQueue.get({ queueID: id })
     return condition(result.queue)
   }, 20_000, "queue state")
   return result.queue

@@ -18,6 +18,7 @@ import { ServerHandler } from "./handlers/server"
 import { DebugHandler } from "./handlers/debug"
 import { PtyHandler } from "./handlers/pty"
 import { PersistentPtyHandler } from "./handlers/persistent-pty"
+import { TaskQueueHandler } from "./handlers/task-queue"
 import { ShellHandler } from "./handlers/shell"
 import { ReferenceHandler } from "./handlers/reference"
 import { LocationHandler } from "./handlers/location"
@@ -61,6 +62,7 @@ export const handlers = Layer.mergeAll(
   EventHandler.pipe(Layer.provide(EventFeed.layer)),
   PtyHandler,
   PersistentPtyHandler,
+  TaskQueueHandler,
   ShellHandler,
   ReferenceHandler,
   WorktreeHandler,

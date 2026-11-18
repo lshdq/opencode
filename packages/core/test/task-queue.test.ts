@@ -28,13 +28,13 @@ import { Session } from "@opencode/core/session"
 import { SessionErrors } from "@opencode/core/session/error"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionMessage } from "@opencode/core/session/message"
-import { SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
+import { SessionInboxTable, SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
 import { SessionProjector } from "@opencode/core/session/projector"
 import { SessionStore } from "@opencode/core/session/store"
 import { Skill } from "@opencode/core/skill"
 import { AbsolutePath } from "@opencode/core/schema"
 import { TaskQueue } from "@opencode/core/task-queue"
-import { TaskQueueTable } from "@opencode/core/task-queue/sql"
+import { TaskQueueTable, TaskQueueTaskTable } from "@opencode/core/task-queue/sql"
 import { TaskQueueOwnership } from "@opencode/core/task-queue/ownership"
 import { Shell } from "@opencode/core/shell"
 import { Model } from "@opencode/schema/model"
@@ -283,6 +283,51 @@ const runningTaskSession = (queues: TaskQueue.Interface, queueID: TaskQueue.ID) 
   )
 
 describe("TaskQueue", () => {
+  it.live("stores generated names without rewriting prompts or explicit historical titles", () =>
+    withQueueDirectory((directory) => Effect.gen(function* () {
+      const queues = yield* setup()
+      const prompt = "\r\n \t\r\n  修复接口 😀  \r\n保留完整内容和空白  "
+      const queue = yield* queues.create({ directory, tasks: [{ prompt }, { title: "Existing title", prompt }] })
+      expect(queue.tasks.map((task) => ({ title: task.title, prompt: task.prompt }))).toEqual([
+        { title: "修复接口 😀", prompt }, { title: "Existing title", prompt },
+      ])
+      expect((yield* queues.get(queue.id)).tasks).toEqual(queue.tasks)
+      for (const tasks of [[{ prompt: " \t\r\n　" }], [{ prompt: "valid" }, { title: "Old", prompt: "\n " }]] as const) {
+        const error = yield* queues.create({ directory, tasks }).pipe(Effect.flip)
+        expect(error).toMatchObject({ _tag: "TaskQueue.InvalidError", reason: "A task needs non-blank content" })
+      }
+      expect(yield* queues.list({ directory })).toEqual([queue])
+    })),
+  )
+
+  // TC-002/005: an existing stored title is not input to the new naming policy, even after rebuilding the service.
+  it.live("preserves a persisted legacy title across service reconstruction and same-session resume", () =>
+    withQueueDirectory((directory) => Effect.gen(function* () {
+      const queues = yield* setup()
+      executionState.mode = "hang"
+      const prompt = "\n不同于历史名称的首行\r\n完整任务内容  "
+      const queue = yield* queues.create({ directory, tasks: [{ prompt }] })
+      const title = `  历史标题${"😀".repeat(81)}  `
+      const database = yield* Database.Service
+      // Seed a pre-existing record independently of create's current title normalization.
+      yield* database.db.update(TaskQueueTaskTable).set({ title }).where(eq(TaskQueueTaskTable.queue_id, queue.id)).run().pipe(Effect.orDie)
+      const reopened = yield* anotherService()
+      expect((yield* reopened.get(queue.id)).tasks[0]).toMatchObject({ title, prompt })
+      expect((yield* reopened.list({ directory }))[0]?.tasks[0]).toMatchObject({ title, prompt })
+      yield* reopened.start(queue.id)
+      const running = yield* runningTaskSession(reopened, queue.id)
+      const sessions = yield* Session.Service
+      expect((yield* sessions.get(running.sessionID)).title).toBe(title)
+      yield* reopened.stop(queue.id)
+      const resumed = yield* anotherService()
+      yield* resumed.resume(queue.id)
+      expect((yield* runningTaskSession(resumed, queue.id)).sessionID).toBe(running.sessionID)
+      expect((yield* resumed.get(queue.id)).tasks[0]).toMatchObject({ title, prompt, sessionID: running.sessionID })
+      expect((yield* database.db.select().from(TaskQueueTaskTable).where(eq(TaskQueueTaskTable.queue_id, queue.id)).get())?.title).toBe(title)
+      yield* resumed.stop(queue.id)
+    })),
+  )
+
   it.effect("resuming a stopped forward scan does not revisit blocked tasks until a later explicit done resume", () =>
     withQueueDirectory((directory) => Effect.gen(function* () {
       const queues = yield* setup()
@@ -439,27 +484,401 @@ describe("TaskQueue", () => {
     })),
   )
 
-  it.effect("directory admission is atomic across two independent SQLite connections", () =>
-    withQueueDirectory((directory) => Effect.gen(function* () {
+  // R-API-01: a durable path can be replaced between create/stop and admission, without any race.
+  for (const action of ["start", "resume"] as const) {
+    it.live(`rejects ${action} when the stored directory has become a junction to another queue's directory`, () =>
+      withQueueDirectory((root) => Effect.gen(function* () {
+        const queues = yield* setup()
+        executionState.mode = "hang"
+        const directory = AbsolutePath.make(path.join(root, "original"))
+        const target = AbsolutePath.make(path.join(root, "target"))
+        yield* Effect.promise(() => Promise.all([fs.mkdir(directory), fs.mkdir(target)]))
+        const queue = yield* queues.create({ directory, tasks: threeTasks })
+        if (action === "resume") {
+          yield* queues.start(queue.id)
+          yield* runningTaskSession(queues, queue.id)
+          yield* queues.stop(queue.id)
+        }
+        const before = yield* queues.get(queue.id)
+        const database = yield* Database.Service
+        const stored = yield* database.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, queue.id)).get()
+        yield* Effect.promise(() => fs.rmdir(directory))
+        yield* Effect.acquireRelease(
+          Effect.promise(() => fs.symlink(target, directory, process.platform === "win32" ? "junction" : "dir")),
+          // This fixture owns this exact link; unlink never traverses its target.
+          () => Effect.promise(() => fs.unlink(directory)),
+        )
+        const other = yield* queues.create({ directory: target, tasks: threeTasks })
+        yield* queues.start(other.id)
+        const running = yield* runningTaskSession(queues, other.id)
+        expect(yield* TaskQueue.canonicalDirectory(directory)).toBe(other.directory)
+        const sessions = yield* Session.Service
+        const tasks = yield* database.db.select().from(TaskQueueTaskTable).all()
+        const sessionRows = yield* database.db.select().from(SessionTable).all()
+        const inboxRows = yield* database.db.select().from(SessionInboxTable).all()
+        const inboxes = yield* Effect.forEach(sessionRows, (row) => sessions.inbox(row.id))
+        const resumes = [...executionState.resumes]
+        const reopened = yield* anotherService()
+        expect(yield* reopened[action](queue.id).pipe(Effect.flip)).toMatchObject({
+          _tag: "TaskQueue.InvalidError",
+          reason: "The queue directory now resolves to a different location; restore the original directory or create a new queue",
+        })
+        expect(yield* reopened.get(queue.id)).toEqual(before)
+        expect(yield* database.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, queue.id)).get()).toEqual(stored)
+        expect(yield* database.db.select().from(TaskQueueTaskTable).all()).toEqual(tasks)
+        expect(yield* database.db.select().from(SessionTable).all()).toEqual(sessionRows)
+        expect(yield* database.db.select().from(SessionInboxTable).all()).toEqual(inboxRows)
+        expect(yield* Effect.forEach(sessionRows, (row) => sessions.inbox(row.id))).toEqual(inboxes)
+        expect(executionState.resumes).toEqual(resumes)
+        expect([...hanging.keys()]).toEqual([running.sessionID])
+        expect((yield* queues.list({ directory: target })).map((item) => item.id)).toEqual([other.id])
+        expect(before.tasks.slice(action === "resume" ? 1 : 0).every((task) => !task.sessionID)).toBe(true)
+        yield* queues.stop(other.id)
+      })),
+    )
+
+    it.live(`rejects ${action} when the stored directory is missing or replaced by a file without changing durable state`, () =>
+      withQueueDirectory((root) => Effect.gen(function* () {
+        const queues = yield* setup()
+        executionState.mode = "hang"
+        const directory = AbsolutePath.make(path.join(root, "original"))
+        yield* Effect.promise(() => fs.mkdir(directory))
+        const queue = yield* queues.create({ directory, tasks: threeTasks })
+        if (action === "resume") {
+          yield* queues.start(queue.id)
+          yield* runningTaskSession(queues, queue.id)
+          yield* queues.stop(queue.id)
+        }
+        const before = yield* queues.get(queue.id)
+        const database = yield* Database.Service
+        const stored = yield* database.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, queue.id)).get()
+        const tasks = yield* database.db.select().from(TaskQueueTaskTable).all()
+        const sessions = yield* database.db.select().from(SessionTable).all()
+        const inboxes = yield* database.db.select().from(SessionInboxTable).all()
+        const resumes = [...executionState.resumes]
+        yield* Effect.promise(() => fs.rmdir(directory))
+        for (const file of [false, true]) {
+          if (file) yield* Effect.promise(() => fs.writeFile(directory, "not a directory"))
+          expect(yield* queues[action](queue.id).pipe(Effect.flip)).toMatchObject({
+            _tag: "TaskQueue.InvalidError", reason: "The queue directory does not exist or is not a directory",
+          })
+          expect(yield* queues.get(queue.id)).toEqual(before)
+          expect(yield* database.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, queue.id)).get()).toEqual(stored)
+          expect(yield* database.db.select().from(TaskQueueTaskTable).all()).toEqual(tasks)
+          expect(yield* database.db.select().from(SessionTable).all()).toEqual(sessions)
+          expect(yield* database.db.select().from(SessionInboxTable).all()).toEqual(inboxes)
+          expect(executionState.resumes).toEqual(resumes)
+          expect(hanging.size).toBe(0)
+        }
+      })),
+    )
+  }
+
+  // TC-008: done-resume has its own failed/blocked reset writes; refusal must precede those too.
+  it.live("rejects a finished batch's retry after directory drift without resetting failed or blocked tasks", () =>
+    withQueueDirectory((root) => Effect.gen(function* () {
+      const queues = yield* setup()
+      executionState.mode = "fail-first"
+      judge = (input) => Effect.succeed(input.task.position === 2
+        ? { verdict: "blocked", reason: "approval missing" }
+        : { verdict: "done", reason: "finished" })
+      const directory = AbsolutePath.make(path.join(root, "original"))
+      const target = AbsolutePath.make(path.join(root, "target"))
+      yield* Effect.promise(() => Promise.all([fs.mkdir(directory), fs.mkdir(target)]))
+      const queue = yield* queues.create({ directory, tasks: threeTasks })
+      yield* queues.start(queue.id)
+      const before = yield* eventually(queues.get(queue.id), (info) => info.status === "done")
+      expect(before.tasks.map((task) => task.status)).toEqual(["failed", "blocked", "completed"])
+      yield* Effect.promise(() => fs.rmdir(directory))
+      yield* Effect.acquireRelease(
+        Effect.promise(() => fs.symlink(target, directory, process.platform === "win32" ? "junction" : "dir")),
+        () => Effect.promise(() => fs.unlink(directory)),
+      )
+      executionState.mode = "hang"
+      const other = yield* queues.create({ directory: target, tasks: threeTasks })
+      yield* queues.start(other.id)
+      const running = yield* runningTaskSession(queues, other.id)
+      const database = yield* Database.Service
+      const rows = yield* database.db.select().from(TaskQueueTable).all()
+      const tasks = yield* database.db.select().from(TaskQueueTaskTable).all()
+      const sessions = yield* database.db.select().from(SessionTable).all()
+      const inboxes = yield* database.db.select().from(SessionInboxTable).all()
+      const resumes = [...executionState.resumes]
+      const reopened = yield* anotherService()
+      expect(yield* reopened.resume(queue.id).pipe(Effect.flip)).toMatchObject({
+        _tag: "TaskQueue.InvalidError",
+        reason: "The queue directory now resolves to a different location; restore the original directory or create a new queue",
+      })
+      expect(yield* reopened.get(queue.id)).toEqual(before)
+      expect(yield* database.db.select().from(TaskQueueTable).all()).toEqual(rows)
+      expect(yield* database.db.select().from(TaskQueueTaskTable).all()).toEqual(tasks)
+      expect(yield* database.db.select().from(SessionTable).all()).toEqual(sessions)
+      expect(yield* database.db.select().from(SessionInboxTable).all()).toEqual(inboxes)
+      expect(executionState.resumes).toEqual(resumes)
+      expect([...hanging.keys()]).toEqual([running.sessionID])
+      yield* queues.stop(other.id)
+    })),
+  )
+
+  for (const [name, renamed] of [["project", "PROJECT"], ["project-Ä", "project-ä"], ["项目", "项目"]] as const) {
+  it.live(`admits canonicalized junction aliases and case-only directory renames for ${name} without migrating stored paths or losing exclusion`, () =>
+    withQueueDirectory((root) => Effect.gen(function* () {
+      const queues = yield* setup()
+      executionState.mode = "hang"
+      const directory = AbsolutePath.make(path.join(root, name))
+      const alias = path.join(root, "alias")
+      yield* Effect.promise(() => fs.mkdir(directory))
+      yield* Effect.acquireRelease(
+        Effect.promise(() => fs.symlink(directory, alias, process.platform === "win32" ? "junction" : "dir")),
+        () => Effect.promise(() => fs.unlink(alias)),
+      )
+      const queue = yield* queues.create({ directory: AbsolutePath.make(alias + "/./"), tasks: threeTasks })
+      expect(queue.directory).toBe(directory)
+      if (process.platform === "win32" && name !== renamed) {
+        yield* Effect.promise(() => fs.rename(directory, path.join(root, renamed)))
+        // Exercise admission's case equivalence, not just create's realpath normalization.
+        const current = yield* TaskQueue.canonicalDirectory(queue.directory)
+        expect(current).not.toBe(queue.directory)
+        expect(current.toLowerCase()).toBe(queue.directory.toLowerCase())
+      }
+      const other = yield* queues.create({
+        directory: AbsolutePath.make(process.platform === "win32" ? alias.toUpperCase() : alias + "/./"), tasks: threeTasks,
+      })
+      for (const input of [directory, other.directory])
+        expect(new Set((yield* queues.list({ directory: input })).map((item) => item.id))).toEqual(new Set([queue.id, other.id]))
+      yield* queues.start(queue.id)
+      const running = yield* runningTaskSession(queues, queue.id)
+      expect(yield* queues.start(other.id).pipe(Effect.flip)).toMatchObject({ _tag: "TaskQueue.InvalidError" })
+      expect([...hanging.keys()]).toEqual([running.sessionID])
+      yield* queues.stop(queue.id)
+      yield* queues.start(other.id)
+      const otherRunning = yield* runningTaskSession(queues, other.id)
+      expect(yield* queues.resume(queue.id).pipe(Effect.flip)).toMatchObject({ _tag: "TaskQueue.InvalidError" })
+      expect([...hanging.keys()]).toEqual([otherRunning.sessionID])
+      yield* queues.stop(other.id)
+      yield* queues.resume(queue.id)
+      expect((yield* runningTaskSession(queues, queue.id)).sessionID).toBe(running.sessionID)
+      const sessions = yield* Session.Service
+      expect((yield* queues.get(queue.id)).directory).toBe(queue.directory)
+      expect((yield* sessions.get(running.sessionID)).location.directory).toBe(queue.directory)
+      const database = yield* Database.Service
+      expect((yield* database.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, queue.id)).get())?.directory).toBe(queue.directory)
+      expect((yield* database.db.select().from(SessionTable).where(eq(SessionTable.id, running.sessionID)).get())?.directory).toBe(queue.directory)
+      yield* queues.stop(queue.id)
+    })),
+  )
+  }
+
+  it.live("keeps Unicode case variants exclusive on Windows and independent on POSIX", () =>
+    withQueueDirectory((root) => Effect.gen(function* () {
+      const queues = yield* setup()
+      executionState.mode = "hang"
+      const directory = AbsolutePath.make(path.join(root, "project-Ä"))
+      const renamed = AbsolutePath.make(path.join(root, "project-ä"))
+      yield* Effect.promise(() => fs.mkdir(directory))
+      const first = yield* queues.create({ directory, tasks: threeTasks })
+      yield* Effect.promise(() => process.platform === "win32" ? fs.rename(directory, renamed) : fs.mkdir(renamed))
+      const second = yield* queues.create({ directory: renamed, tasks: threeTasks })
+      yield* queues.start(first.id)
+      const running = yield* runningTaskSession(queues, first.id)
+      if (process.platform === "win32") {
+        expect(yield* queues.start(second.id).pipe(Effect.flip)).toMatchObject({ _tag: "TaskQueue.InvalidError" })
+        expect([...hanging.keys()]).toEqual([running.sessionID])
+        for (const input of [directory, renamed])
+          expect(new Set((yield* queues.list({ directory: input })).map((queue) => queue.id))).toEqual(new Set([first.id, second.id]))
+      }
+      if (process.platform !== "win32") {
+        yield* queues.start(second.id)
+        const other = yield* runningTaskSession(queues, second.id)
+        expect(new Set(hanging.keys())).toEqual(new Set([running.sessionID, other.sessionID]))
+        expect((yield* queues.list({ directory })).map((queue) => queue.id)).toEqual([first.id])
+        expect((yield* queues.list({ directory: renamed })).map((queue) => queue.id)).toEqual([second.id])
+        yield* queues.stop(second.id)
+      }
+      yield* queues.stop(first.id)
+      expect(hanging.size).toBe(0)
+    })),
+  )
+
+  it.live("preserves Unicode directory and Sessions on done-resume and rejects occupied retries before resetting tasks", () =>
+    withQueueDirectory((root) => Effect.gen(function* () {
+      const queues = yield* setup()
+      executionState.mode = "fail-first"
+      judge = (input) => Effect.succeed(input.task.position === 2
+        ? { verdict: "blocked", reason: "approval missing" }
+        : { verdict: "done", reason: "finished" })
+      const directory = AbsolutePath.make(path.join(root, "project-Ä"))
+      yield* Effect.promise(() => fs.mkdir(directory))
+      const queue = yield* queues.create({ directory, tasks: threeTasks })
+      if (process.platform === "win32") yield* Effect.promise(() => fs.rename(directory, path.join(root, "project-ä")))
+      yield* queues.start(queue.id)
+      const done = yield* eventually(queues.get(queue.id), (info) => info.status === "done")
+      expect(done.tasks.map((task) => task.status)).toEqual(["failed", "blocked", "completed"])
+      executionState.mode = "hang"
+      const other = yield* queues.create({ directory, tasks: threeTasks })
+      yield* queues.start(other.id)
+      const running = yield* runningTaskSession(queues, other.id)
+      const database = yield* Database.Service
+      const rows = yield* database.db.select().from(TaskQueueTable).all()
+      const before = yield* database.db.select().from(TaskQueueTaskTable).all()
+      const sessionRows = yield* database.db.select().from(SessionTable).all()
+      const inboxes = yield* database.db.select().from(SessionInboxTable).all()
+      const resumes = [...executionState.resumes]
+      expect(yield* queues.resume(queue.id).pipe(Effect.flip)).toMatchObject({ _tag: "TaskQueue.InvalidError" })
+      expect(yield* queues.get(queue.id)).toEqual(done)
+      expect(yield* database.db.select().from(TaskQueueTable).all()).toEqual(rows)
+      expect(yield* database.db.select().from(TaskQueueTaskTable).all()).toEqual(before)
+      expect(yield* database.db.select().from(SessionTable).all()).toEqual(sessionRows)
+      expect(yield* database.db.select().from(SessionInboxTable).all()).toEqual(inboxes)
+      expect(executionState.resumes).toEqual(resumes)
+      expect([...hanging.keys()]).toEqual([running.sessionID])
+      yield* queues.stop(other.id)
+      executionState.mode = "succeed"
+      judge = () => Effect.succeed({ verdict: "done", reason: "retry finished" })
+      yield* queues.resume(queue.id)
+      const resumed = yield* eventually(queues.get(queue.id), (info) => info.status === "done")
+      expect(resumed.tasks.map((task) => task.status)).toEqual(["completed", "completed", "completed"])
+      expect(resumed.tasks.map((task) => task.sessionID)).toEqual(done.tasks.map((task) => task.sessionID))
+      expect(resumed.directory).toBe(queue.directory)
+      const sessions = yield* Session.Service
+      for (const task of resumed.tasks) {
+        if (!task.sessionID) return yield* Effect.die("the retried task lost its Session")
+        expect((yield* sessions.get(task.sessionID)).location.directory).toBe(queue.directory)
+      }
+      expect((yield* database.db.select().from(SessionTable).all()).map((row) => ({ id: row.id, directory: row.directory })))
+        .toEqual(sessionRows.map((row) => ({ id: row.id, directory: row.directory })))
+    })),
+  )
+
+  for (const action of ["stop", "shutdown"] as const) {
+    it.live(`${action} still cleans up already running work after its stored directory becomes a junction`, () =>
+      withQueueDirectory((root) => Effect.gen(function* () {
+        yield* setup()
+        executionState.mode = "hang"
+        const scope = yield* Scope.make()
+        yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+        const queues = yield* anotherService().pipe(Scope.provide(scope))
+        const directory = AbsolutePath.make(path.join(root, "original"))
+        const target = path.join(root, "target")
+        yield* Effect.promise(() => Promise.all([fs.mkdir(directory), fs.mkdir(target)]))
+        const queue = yield* queues.create({ directory, tasks: threeTasks })
+        yield* queues.start(queue.id)
+        const running = yield* runningTaskSession(queues, queue.id)
+        yield* Effect.promise(() => fs.rmdir(directory))
+        yield* Effect.acquireRelease(
+          Effect.promise(() => fs.symlink(target, directory, process.platform === "win32" ? "junction" : "dir")),
+          () => Effect.promise(() => fs.unlink(directory)),
+        )
+        expect((yield* queues.get(queue.id)).status).toBe("running")
+        yield* queues.heartbeat(queue.id)
+        if (action === "stop") yield* queues.stop(queue.id)
+        if (action === "shutdown") yield* Scope.close(scope, Exit.void)
+        const stopped = yield* queues.get(queue.id)
+        expect(stopped).toMatchObject({
+          status: "stopped", directory: queue.directory,
+          reason: action === "stop" ? "stopped by the user" : "server stopped",
+        })
+        expect(stopped.tasks.map((task) => task.status)).toEqual(["interrupted", "pending", "pending"])
+        expect(stopped.tasks[0]?.sessionID).toBe(running.sessionID)
+        expect(stopped.tasks.slice(1).every((task) => !task.sessionID)).toBe(true)
+        expect(executionState.interrupts).toEqual([running.sessionID])
+        expect(hanging.size).toBe(0)
+      })),
+    )
+  }
+
+  for (const name of ["project", "project-Ä"] as const) {
+  it.live(`directory admission is atomic across two independent SQLite connections for ${name}`, () =>
+    withQueueDirectory((root) => Effect.gen(function* () {
       yield* setup()
       executionState.mode = "hang"
-      const databaseNode = Database.configured({ path: directory + "/queues.sqlite" })
+      const directory = AbsolutePath.make(path.join(root, name))
+      yield* Effect.promise(() => fs.mkdir(directory))
+      const databaseNode = Database.configured({ path: root + "/queues.sqlite" })
       const firstDB = Context.get(yield* Layer.build(AppNodeBuilder.build(databaseNode).pipe(Layer.fresh)), Database.Service)
       const secondDB = Context.get(yield* Layer.build(AppNodeBuilder.build(databaseNode).pipe(Layer.fresh)), Database.Service)
+      expect(firstDB.db.$client).not.toBe(secondDB.db.$client)
       const first = yield* anotherService(undefined, firstDB)
       const second = yield* anotherService(undefined, secondDB)
       const a = yield* first.create({ directory, tasks: threeTasks })
+      if (process.platform === "win32") yield* Effect.promise(() => fs.rename(directory, path.join(root, name === "project" ? "PROJECT" : "project-ä")))
       const b = yield* second.create({ directory: AbsolutePath.make(process.platform === "win32" ? directory.toUpperCase() : directory + "/./"), tasks: threeTasks })
+      const queuedRows = yield* firstDB.db.select().from(TaskQueueTable).all()
+      const queuedTasks = yield* firstDB.db.select().from(TaskQueueTaskTable).all()
+      const sessionDatabase = yield* Database.Service
+      // Queue storage uses the two file connections; the shared Session service owns these other two tables.
+      const snapshot = Effect.all([
+        firstDB.db.select().from(TaskQueueTable).orderBy(TaskQueueTable.id).all(),
+        secondDB.db.select().from(TaskQueueTaskTable).orderBy(TaskQueueTaskTable.id).all(),
+        sessionDatabase.db.select().from(SessionTable).orderBy(SessionTable.id).all(),
+        sessionDatabase.db.select().from(SessionInboxTable).orderBy(SessionInboxTable.id).all(),
+      ])
       const results = yield* Effect.all([first.start(a.id).pipe(Effect.result), second.start(b.id).pipe(Effect.result)], { concurrency: "unbounded" })
       expect(results.filter((result) => result._tag === "Success")).toHaveLength(1)
       expect((yield* first.list()).filter((queue) => queue.status === "running")).toHaveLength(1)
       const winner = results[0]?._tag === "Success" ? { queues: first, queue: a } : { queues: second, queue: b }
+      const loser = results[0]?._tag === "Success" ? { queues: second, queue: b } : { queues: first, queue: a }
+      const running = yield* runningTaskSession(winner.queues, winner.queue.id)
+      expect([...hanging.keys()]).toEqual([running.sessionID])
+      expect((yield* firstDB.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, loser.queue.id)).get()))
+        .toEqual(queuedRows.find((row) => row.id === loser.queue.id))
+      expect(yield* firstDB.db.select().from(TaskQueueTaskTable).where(eq(TaskQueueTaskTable.queue_id, loser.queue.id)).all())
+        .toEqual(queuedTasks.filter((row) => row.queue_id === loser.queue.id))
+      const beforeStartRefusal = yield* snapshot
+      const startResumes = [...executionState.resumes]
+      expect(yield* loser.queues.start(loser.queue.id).pipe(Effect.flip)).toMatchObject({ _tag: "TaskQueue.InvalidError" })
+      expect(yield* snapshot).toEqual(beforeStartRefusal)
+      expect(executionState.resumes).toEqual(startResumes)
+      for (const input of [a.directory, b.directory])
+        expect(new Set((yield* second.list({ directory: input })).map((queue) => queue.id))).toEqual(new Set([a.id, b.id]))
+      expect((yield* firstDB.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, a.id)).get())?.directory).toBe(a.directory)
+      expect((yield* secondDB.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, b.id)).get())?.directory).toBe(b.directory)
       // A newly built service on another connection must neither steal nor interrupt this live owner.
       yield* anotherService(undefined, secondDB)
       expect((yield* first.get(winner.queue.id)).status).toBe("running")
       yield* winner.queues.stop(winner.queue.id)
+      yield* loser.queues.start(loser.queue.id)
+      const previous = yield* runningTaskSession(loser.queues, loser.queue.id)
+      yield* loser.queues.stop(loser.queue.id)
+      const stoppedRows = yield* firstDB.db.select().from(TaskQueueTable).all()
+      const stoppedTasks = yield* firstDB.db.select().from(TaskQueueTaskTable).all()
+      const sessionDirectories = (yield* sessionDatabase.db.select().from(SessionTable).all()).map((row) => ({ id: row.id, directory: row.directory }))
+      const resumed = yield* Effect.all([first.resume(a.id).pipe(Effect.result), second.resume(b.id).pipe(Effect.result)], { concurrency: "unbounded" })
+      expect(resumed.filter((result) => result._tag === "Success")).toHaveLength(1)
+      const owner = resumed[0]?._tag === "Success" ? { queues: first, queue: a } : { queues: second, queue: b }
+      const refused = resumed[0]?._tag === "Success" ? { queues: second, queue: b } : { queues: first, queue: a }
+      const current = yield* runningTaskSession(owner.queues, owner.queue.id)
+      expect(current.sessionID).toBe(owner.queue.id === winner.queue.id ? running.sessionID : previous.sessionID)
+      expect([...hanging.keys()]).toEqual([current.sessionID])
+      expect(yield* firstDB.db.select().from(TaskQueueTable).where(eq(TaskQueueTable.id, refused.queue.id)).get())
+        .toEqual(stoppedRows.find((row) => row.id === refused.queue.id))
+      expect(yield* firstDB.db.select().from(TaskQueueTaskTable).where(eq(TaskQueueTaskTable.queue_id, refused.queue.id)).all())
+        .toEqual(stoppedTasks.filter((row) => row.queue_id === refused.queue.id))
+      const beforeResumeRefusal = yield* snapshot
+      const resumeResumes = [...executionState.resumes]
+      expect(yield* refused.queues.resume(refused.queue.id).pipe(Effect.flip)).toMatchObject({ _tag: "TaskQueue.InvalidError" })
+      expect(yield* snapshot).toEqual(beforeResumeRefusal)
+      expect(executionState.resumes).toEqual(resumeResumes)
+      expect((yield* sessionDatabase.db.select().from(SessionTable).all()).map((row) => ({ id: row.id, directory: row.directory })))
+        .toEqual(sessionDirectories)
+      // A similar prefix is a genuinely different directory, not another spelling of the occupied one.
+      const independentDirectory = AbsolutePath.make(path.join(root, name + "-other"))
+      yield* Effect.promise(() => fs.mkdir(independentDirectory))
+      const independent = yield* refused.queues.create({ directory: independentDirectory, tasks: threeTasks })
+      yield* refused.queues.start(independent.id)
+      const parallel = yield* runningTaskSession(refused.queues, independent.id)
+      expect(new Set(hanging.keys())).toEqual(new Set([current.sessionID, parallel.sessionID]))
+      expect((yield* second.list()).filter((queue) => queue.status === "running")).toHaveLength(2)
+      expect((yield* first.list({ directory: independentDirectory })).map((queue) => queue.id)).toEqual([independent.id])
+      for (const input of [a.directory, b.directory])
+        expect(new Set((yield* second.list({ directory: input })).map((queue) => queue.id))).toEqual(new Set([a.id, b.id]))
+      yield* refused.queues.stop(independent.id)
+      expect([...hanging.keys()]).toEqual([current.sessionID])
+      yield* owner.queues.stop(owner.queue.id)
+      expect(hanging.size).toBe(0)
     })),
   )
+  }
 
   it.effect("service scope shutdown stops its owned batch and leaves ordinary Session ownership untouched", () =>
     withQueueDirectory((directory) => Effect.gen(function* () {

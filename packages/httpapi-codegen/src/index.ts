@@ -36,11 +36,12 @@ export type Contract = {
   readonly aliases?: ReadonlyArray<Alias>
 }
 
-/** A namespaced endpoint's pre-namespace client path and group, kept as a deprecated alias of its new location. */
+/** An endpoint's previous client path and group, kept as a deprecated alias of its new location. */
 export type Alias = {
   readonly from: ReadonlyArray<string>
   readonly to: ReadonlyArray<string>
   readonly fromGroup: string
+  readonly fromClientPath?: ReadonlyArray<string>
   readonly group: Group
   readonly endpoint: Endpoint
 }
@@ -124,16 +125,25 @@ export function compile<Id extends string, Groups extends HttpApiGroup.Constrain
      */
     readonly namespace?: (endpoint: HttpApiEndpoint.Top) => string | undefined
     /**
-     * Keeps each namespaced endpoint's pre-namespace client path and generated type names as deprecated aliases of
-     * the namespaced ones, so moving an endpoint into a namespace does not break callers.
+     * Keeps pre-namespace paths, or explicit previousClient paths, and generated type names as deprecated aliases.
      */
     readonly aliases?: boolean
+    /** Previous shipped client location, for moves not inferred by adding a namespace (for example graduation). */
+    readonly previousClient?: (endpoint: HttpApiEndpoint.Top) => {
+      readonly group: string
+      readonly path: ReadonlyArray<string>
+      readonly clientPath: readonly [string, ...Array<string>]
+    } | undefined
   },
 ): Contract {
   const endpoints: Array<Endpoint> = []
   const portable = new Map<SchemaAST.AST, boolean>()
-  // Where each namespaced endpoint would sit without its namespace.
-  const unnamespaced = new Map<Endpoint, { readonly group: string; readonly path: ReadonlyArray<string> }>()
+  // Previous shipped client locations, inferred from namespaces or explicitly supplied for other moves.
+  const previousClients = new Map<Endpoint, {
+    readonly group: string
+    readonly path: ReadonlyArray<string>
+    readonly clientPath: ReadonlyArray<string>
+  }>()
 
   HttpApi.reflect(api, {
     onGroup() {},
@@ -258,8 +268,15 @@ export function compile<Id extends string, Groups extends HttpApiGroup.Constrain
         },
       }
       endpoints.push(compiled)
-      if (namespace !== undefined && namespace !== sourceName) {
-        unnamespaced.set(compiled, { group: sourceName, path: group.topLevel ? [] : [sourceName] })
+      const previous = options?.previousClient?.(endpoint) ?? (
+        namespace !== undefined && namespace !== sourceName
+          ? { group: sourceName, path: group.topLevel ? [] : [sourceName], clientPath }
+          : undefined
+      )
+      if (previous !== undefined) {
+        if ([...previous.path, ...previous.clientPath].some((part) => part === "" || part === "__proto__"))
+          throw new GenerationError({ reason: "Previous client path must contain non-empty names and cannot contain __proto__" })
+        previousClients.set(compiled, previous)
       }
     },
   })
@@ -337,13 +354,14 @@ export function compile<Id extends string, Groups extends HttpApiGroup.Constrain
   if (options?.aliases !== true) return { groups }
   const aliases = groups.flatMap((group) =>
     group.endpoints.flatMap((endpoint): Array<Alias> => {
-      const previous = unnamespaced.get(endpoint)
+      const previous = previousClients.get(endpoint)
       if (previous === undefined) return []
       return [
         {
-          from: [...previous.path, ...endpoint.clientPath],
+          from: [...previous.path, ...previous.clientPath],
           to: [...group.path, ...endpoint.clientPath],
           fromGroup: previous.group,
+          fromClientPath: previous.clientPath,
           group,
           endpoint,
         },
@@ -511,7 +529,7 @@ function renderEffectShape(
   }
   const aliasTypes: Array<{ readonly name: string; readonly target: string; readonly generic?: true }> =
     aliases.flatMap((alias) => {
-      const from = `${identifierPart(alias.fromGroup)}${alias.endpoint.clientPath.map(identifierPart).join("")}`
+      const from = `${identifierPart(alias.fromGroup)}${(alias.fromClientPath ?? alias.endpoint.clientPath).map(identifierPart).join("")}`
       const to = endpointTypeName(alias.group, alias.endpoint)
       return [
         ...(alias.endpoint.operation.inputMode === "none" ? [] : [{ name: `${from}Input`, target: `${to}Input` }]),
@@ -1060,7 +1078,7 @@ function renderPromiseTypes(
     ...Object.values(outputTypes ?? {}).map((output) => output.name),
   ])
   const aliasTypes = aliases.flatMap((alias) => {
-    const from = promiseTypePrefix(alias.fromGroup, alias.endpoint.clientPath)
+    const from = promiseTypePrefix(alias.fromGroup, alias.fromClientPath ?? alias.endpoint.clientPath)
     const to = promiseTypePrefix(alias.group.identifier, alias.endpoint.clientPath)
     return [...(promiseInputMode(alias.endpoint) === "none" ? [] : ["Input"]), "Output"].map(
       (suffix) => [`${from}${suffix}`, `${to}${suffix}`] as const,

@@ -122,6 +122,49 @@ test("repeated fullscreen toggles retain the viewer, transcript, scroll, and rev
   expect(setup.requests.diff[0].searchParams.get("base")).toBe("refs/heads/v2")
 })
 
+// TC-007/014 adjacency: the shared SessionFrame focus boundary must also yield
+// to a modal when an ordinary diff changes from split to fullscreen.
+test("a modal keeps typing across diff fullscreen resize and returns focus to the viewer", async () => {
+  await using state = await tmpdir()
+  await using setup = await createSessionFixture(state.path, { keybinds: { "command.palette.show": "f7" } })
+  await ready(setup)
+  const prompt = editor(setup)
+  setup.mockInput.pressKey("F6")
+  await panelReady(setup)
+  const panel = node(setup, "session-panel")
+  expect(panel.width).toBeLessThan(160)
+  expect(setup.renderer.currentFocusedRenderable).toBe(panel)
+
+  setup.mockInput.pressKey("F7")
+  await setup.waitForFrame((frame) => frame.includes("Commands") && setup.renderer.currentFocusedEditor instanceof InputRenderable)
+  const filter = setup.renderer.currentFocusedEditor
+  if (!(filter instanceof InputRenderable)) throw new Error("Command filter was not focused")
+  await setup.mockInput.typeText("Task queues")
+  expect(filter.plainText).toBe("Task queues")
+  setup.resize(80, 36)
+  await setup.waitForFrame((frame) => panel.width === 80 && frame.includes("Commands"))
+  expect(setup.renderer.currentFocusedRenderable).toBe(filter)
+  expect(setup.renderer.currentFocusedEditor).toBe(filter)
+  await setup.mockInput.typeText("X")
+  await setup.renderOnce()
+  expect(filter.plainText).toBe("Task queuesX")
+  expect(setup.renderer.currentFocusedRenderable).toBe(filter)
+  expect(node(setup, "session-panel")).toBe(panel)
+  expect(prompt.plainText).toBe("")
+  expect(setup.requests.prompt).toEqual([])
+
+  setup.mockInput.pressEscape()
+  await setup.waitForFrame((frame) => !frame.includes("Commands") && setup.renderer.currentFocusedRenderable === panel)
+  expect(panel.width).toBe(80)
+  setup.mockInput.pressKey("m")
+  await setup.waitForFrame(() => text(setup, "diff-review-count") === "1/4")
+  expect(setup.requests.base).toHaveLength(1)
+  expect(setup.requests.diff).toHaveLength(1)
+  setup.mockInput.pressEscape()
+  await setup.waitFor(() => !setup.renderer.root.findDescendantById("session-panel") && setup.renderer.currentFocusedEditor === prompt)
+  expect(setup.requests.prompt).toEqual([])
+})
+
 test("the diff panel reopens in the presentation last chosen with the fullscreen toggle", async () => {
   await using state = await tmpdir()
   await using setup = await createSessionFixture(state.path)

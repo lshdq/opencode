@@ -2639,6 +2639,7 @@ export type ConfigEntry =
           }
         }
         experimental?: {
+          task_queue?: boolean
           portable_shell_scanner?: boolean
           codemode_vm?: boolean
           all_flags?: boolean
@@ -2650,7 +2651,6 @@ export type ConfigEntry =
           shell_timeout_background?: boolean
           console_watches?: boolean
           mcp_events?: boolean
-          task_queue?: boolean
           part_rows?: boolean
           image_generate?: boolean | { model?: string | { providerID: string; model: string; variant?: string } }
           subagent_depth?: number
@@ -4823,44 +4823,44 @@ export type ExperimentalJobListInput = {
 
 export type ExperimentalJobListOutput = { data: Array<JobInfo> }["data"]
 
-export type ExperimentalTaskQueueCreateInput = {
+export type TaskQueueCreateInput = {
   readonly title?: string | undefined
   readonly directory: string
   readonly tasks: readonly [
-    { readonly title: string; readonly prompt: string },
-    ...Array<{ readonly title: string; readonly prompt: string }>,
+    { readonly title?: string; readonly prompt: string },
+    ...Array<{ readonly title?: string; readonly prompt: string }>,
   ]
 }
 
-export type ExperimentalTaskQueueCreateOutput = { data: TaskQueueInfo }["data"]
+export type TaskQueueCreateOutput = { data: TaskQueueInfo }["data"]
 
-export type ExperimentalTaskQueueListInput = { readonly directory: string }
+export type TaskQueueListInput = { readonly directory: string }
 
-export type ExperimentalTaskQueueListOutput = { data: Array<TaskQueueInfo> }["data"]
+export type TaskQueueListOutput = { data: Array<TaskQueueInfo> }["data"]
 
-export type ExperimentalTaskQueueGetInput = { readonly queueID: string }
+export type TaskQueueGetInput = { readonly queueID: string }
 
-export type ExperimentalTaskQueueGetOutput = { data: TaskQueueInfo }["data"]
+export type TaskQueueGetOutput = { data: TaskQueueInfo }["data"]
 
-export type ExperimentalTaskQueueStartInput = { readonly queueID: string }
+export type TaskQueueStartInput = { readonly queueID: string }
 
-export type ExperimentalTaskQueueStartOutput = { data: TaskQueueInfo }["data"]
+export type TaskQueueStartOutput = { data: TaskQueueInfo }["data"]
 
-export type ExperimentalTaskQueueHeartbeatInput = { readonly queueID: string }
+export type TaskQueueHeartbeatInput = { readonly queueID: string }
 
-export type ExperimentalTaskQueueHeartbeatOutput = { data: TaskQueueInfo }["data"]
+export type TaskQueueHeartbeatOutput = { data: TaskQueueInfo }["data"]
 
-export type ExperimentalTaskQueueStopInput = { readonly queueID: string; readonly reason?: string | undefined }
+export type TaskQueueStopInput = { readonly queueID: string; readonly reason?: string | undefined }
 
-export type ExperimentalTaskQueueStopOutput = { data: TaskQueueInfo }["data"]
+export type TaskQueueStopOutput = { data: TaskQueueInfo }["data"]
 
-export type ExperimentalTaskQueueResumeInput = { readonly queueID: string }
+export type TaskQueueResumeInput = { readonly queueID: string }
 
-export type ExperimentalTaskQueueResumeOutput = { data: TaskQueueInfo }["data"]
+export type TaskQueueResumeOutput = { data: TaskQueueInfo }["data"]
 
-export type ExperimentalTaskQueueDeleteInput = { readonly queueID: string }
+export type TaskQueueDeleteInput = { readonly queueID: string }
 
-export type ExperimentalTaskQueueDeleteOutput = void
+export type TaskQueueDeleteOutput = void
 
 export type ShellListInput = { readonly location?: { readonly directory?: string | undefined } | undefined }
 
@@ -5149,6 +5149,54 @@ export type FileUnwatchInput = ExperimentalFileUnwatchInput
 
 /** @deprecated Use `ExperimentalFileUnwatchOutput`. Removed in the next minor. */
 export type FileUnwatchOutput = ExperimentalFileUnwatchOutput
+
+/** @deprecated Use `TaskQueueCreateInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueCreateInput = TaskQueueCreateInput
+
+/** @deprecated Use `TaskQueueCreateOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueCreateOutput = TaskQueueCreateOutput
+
+/** @deprecated Use `TaskQueueListInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueListInput = TaskQueueListInput
+
+/** @deprecated Use `TaskQueueListOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueListOutput = TaskQueueListOutput
+
+/** @deprecated Use `TaskQueueGetInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueGetInput = TaskQueueGetInput
+
+/** @deprecated Use `TaskQueueGetOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueGetOutput = TaskQueueGetOutput
+
+/** @deprecated Use `TaskQueueStartInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueStartInput = TaskQueueStartInput
+
+/** @deprecated Use `TaskQueueStartOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueStartOutput = TaskQueueStartOutput
+
+/** @deprecated Use `TaskQueueHeartbeatInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueHeartbeatInput = TaskQueueHeartbeatInput
+
+/** @deprecated Use `TaskQueueHeartbeatOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueHeartbeatOutput = TaskQueueHeartbeatOutput
+
+/** @deprecated Use `TaskQueueStopInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueStopInput = TaskQueueStopInput
+
+/** @deprecated Use `TaskQueueStopOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueStopOutput = TaskQueueStopOutput
+
+/** @deprecated Use `TaskQueueResumeInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueResumeInput = TaskQueueResumeInput
+
+/** @deprecated Use `TaskQueueResumeOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueResumeOutput = TaskQueueResumeOutput
+
+/** @deprecated Use `TaskQueueDeleteInput`. Removed in the next minor. */
+export type ExperimentalTaskQueueDeleteInput = TaskQueueDeleteInput
+
+/** @deprecated Use `TaskQueueDeleteOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueueDeleteOutput = TaskQueueDeleteOutput
 
 /** @deprecated Use `ExperimentalMigrationV1StatusOutput`. Removed in the next minor. */
 export type MigrationV1StatusOutput = ExperimentalMigrationV1StatusOutput

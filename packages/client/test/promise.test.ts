@@ -26,6 +26,7 @@ test("exposes every standard HTTP API group", () => {
     "rpc",
     "event",
     "pty",
+    "taskQueue",
     "shell",
     "reference",
     "worktree",
@@ -64,13 +65,13 @@ test("exposes every standard HTTP API group", () => {
     "schedule",
     "artifacts",
     "job",
-    "taskQueue",
     "migration",
     "usage",
     "config",
+    "taskQueue",
   ])
   expect(Object.keys(client.experimental.job)).toEqual(["list"])
-  expect(Object.keys(client.experimental.taskQueue)).toEqual([
+  expect(Object.keys(client.taskQueue)).toEqual([
     "create",
     "list",
     "get",
@@ -115,6 +116,7 @@ test("nests a method under client.experimental exactly when its route is experim
   )
   const routes: Array<{ readonly method: string; readonly experimentalRoute: boolean }> = []
   const deprecated: Array<string> = []
+  const graduated: Array<string> = []
   const visit = async (node: object, path: ReadonlyArray<string>): Promise<void> => {
     for (const [name, value] of Object.entries(node)) {
       // `rpc` is a callable that also carries its generated routes.
@@ -126,7 +128,12 @@ test("nests a method under client.experimental exactly when its route is experim
         (parent, key) => (parent as Record<string, unknown> | undefined)?.[key],
         client.experimental,
       )
-      if (path[0] !== "experimental" && target === value) {
+      if (path[0] === "experimental" && path[1] === "taskQueue") {
+        expect(value).toBe(client.taskQueue[name as keyof typeof client.taskQueue])
+        graduated.push([...path, name].join("."))
+        continue
+      }
+      if (path[0] !== "experimental" && path[0] !== "taskQueue" && target === value) {
         deprecated.push([...path, name].join("."))
         continue
       }
@@ -146,6 +153,11 @@ test("nests a method under client.experimental exactly when its route is experim
   await visit(client, [])
 
   expect(routes.filter((route) => route.experimentalRoute).length).toBeGreaterThan(20)
+  expect(graduated.toSorted()).toEqual([
+    "experimental.taskQueue.create", "experimental.taskQueue.delete", "experimental.taskQueue.get",
+    "experimental.taskQueue.heartbeat", "experimental.taskQueue.list", "experimental.taskQueue.resume",
+    "experimental.taskQueue.start", "experimental.taskQueue.stop",
+  ])
   expect(
     routes
       .filter((route) => route.experimentalRoute !== route.method.startsWith("experimental."))
@@ -183,6 +195,21 @@ test("nests a method under client.experimental exactly when its route is experim
   expect(Object.keys(client.shell)).toEqual(["list", "create", "get", "output", "remove"])
   expect(Object.keys(client.project)).toEqual(["list", "update"])
   expect(Object.keys(client.worktree)).toEqual(["list", "create", "remove", "refresh"])
+})
+
+test("taskQueue.create sends title-less content unchanged through the formal route and deprecated SDK alias", async () => {
+  const requests: Request[] = []
+  const client = OpenCode.make({ baseUrl: "http://localhost:3000", fetch: async (input, init) => {
+    requests.push(new Request(input, init))
+    return Response.json({ data: { id: "tq_test" } })
+  } })
+  const input = { directory: "/project", tasks: [{ prompt: "\r\n  中文内容 😀  \r\n完整描述  " }] }
+  await client.taskQueue.create(input)
+  await client.experimental.taskQueue.create(input)
+  for (const request of requests) {
+    expect(request.url).toBe("http://localhost:3000/api/task-queue")
+    expect(await request.json()).toEqual(input)
+  }
 })
 
 test("config.get returns ordered config entries for a location", async () => {

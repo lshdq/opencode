@@ -557,6 +557,40 @@ describe("HttpApiCodegen.generate", () => {
     )
   })
 
+  test("keeps graduated client paths and old type names without restoring old HTTP routes", async () => {
+    const source = HttpApi.make("test")
+      .add(HttpApiGroup.make("experimental").add(HttpApiEndpoint.get("other", "/experimental/other", { success: Schema.String })))
+      .add(HttpApiGroup.make("taskQueue").add(HttpApiEndpoint.post("create", "/task-queue", {
+        payload: Schema.Struct({ prompt: Schema.String }), success: Schema.String,
+      })))
+    const contract = compileContract(source, {
+      aliases: true,
+      previousClient: (endpoint) => endpoint.path === "/task-queue"
+        ? { group: "experimental", path: ["experimental"], clientPath: ["taskQueue", "create"] }
+        : undefined,
+    })
+    const promise = emitPromise(contract)
+    await using emitted = await emittedModule(promise)
+    const paths: string[] = []
+    const client = emitted.module.OpenCode.make({ baseUrl: "https://example.com", fetch: async (input: RequestInfo | URL) => {
+      paths.push(new URL(input instanceof Request ? input.url : input).pathname)
+      return Response.json("ok")
+    } })
+    expect(client.experimental.taskQueue.create).toBe(client.taskQueue.create)
+    expect(client.experimental.other).toBeFunction()
+    expect(await client.experimental.taskQueue.create({ prompt: "Work" })).toBe("ok")
+    expect(paths).toEqual(["/task-queue"])
+    expect(Object.keys(OpenApi.fromApi(source).paths)).toEqual(["/experimental/other", "/task-queue"])
+    const types = promise.files.find((file) => file.path === "types.ts")?.content
+    expect(types).toContain("export type ExperimentalTaskQueueCreateInput = TaskQueueCreateInput")
+    expect(types).toContain("@deprecated Use `TaskQueueCreateOutput`. Removed in the next minor.")
+    const shape = emitEffectShape(contract).files.find((file) => file.path === "api.ts")?.content
+    expect(shape).toContain("export type ExperimentalTaskQueueCreateOperation<E = never> = TaskQueueCreateOperation<E>")
+    expect(shape).toContain("@deprecated Use `client.taskQueue`. Removed in the next minor.")
+    for (const output of [emitEffect(contract), emitEffectImported(contract, { module: "./contract", api: "Api" })])
+      expect(output.files.find((file) => file.path === "client.ts")?.content).toContain('"create": client.taskQueue.create')
+  })
+
   test("rejects an alias that collides with a client path", () => {
     const source = HttpApi.make("test").add(
       HttpApiGroup.make("session")

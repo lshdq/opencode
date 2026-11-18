@@ -35,9 +35,9 @@ export function taskQueueSource(mode: "foreign" | "same" = "foreign", rotate = t
       if (version === 2) { opened.resolve(); return refreshed.v2() }
       return first.v2()
     }
-    if (url.pathname.startsWith("/api/experimental/task-queue")) {
+    if (url.pathname.startsWith("/api/task-queue")) {
       const method = url.pathname.split("/").at(-1)!
-      if (url.pathname === "/api/experimental/task-queue") {
+      if (url.pathname === "/api/task-queue") {
         reads[source]++
         if (source === "A") lists.splice(0).forEach((list) => list.resolve())
         return json({ data: [source === "A" ? info : foreign] })

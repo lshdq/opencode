@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { Context, DateTime, Effect, Stream } from "effect"
 import { HttpClient, HttpClientResponse } from "effect/http"
+import { TaskQueue } from "@opencode/schema/task-queue"
 import {
   AbsolutePath,
   Agent,
@@ -40,6 +41,32 @@ test("server.info decodes the readiness response", async () => {
     urls: ["http://localhost:3000"],
     paths: { tmp: "/tmp/opencode" },
   })
+})
+
+test("task queues use the formal Effect client and retain deprecated SDK aliases", async () => {
+  const requests: Array<{ url: string; body: unknown }> = []
+  const queue = TaskQueue.Info.make({
+    id: TaskQueue.ID.make("tq_test"), directory: AbsolutePath.make("/project"), status: "queued",
+    tasks: [{ id: TaskQueue.TaskID.make("tqt_test"), title: "中文内容 😀", prompt: "\n中文内容 😀\n完整描述  ",
+      status: "pending", position: 1, rounds: 0, time: { created: 1, updated: 1 } }],
+    time: { created: 1, updated: 1 },
+  })
+  const httpClient = HttpClient.make((request) => {
+    requests.push({ url: request.url, body: request.body._tag === "Uint8Array"
+      ? JSON.parse(new TextDecoder().decode(request.body.body)) : undefined })
+    return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ data: queue })))
+  })
+  const input = { directory: AbsolutePath.make("/project"), tasks: [{ prompt: "\n中文内容 😀\n完整描述  " }] } as const
+  await Effect.gen(function* () {
+    const client = yield* OpenCode.make({ baseUrl: "http://localhost:3000" })
+    expect(client.experimental.taskQueue.create).toBe(client.taskQueue.create)
+    expect(yield* client.taskQueue.create(input)).toEqual(queue)
+    expect(yield* client.experimental.taskQueue.create(input)).toEqual(queue)
+  }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
+  expect(requests).toEqual([
+    { url: "http://localhost:3000/api/task-queue", body: input },
+    { url: "http://localhost:3000/api/task-queue", body: input },
+  ])
 })
 
 test("vcs.base decodes nullable review-base metadata", async () => {

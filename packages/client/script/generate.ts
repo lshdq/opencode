@@ -3,6 +3,7 @@ import { compile, emitEffectImported, emitEffectShape, emitPromise, write } from
 import {
   ClientApi,
   clientNamespace,
+  clientPreviousPath,
   effectOmitEndpoints,
   groupNames,
   promiseOmitEndpoints,
@@ -59,12 +60,14 @@ const promiseContract = compile(ClientApi, {
   omitEndpoints: promiseOmitEndpoints,
   namespace: clientNamespace,
   aliases: true,
+  previousClient: clientPreviousPath,
 })
 const effectContract = compile(ClientApi, {
   groupNames,
   omitEndpoints: effectOmitEndpoints,
   namespace: clientNamespace,
   aliases: true,
+  previousClient: clientPreviousPath,
 })
 const effectTypeReferences = [
   ...namespaceTypes("Agent", "@opencode/schema/agent", Agent),
