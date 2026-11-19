@@ -27,6 +27,7 @@ async function mountForm(
   height = 20,
   clipboardText?: string,
   response?: { reply?: 404 | 409; cancel?: 404 | 409; syncFailure?: boolean },
+  metadata?: FormWithLocation["metadata"],
 ) {
   const state = path.join(root, "state")
   await mkdir(state, { recursive: true })
@@ -42,6 +43,7 @@ async function mountForm(
     id: "frm_test",
     sessionID: "ses_test",
     title: "Authorization required",
+    metadata,
     fields: fields ?? [
       {
         key: "authorization",
@@ -141,6 +143,61 @@ function mountRecoveringForm(root: string, response: { reply?: 404 | 409; cancel
     response,
   )
 }
+
+test.each(([100, 44] as const).flatMap((width) => (["auto", "interactive", "revise", "cancelled"] as const).map((choice) => [width, choice] as const)))("task plan Form at %s columns submits only the real %s option value or cancels", async (width, choice) => {
+  await using tmp = await tmpdir()
+  const prompt = await mountForm(tmp.path, width, [{
+    key: "decision", type: "string", required: true, custom: false,
+    description: "方案开头\n" + "完整方案 mixed مرحبا 中文\n".repeat(20) + "方案末尾",
+    options: [{ value: "auto", label: "确认方案并使用 Auto 模式" }, { value: "interactive", label: "确认方案并使用交互决策模式" }, { value: "revise", label: "不通过，继续修改方案" }],
+  }], 24, undefined, undefined, { kind: "taskqueue.plan", queueID: "tq_plan", taskID: "tqt_plan", version: 2, stage: "proposal" })
+  try {
+    expect(prompt.app.captureCharFrame()).toContain("Auto")
+    expect(prompt.app.captureCharFrame()).toContain("交互决策模式")
+    expect(prompt.app.captureCharFrame()).toContain("不通过")
+    expect(prompt.app.captureCharFrame()).not.toContain("Type your own answer")
+    // Long plan text is independently scrollable; the three real choices stay visible.
+    for (const _ of [1, 2, 3, 4, 5]) prompt.app.mockInput.pressKey("\x1b[6~")
+    await prompt.app.waitForFrame((frame) => frame.includes("方案末尾"))
+    expect(prompt.app.captureCharFrame()).toContain("Auto")
+    expect(prompt.app.captureCharFrame()).toContain("交互决策模式")
+    expect(prompt.app.captureCharFrame()).toContain("不通过")
+    if (choice === "cancelled") prompt.app.mockInput.pressEscape()
+    if (choice !== "cancelled") prompt.app.mockInput.pressKey(String(["auto", "interactive", "revise"].indexOf(choice) + 1))
+    await prompt.app.waitFor(() => prompt.replies.length + prompt.cancellations.length === 1)
+    expect(prompt.replies).toEqual(choice === "cancelled" ? [] : [{ answer: { decision: choice } }])
+    expect(prompt.cancellations).toHaveLength(choice === "cancelled" ? 1 : 0)
+  } finally { prompt.app.renderer.destroy() }
+})
+
+test.each(([100, 44] as const).flatMap((width) => (["auto", "interactive", "revise"] as const).map((choice) => [width, choice] as const)))("task plan Form ignores custom input and mouse submits %s-column %s without a second approval", async (width, choice) => {
+  await using tmp = await tmpdir()
+  const choices = ["auto", "interactive", "revise"]
+  const prompt = await mountForm(tmp.path, width, [{
+    key: "decision", type: "string", required: true, custom: false,
+    description: "First plan line\n" + "中文 mixed مرحبا plan\n".repeat(20) + "Last plan line",
+    options: [{ value: "auto", label: "确认方案并使用 Auto 模式" }, { value: "interactive", label: "确认方案并使用交互决策模式" }, { value: "revise", label: "不通过，继续修改方案" }],
+  }], 24, undefined, undefined, { kind: "taskqueue.plan", queueID: "tq_pointer", taskID: "tqt_pointer", version: 2, stage: "proposal" })
+  try {
+    await prompt.app.mockInput.pasteBracketedText("自定义回答不是批准 auto")
+    await prompt.app.mockInput.typeText("custom")
+    await prompt.app.renderOnce()
+    expect(prompt.app.renderer.currentFocusedEditor).toBeNull()
+    expect(prompt.app.captureCharFrame()).not.toContain("Type your own answer")
+    expect(prompt.replies).toEqual([])
+    for (const _ of [1, 2, 3, 4, 5]) prompt.app.mockInput.pressKey("\x1b[6~")
+    await prompt.app.waitForFrame((frame) => frame.includes("Last plan line") && frame.includes("Auto") && frame.includes("不通过"))
+    const row = prompt.app.captureCharFrame().split("\n").findIndex((line) => line.includes(`${choices.indexOf(choice) + 1}.`))
+    expect(row).toBeGreaterThanOrEqual(0)
+    prompt.app.renderer.clearSelection()
+    await prompt.app.mockMouse.click(5, row)
+    await prompt.app.waitFor(() => prompt.replies.length === 1)
+    expect(prompt.replies).toEqual([{ answer: { decision: choice } }])
+    expect(prompt.cancellations).toEqual([])
+  } finally {
+    prompt.app.renderer.destroy()
+  }
+})
 
 test("restores the composer when terminal-form revalidation fails", async () => {
   await using tmp = await tmpdir()

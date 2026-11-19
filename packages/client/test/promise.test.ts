@@ -76,6 +76,7 @@ test("exposes every standard HTTP API group", () => {
     "list",
     "get",
     "start",
+    "plan",
     "heartbeat",
     "stop",
     "resume",
@@ -155,7 +156,7 @@ test("nests a method under client.experimental exactly when its route is experim
   expect(routes.filter((route) => route.experimentalRoute).length).toBeGreaterThan(20)
   expect(graduated.toSorted()).toEqual([
     "experimental.taskQueue.create", "experimental.taskQueue.delete", "experimental.taskQueue.get",
-    "experimental.taskQueue.heartbeat", "experimental.taskQueue.list", "experimental.taskQueue.resume",
+    "experimental.taskQueue.heartbeat", "experimental.taskQueue.list", "experimental.taskQueue.plan", "experimental.taskQueue.resume",
     "experimental.taskQueue.start", "experimental.taskQueue.stop",
   ])
   expect(

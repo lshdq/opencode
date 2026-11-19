@@ -36,6 +36,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { TaskQueue } from "@opencode/core/task-queue"
 import { TaskQueueTable, TaskQueueTaskTable } from "@opencode/core/task-queue/sql"
 import { TaskQueueOwnership } from "@opencode/core/task-queue/ownership"
+import { TaskQueuePlanning } from "@opencode/core/task-queue/planning"
 import { Shell } from "@opencode/core/shell"
 import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/schema/provider"
@@ -123,6 +124,8 @@ const configureAgent = Layer.effectDiscard(
         agent.permissions = [{ action: "*", resource: "*", effect: "ask" }]
       }),
     )
+    const skills = yield* Skill.Service
+    yield* skills.transform((editor) => editor.add({ id: Skill.ID.make("dev-workflow"), name: Skill.Name.make("dev-workflow"), path: AbsolutePath.make("/fixture/SKILL.md"), content: "Fixture workflow; independent testing and review are required" }))
   }),
 )
 const locations = makeGlobalNode({
@@ -186,12 +189,19 @@ const it = testEffect(
       Job.node,
       Instance.node,
       node,
+      TaskQueuePlanning.node,
     ]),
     [SessionExecution.node.replace(execution), LocationServiceMap.node.replace(locations)],
   ),
 )
 
-const setup = () =>
+// The pre-existing scheduler suite exercises persisted workflow-v1 queues. New queues never
+// receive this marker in production; the v2 planning contracts are tested separately below.
+const historical = (queues: TaskQueue.Interface, db: Database.Interface["db"]): TaskQueue.Interface => ({
+  ...queues,
+  create: (input) => queues.create(input).pipe(Effect.tap((queue) => db.update(TaskQueueTable).set({ workflow_version: 1, phase: "execution" }).where(eq(TaskQueueTable.id, queue.id)).run().pipe(Effect.orDie)), Effect.flatMap((queue) => queues.get(queue.id).pipe(Effect.orDie))),
+})
+const setup = (legacy = true) =>
   Effect.gen(function* () {
     executionState.mode = "succeed"
     executionState.resumes = []
@@ -201,11 +211,12 @@ const setup = () =>
     hanging.clear()
     judge = () => Effect.succeed({ verdict: "done", reason: "tests pass" })
     judgeCalls.length = 0
-    return yield* TaskQueue.Service
+    const queues = yield* TaskQueue.Service
+    return legacy ? historical(queues, (yield* Database.Service).db) : queues
   })
 
-const anotherService = (session?: Session.Interface, database?: Database.Interface) => Effect.gen(function* () {
-  return yield* TaskQueue.make.pipe(
+const anotherService = (session?: Session.Interface, database?: Database.Interface, legacy = true) => Effect.gen(function* () {
+  const queues = yield* TaskQueue.make.pipe(
     Effect.provideService(Database.Service, database ?? (yield* Database.Service)),
     Effect.provideService(Bus.Service, yield* Bus.Service),
     Effect.provideService(Session.Service, session ?? (yield* Session.Service)),
@@ -214,6 +225,7 @@ const anotherService = (session?: Session.Interface, database?: Database.Interfa
     Effect.provideService(SessionStore.Service, yield* SessionStore.Service),
     Effect.provideService(Instance.Service, yield* Instance.Service),
   )
+  return legacy ? historical(queues, (database ?? (yield* Database.Service)).db) : queues
 })
 
 /** Retries a query across cooperative yields, so background scheduler fibers can make progress first. */
@@ -282,7 +294,436 @@ const runningTaskSession = (queues: TaskQueue.Interface, queueID: TaskQueue.ID) 
     }),
   )
 
-describe("TaskQueue", () => {
+const planningRoot = (queues: TaskQueue.Interface, id: TaskQueue.ID, position = 1, generation = 1) => eventually(queues.get(id), (queue) => {
+  const task = queue.tasks[position - 1]
+  return task?.status === "planning" && !!task.sessionID && executionState.resumes.filter((id) => id === task.sessionID).length >= generation
+}).pipe(Effect.flatMap((queue) => {
+  const task = queue.tasks[position - 1]
+  return task?.sessionID ? Effect.succeed(task.sessionID) : Effect.die("missing planning Session")
+}))
+
+const answerPlan = (root: Session.ID, input: Parameters<TaskQueuePlanning.Interface["submit"]>[1], decision?: string) => Effect.gen(function* () {
+  const sessions = yield* Session.Service
+  const instances = yield* Instance.Service
+  return yield* Effect.gen(function* () {
+    const forms = yield* Form.Service
+    const planning = yield* TaskQueuePlanning.Service
+    const pending = yield* planning.submit(root, input, forms).pipe(Effect.forkScoped)
+    const form = (yield* eventually(forms.list({ sessionID: root }), (list) => list.some((form) => form.metadata?.kind === "taskqueue.plan"))).find((form) => form.metadata?.kind === "taskqueue.plan")
+    if (!form) return yield* Effect.die("missing approval Form")
+    if (decision === undefined) yield* forms.cancel(form.id)
+    if (decision !== undefined) yield* forms.reply({ id: form.id, answer: { decision } }).pipe(Effect.catchTag("Form.InvalidAnswerError", (error) => {
+      expect(error.message).toContain("Invalid option")
+      return forms.cancel(form.id)
+    }))
+    return yield* Fiber.join(pending)
+  }).pipe(instances.provide(yield* sessions.get(root)))
+})
+const approveTask = (root: Session.ID, type: "development" | "other" = "other", dependencies: readonly TaskQueue.TaskID[] = []) => Effect.gen(function* () {
+  const requirements = yield* answerPlan(root, { stage: "requirements", version: 0, type, requirements: "完整需求，不可删减", acceptance: ["真实验收标准"], dependencies }, "confirm")
+  return yield* answerPlan(root, { stage: "proposal", version: requirements.version, proposal: "完整技术方案与权衡" }, "auto")
+})
+
+describe("TaskQueue planned workflow", () => {
+  it.live("persists genuine versioned decisions, waits for manual start and executes the same Session only after snapshot", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    const queues = yield* setup(false)
+    const queue = yield* queues.create({ directory, tasks: [{ prompt: "只读研究" }] })
+    expect(queue).toMatchObject({ workflowVersion: 2, phase: "planning", status: "queued" })
+    expect((yield* queues.start(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+    expect((yield* queues.resume(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+    expect(executionState.resumes).toEqual([])
+    yield* queues.plan(queue.id)
+    const root = yield* planningRoot(queues, queue.id)
+    const sessions = yield* Session.Service
+    expect((yield* sessions.get(root)).agent).toBe(Agent.ID.make("plan"))
+    const instances = yield* Instance.Service
+    yield* Effect.gen(function* () {
+      const forms = yield* Form.Service
+      const question = yield* forms.create({ sessionID: root, title: "普通澄清问题", fields: [{ key: "q", type: "string" }] })
+      expect(yield* forms.state(question.id)).toEqual({ status: "pending" })
+      yield* forms.reply({ id: question.id, answer: { q: "正常回答" } })
+    }).pipe(instances.provide(yield* sessions.get(root)))
+    const req = yield* answerPlan(root, { stage: "requirements", version: 0, type: "other", requirements: "已澄清完整需求", acceptance: ["有依据"], dependencies: [] }, "confirm")
+    let version = req.version
+    for (const decision of ["interactive", "revise", "确认，使用 Auto", undefined]) {
+      const plan = yield* answerPlan(root, { stage: "proposal", version, proposal: "方案全文 " + version }, decision)
+      version = plan.version
+      expect(plan.approval?.choice).not.toBe("auto")
+      expect((yield* queues.get(queue.id)).phase).toBe("planning")
+      expect((yield* queues.start(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+    }
+    const plan = yield* answerPlan(root, { stage: "proposal", version, proposal: "最终方案全文" }, "auto")
+    expect(plan.approval).toMatchObject({ version: plan.version, choice: "auto" })
+    expect(plan.approval?.formID).toStartWith("frm_")
+    const ready = yield* eventually(queues.get(queue.id), (queue) => queue.phase === "ready")
+    expect(ready.status).toBe("queued")
+    expect(ready.snapshot).toBeUndefined()
+    expect(executionState.resumes).toEqual([root])
+    expect((yield* queues.stop(queue.id)).phase).toBe("ready")
+    expect((yield* queues.get(queue.id)).tasks[0]?.plan).toEqual(plan)
+    const restored = yield* anotherService()
+    expect(yield* restored.get(queue.id)).toEqual(ready)
+    expect(executionState.resumes).toEqual([root])
+    yield* queues.start(queue.id)
+    const done = yield* eventually(queues.get(queue.id), (queue) => queue.status === "done")
+    expect(done.tasks[0]).toMatchObject({ sessionID: root, status: "completed", plan })
+    expect((yield* sessions.get(root)).agent).toBe(Agent.ID.make("build"))
+    expect(executionState.resumes).toEqual([root, root])
+    if (!done.snapshot) return yield* Effect.die("missing snapshot")
+    const snapshot = done.snapshot
+    expect(yield* Effect.promise(() => Bun.file(snapshot).json())).toMatchObject({ phase: "ready", tasks: [{ plan }] })
+  })))
+
+  it.live("invalidates downstream approvals transactionally and refuses stale versions, descendants and execution rewrites", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    const queues = yield* setup(false)
+    const queue = yield* queues.create({ directory, tasks: [threeTasks[0], threeTasks[1]] })
+    yield* queues.plan(queue.id)
+    const first = yield* planningRoot(queues, queue.id)
+    yield* approveTask(first)
+    const second = yield* planningRoot(queues, queue.id, 2)
+    yield* approveTask(second, "other", [queue.tasks[0]!.id])
+    yield* eventually(queues.get(queue.id), (queue) => queue.phase === "ready")
+    yield* queues.plan(queue.id, queue.tasks[0]!.id)
+    yield* planningRoot(queues, queue.id, 1, 2)
+    const sessions = yield* Session.Service
+    const instances = yield* Instance.Service
+    const forms = yield* Form.Service.pipe(instances.provide(yield* sessions.get(first)))
+    const planning = yield* TaskQueuePlanning.Service
+    expect((yield* planning.submit(first, { stage: "proposal", version: 1, proposal: "旧版本" }, forms).pipe(Effect.flip))._tag).toBe("TaskQueuePlanning.InvalidError")
+    const child = yield* sessions.create({ parentID: first })
+    expect((yield* planning.submit(child.id, { stage: "proposal", version: 2, proposal: "子会话伪造" }, forms).pipe(Effect.flip))._tag).toBe("TaskQueuePlanning.InvalidError")
+    const revision = yield* answerPlan(first, { stage: "proposal", version: 3, proposal: "修改上游" }, "auto")
+    expect(revision.version).toBe(4)
+    const fresh = yield* queues.get(queue.id)
+    expect(fresh.tasks[1]?.plan?.approval).toBeUndefined()
+    expect(fresh.tasks[1]?.plan?.requirementsApproval).toBeUndefined()
+    expect(fresh.tasks[1]?.reason).toContain("upstream")
+    expect((yield* queues.start(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+    yield* queues.stop(queue.id)
+    expect((yield* queues.resume(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+    expect((yield* queues.get(queue.id)).tasks[0]?.plan).toEqual(revision)
+  })))
+
+  // TC-005: exercise both revision entrypoints across a three-level, branching/merging DAG.
+  for (const stage of ["requirements", "proposal"] as const) {
+    it.live(`${stage} revision invalidates every transitive branch but preserves independent approvals`, () => withQueueDirectory((directory) => Effect.gen(function* () {
+      const queues = yield* setup(false)
+      const queue = yield* queues.create({ directory, tasks: [{ prompt: "A" }, ...["B", "C", "D", "E", "Independent"].map((prompt) => ({ prompt }))] })
+      const ids = queue.tasks.map((task) => task.id)
+      const dependencies = [[], [ids[0]!], [ids[1]!], [ids[0]!], [ids[2]!, ids[3]!], []]
+      yield* queues.plan(queue.id)
+      for (const [index, deps] of dependencies.entries()) yield* approveTask(yield* planningRoot(queues, queue.id, index + 1), "other", deps)
+      const ready = yield* eventually(queues.get(queue.id), (value) => value.phase === "ready")
+      const root = ready.tasks[0]!.sessionID!
+      yield* queues.plan(queue.id, ids[0])
+      expect(yield* planningRoot(queues, queue.id, 1, 2)).toBe(root)
+      const reopened = yield* queues.get(queue.id)
+      for (const index of [1, 2, 3, 4]) {
+        expect(reopened.tasks[index]?.plan).toMatchObject({ version: ready.tasks[index]!.plan!.version + 1, dependencies: dependencies[index] })
+        expect(reopened.tasks[index]?.plan?.approval).toBeUndefined()
+        expect(reopened.tasks[index]?.plan?.requirementsApproval).toBeUndefined()
+        expect(reopened.tasks[index]?.plan?.mode).toBeUndefined()
+        expect(reopened.tasks[index]?.status).toBe("pending")
+      }
+      expect(reopened.tasks[5]).toEqual(ready.tasks[5])
+      const version = reopened.tasks[0]!.plan!.version
+      yield* answerPlan(root, stage === "requirements"
+        ? { stage, version, type: "other", requirements: "变更后的上游需求", acceptance: ["新验收"], dependencies: [] }
+        : { stage, version, proposal: "变更后的上游方案" }, stage === "requirements" ? "confirm" : "auto")
+      const revised = yield* queues.get(queue.id)
+      for (const index of [1, 2, 3, 4]) {
+        expect(revised.tasks[index]?.plan?.version).toBe(ready.tasks[index]!.plan!.version + 2)
+        expect(revised.tasks[index]?.plan?.approval).toBeUndefined()
+        expect(revised.tasks[index]?.plan?.requirementsApproval).toBeUndefined()
+        expect(revised.tasks[index]?.reason).toContain("upstream")
+      }
+      expect(revised.tasks[5]).toEqual(ready.tasks[5])
+      expect((yield* queues.start(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+      expect(executionState.resumes.every((id) => ready.tasks.some((task) => task.sessionID === id))).toBe(true)
+      yield* queues.stop(queue.id)
+    })))
+  }
+
+  // TC-005/008/012: a genuine pending Form cannot authorize another version or owner run.
+  for (const stage of ["requirements", "proposal"] as const) {
+    for (const action of ["stop", "resume-planning", "reopen"] as const) {
+      it.live(`fences late ${stage} Form answers after ${action} and permits fresh approval`, () => withQueueDirectory((directory) => Effect.gen(function* () {
+        const queues = yield* setup(false)
+        const queue = yield* queues.create({ directory, tasks: [{ prompt: "待确认的任务" }] })
+        yield* queues.plan(queue.id)
+        const root = yield* planningRoot(queues, queue.id)
+        const sessions = yield* Session.Service
+        const instances = yield* Instance.Service
+        yield* Effect.gen(function* () {
+        const forms = yield* Form.Service
+        const planning = yield* TaskQueuePlanning.Service
+        const requirements = stage === "proposal" ? yield* answerPlan(root, { stage: "requirements", version: 0, type: "other", requirements: "需求全文", acceptance: ["验收"], dependencies: [] }, "confirm") : undefined
+        const input = stage === "requirements"
+          ? { stage, version: 0, type: "other" as const, requirements: "旧需求", acceptance: ["验收"] as const, dependencies: [] }
+          : { stage, version: requirements!.version, proposal: "旧方案" }
+        const pending = yield* planning.submit(root, input, forms).pipe(Effect.result, Effect.forkScoped)
+        const form = (yield* eventually(forms.list({ sessionID: root }), (list) => list.length === 1))[0]!
+        expect(yield* forms.state(form.id)).toEqual({ status: "pending" })
+        yield* queues.stop(queue.id)
+        if (action !== "stop") {
+          yield* queues.plan(queue.id, action === "reopen" ? queue.tasks[0]!.id : undefined)
+          expect(yield* planningRoot(queues, queue.id, 1, 2)).toBe(root)
+        }
+        const before = yield* queues.get(queue.id)
+        yield* forms.reply({ id: form.id, answer: { decision: stage === "requirements" ? "confirm" : "auto" } })
+        expect(yield* Fiber.join(pending)).toMatchObject({ _tag: "Failure", failure: { _tag: "TaskQueuePlanning.InvalidError" } })
+        expect(yield* queues.get(queue.id)).toEqual(before)
+        expect((yield* queues.start(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+        if (action === "stop") {
+          yield* queues.plan(queue.id)
+          expect(yield* planningRoot(queues, queue.id, 1, 2)).toBe(root)
+        }
+        const fresh = (yield* queues.get(queue.id)).tasks[0]!.plan!
+        const confirmed = stage === "requirements" ? yield* answerPlan(root, { stage, version: fresh.version, type: "other", requirements: "新需求", acceptance: ["新验收"], dependencies: [] }, "confirm") : fresh
+        const approved = yield* answerPlan(root, { stage: "proposal", version: confirmed.version, proposal: "新方案" }, "auto")
+        const ready = yield* eventually(queues.get(queue.id), (value) => value.phase === "ready")
+        expect(approved.approval).toMatchObject({ version: approved.version, choice: "auto", answer: { decision: "auto" } })
+        expect(approved.approval?.formID).not.toBe(form.id)
+        expect(ready.tasks[0]?.sessionID).toBe(root)
+        expect(ready.snapshot).toBeUndefined()
+        expect(executionState.resumes).toEqual([root, root])
+        }).pipe(instances.provide(yield* sessions.get(root)))
+      })))
+    }
+  }
+
+  // TC-012: independent service instances have distinct boot/lock owners, not a shared mutex.
+  it.live("only one independent owner starts an approved queue; snapshot failure stays retryable", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    const queues = yield* setup(false)
+    const queue = yield* queues.create({ directory, tasks: [{ prompt: "只读研究" }] })
+    yield* queues.plan(queue.id)
+    const root = yield* planningRoot(queues, queue.id)
+    const plan = yield* approveTask(root)
+    yield* eventually(queues.get(queue.id), (value) => value.phase === "ready")
+    const first = yield* anotherService(undefined, undefined, false)
+    const second = yield* anotherService(undefined, undefined, false)
+    yield* Effect.promise(() => Bun.write(path.join(directory, ".localdoc"), "not a directory"))
+    const before = yield* queues.get(queue.id)
+    const failed = yield* Effect.all([first.start(queue.id).pipe(Effect.result), second.start(queue.id).pipe(Effect.result)], { concurrency: "unbounded" })
+    for (const result of failed) expect(result).toMatchObject({ _tag: "Failure", failure: { reason: expect.stringContaining("snapshot") } })
+    expect(yield* queues.get(queue.id)).toEqual(before)
+    expect(executionState.resumes).toEqual([root])
+    yield* Effect.promise(() => fs.unlink(path.join(directory, ".localdoc")))
+    executionState.mode = "hang"
+    const results = yield* Effect.all([first.start(queue.id).pipe(Effect.result), second.start(queue.id).pipe(Effect.result)], { concurrency: "unbounded" })
+    expect(results.filter((result) => result._tag === "Success")).toHaveLength(1)
+    expect(results.filter((result) => result._tag === "Failure")).toHaveLength(1)
+    const winner = results[0]?._tag === "Success" ? first : second
+    const loser = winner === first ? second : first
+    expect((yield* runningTaskSession(winner, queue.id)).sessionID).toBe(root)
+    const running = yield* winner.get(queue.id)
+    expect(running).toMatchObject({ phase: "execution", tasks: [{ plan, sessionID: root }] })
+    expect(executionState.resumes).toEqual([root, root])
+    expect([...hanging.keys()]).toEqual([root])
+    expect(yield* loser.heartbeat(queue.id).pipe(Effect.flip)).toMatchObject({ _tag: "TaskQueue.InvalidError" })
+    expect(yield* loser.stop(queue.id).pipe(Effect.flip)).toMatchObject({ _tag: "TaskQueue.InvalidError" })
+    expect(yield* Effect.promise(() => Bun.file(running.snapshot!).json())).toMatchObject({ phase: "ready", tasks: [{ plan }] })
+    yield* winner.stop(queue.id)
+  })))
+
+  // TC-008: real SQLite and genuine Form decisions survive shutdown/reconstruction without start.
+  it.live("new planning shutdown recovers approved tasks in the same Sessions without executing ready work", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    yield* setup(false)
+    const scope = yield* Scope.make()
+    yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void))
+    const queues = yield* anotherService(undefined, undefined, false).pipe(Scope.provide(scope))
+    const queue = yield* queues.create({ directory, tasks: [threeTasks[0], threeTasks[1]] })
+    yield* queues.plan(queue.id)
+    const first = yield* planningRoot(queues, queue.id)
+    const approved = yield* approveTask(first)
+    const second = yield* planningRoot(queues, queue.id, 2)
+    yield* Scope.close(scope, Exit.void)
+    const stopped = yield* queues.get(queue.id)
+    expect(stopped).toMatchObject({ phase: "planning", status: "stopped", reason: "server stopped" })
+    expect(stopped.tasks[0]?.plan).toEqual(approved)
+    const restored = yield* anotherService(undefined, undefined, false)
+    expect(yield* restored.get(queue.id)).toEqual(stopped)
+    expect((yield* restored.resume(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+    yield* restored.plan(queue.id)
+    expect(yield* planningRoot(restored, queue.id, 2, 2)).toBe(second)
+    yield* approveTask(second)
+    const ready = yield* eventually(restored.get(queue.id), (value) => value.phase === "ready")
+    expect(ready.tasks[0]?.plan).toEqual(approved)
+    expect(ready.tasks.map((task) => task.sessionID)).toEqual([first, second])
+    expect(ready.snapshot).toBeUndefined()
+    const reopened = yield* anotherService(undefined, undefined, false)
+    expect(yield* reopened.stop(queue.id)).toEqual(ready)
+    expect(yield* reopened.get(queue.id)).toEqual(ready)
+    expect(executionState.resumes).toEqual([first, second, second])
+    const sessions = yield* Session.Service
+    expect((yield* sessions.get(first)).agent).toBe(Agent.ID.make("plan"))
+    expect((yield* sessions.get(second)).agent).toBe(Agent.ID.make("plan"))
+  })))
+
+  it.live("rejects invalid dependency DAGs and snapshot failure without executing; stopped planning retains its Session", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    const queues = yield* setup(false)
+    const queue = yield* queues.create({ directory, tasks: [{ prompt: "研究" }] })
+    yield* queues.plan(queue.id)
+    const root = yield* planningRoot(queues, queue.id)
+    const sessions = yield* Session.Service
+    const instances = yield* Instance.Service
+    const forms = yield* Form.Service.pipe(instances.provide(yield* sessions.get(root)))
+    const planning = yield* TaskQueuePlanning.Service
+    expect((yield* planning.submit(root, { stage: "requirements", version: 0, type: "other", requirements: "循环依赖", acceptance: ["标准"], dependencies: [queue.tasks[0]!.id] }, forms).pipe(Effect.flip))._tag).toBe("TaskQueuePlanning.InvalidError")
+    yield* queues.stop(queue.id)
+    yield* queues.plan(queue.id)
+    expect(yield* planningRoot(queues, queue.id)).toBe(root)
+    yield* approveTask(root)
+    yield* eventually(queues.get(queue.id), (queue) => queue.phase === "ready")
+    yield* Effect.promise(() => Bun.write(path.join(directory, ".localdoc"), "not a directory"))
+    const before = [...executionState.resumes]
+    expect(yield* queues.start(queue.id).pipe(Effect.flip)).toMatchObject({ reason: expect.stringContaining("snapshot") })
+    expect((yield* queues.get(queue.id)).phase).toBe("ready")
+    expect(executionState.resumes).toEqual(before)
+  })))
+
+  it.live("blocks development completion without independent workflow evidence, blocks dependants and continues independent work", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    const queues = yield* setup(false)
+    const queue = yield* queues.create({ directory, tasks: threeTasks })
+    yield* queues.plan(queue.id)
+    yield* approveTask(yield* planningRoot(queues, queue.id), "development")
+    yield* approveTask(yield* planningRoot(queues, queue.id, 2), "other", [queue.tasks[0]!.id])
+    yield* approveTask(yield* planningRoot(queues, queue.id, 3))
+    yield* eventually(queues.get(queue.id), (queue) => queue.phase === "ready")
+    yield* queues.start(queue.id)
+    const done = yield* eventually(queues.get(queue.id), (queue) => queue.status === "done")
+    expect(done.tasks.map((task) => task.status)).toEqual(["blocked", "blocked", "completed"])
+    expect(done.tasks[0]?.reason).toContain("workflow evidence")
+    expect(done.tasks[1]?.reason).toContain(queue.tasks[0]!.id)
+    expect(executionState.resumes.length).toBeGreaterThanOrEqual(5)
+  })))
+
+  it.live("accepts development completion only with distinct real child tool evidence and persisted project documents", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    const queues = yield* setup(false)
+    const sessions = yield* Session.Service
+    const { db } = yield* Database.Service
+    const documents = ["需求.md", "用例.md", "分解.md", "测试报告.md", "审查报告.md"] as const
+    yield* Effect.promise(() => Promise.all(documents.map((file) => Bun.write(path.join(directory, file), "可核验流程记录"))))
+    const queue = yield* queues.create({ directory, tasks: [{ prompt: "开发任务" }] })
+    yield* queues.plan(queue.id)
+    yield* approveTask(yield* planningRoot(queues, queue.id), "development")
+    yield* eventually(queues.get(queue.id), (queue) => queue.phase === "ready")
+    judge = (input) => Effect.gen(function* () {
+      const testing = yield* sessions.create({ parentID: input.session.id })
+      const review = yield* sessions.create({ parentID: input.session.id })
+      yield* seedAssistantTool(db, testing.id, 1, "test command passed")
+      yield* seedAssistantTool(db, review.id, 1, "independent review read diff and found no issues")
+      return { verdict: "done" as const, reason: "verified workflow evidence", workflow: {
+        requirementsDocument: documents[0], testCasesDocument: documents[1], breakdownDocument: documents[2], testReport: documents[3], reviewReport: documents[4],
+        testSessionID: testing.id, reviewSessionID: review.id,
+      } }
+    }).pipe(Effect.orDie)
+    yield* queues.start(queue.id)
+    const done = yield* eventually(queues.get(queue.id), (queue) => queue.status === "done")
+    expect(done.tasks[0]).toMatchObject({ status: "completed", summary: "verified workflow evidence" })
+  })))
+
+  it.live("Auto does not bypass an explicit dev-workflow deny at execution", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    const queues = yield* setup(false)
+    const queue = yield* queues.create({ directory, tasks: [{ prompt: "开发" }] })
+    yield* queues.plan(queue.id)
+    const root = yield* planningRoot(queues, queue.id)
+    yield* approveTask(root, "development")
+    yield* eventually(queues.get(queue.id), (queue) => queue.phase === "ready")
+    const sessions = yield* Session.Service
+    yield* sessions.setPermissions({ sessionID: root, permissions: [{ action: "skill", resource: "dev-workflow", effect: "deny" }] })
+    yield* queues.start(queue.id)
+    const done = yield* eventually(queues.get(queue.id), (queue) => queue.status === "done")
+    expect(done.tasks[0]).toMatchObject({ status: "blocked", reason: expect.stringContaining("explicitly denied") })
+    expect(executionState.resumes).toEqual([root])
+  })))
+
+  // TC-006: exercise the completion gate through the real scheduler, Session store and files.
+  // The judge deliberately claims success; invalid evidence must still prevent completion.
+  for (const [kind, reason] of [
+    ["same-session", "distinct independent Sessions"],
+    ["unknown-session", "actual independent child Sessions"],
+    ["unrelated-session", "actual independent child Sessions"],
+    ["grandchild-session", "actual independent child Sessions"],
+    ["no-tool-evidence", "no completed tool evidence"],
+    ["duplicate-file", "own persisted file"],
+    ["missing-file", "Missing or out-of-project"],
+    ["empty-file", "Missing or out-of-project"],
+    ["directory-file", "Missing or out-of-project"],
+    ["outside-file", "Missing or out-of-project"],
+    ["junction-outside-file", "Missing or out-of-project"],
+    ["canonical-file-alias", "own persisted file"],
+  ] as const) {
+    it.live(`rejects development workflow evidence with ${kind}`, () => withQueueDirectory((directory) => withQueueDirectory((outside) => Effect.gen(function* () {
+      const queues = yield* setup(false)
+      const sessions = yield* Session.Service
+      const { db } = yield* Database.Service
+      const documents = ["需求.md", "用例.md", "分解.md", "测试报告.md", "审查报告.md"] as const
+      yield* Effect.promise(() => Promise.all(documents.map((file) => Bun.write(path.join(directory, file), "可核验流程记录"))))
+      if (kind === "empty-file") yield* Effect.promise(() => Bun.write(path.join(directory, documents[3]), ""))
+      if (kind === "directory-file") yield* Effect.promise(async () => {
+        await fs.unlink(path.join(directory, documents[3]))
+        await fs.mkdir(path.join(directory, documents[3]))
+      })
+      if (kind === "outside-file" || kind === "junction-outside-file") yield* Effect.promise(() => Bun.write(path.join(outside, "外部报告.md"), "不能作为项目内证据"))
+      if (kind === "junction-outside-file") yield* Effect.acquireRelease(
+        Effect.promise(() => fs.symlink(outside, path.join(directory, "外链"), process.platform === "win32" ? "junction" : "dir")),
+        // Only unlink this fixture's junction; never traverse the external target.
+        () => Effect.promise(() => fs.unlink(path.join(directory, "外链"))),
+      )
+      const queue = yield* queues.create({ directory, tasks: [{ prompt: "开发任务" }] })
+      yield* queues.plan(queue.id)
+      yield* approveTask(yield* planningRoot(queues, queue.id), "development")
+      yield* eventually(queues.get(queue.id), (queue) => queue.phase === "ready")
+      judge = (input) => Effect.gen(function* () {
+        const testing = yield* sessions.create({ parentID: input.session.id })
+        const review = yield* sessions.create(kind === "unrelated-session" ? { location: { directory } }
+          : { parentID: kind === "grandchild-session" ? testing.id : input.session.id })
+        yield* seedAssistantTool(db, testing.id, 1, "test command passed")
+        if (kind !== "no-tool-evidence") yield* seedAssistantTool(db, review.id, 1, "independent review completed")
+        return { verdict: "done" as const, reason: "judge claims all workflow stages passed", workflow: {
+          requirementsDocument: documents[0], testCasesDocument: documents[1], breakdownDocument: documents[2], reviewReport: documents[4],
+          testReport: kind === "duplicate-file" ? documents[0]
+            : kind === "canonical-file-alias" ? `./${documents[0]}`
+            : kind === "missing-file" ? "不存在.md"
+            : kind === "outside-file" ? path.join(outside, "外部报告.md")
+            : kind === "junction-outside-file" ? "外链/外部报告.md" : documents[3],
+          testSessionID: testing.id,
+          reviewSessionID: kind === "same-session" ? testing.id : kind === "unknown-session" ? Session.ID.create() : review.id,
+        } }
+      }).pipe(Effect.orDie)
+      yield* queues.start(queue.id)
+      const done = yield* eventually(queues.get(queue.id), (queue) => queue.status === "done")
+      expect(done.tasks[0]?.status).toBe("blocked")
+      expect(done.tasks[0]?.reason).toContain(reason)
+      expect(done.tasks[0]?.rounds).toBeGreaterThan(0)
+    }))))
+  }
+
+  // TC-008: new planning queues must not inherit historical execution-resume semantics.
+  it.effect("planning lease expiry preserves approvals and can only be recovered by plan", () => withQueueDirectory((directory) => Effect.gen(function* () {
+    const queues = yield* setup(false)
+    const queue = yield* queues.create({ directory, tasks: threeTasks })
+    yield* queues.plan(queue.id)
+    const first = yield* planningRoot(queues, queue.id)
+    const approved = yield* approveTask(first)
+    const second = yield* planningRoot(queues, queue.id, 2)
+    expect((yield* queues.start(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+    yield* TestClock.adjust("35 seconds")
+    const stopped = yield* eventually(queues.get(queue.id), (queue) => queue.status === "stopped")
+    expect(stopped).toMatchObject({ phase: "planning", reason: "owner disconnected" })
+    expect(stopped.tasks[0]?.plan).toEqual(approved)
+    expect((yield* queues.resume(queue.id).pipe(Effect.flip))._tag).toBe("TaskQueue.InvalidError")
+    const restored = yield* anotherService()
+    yield* restored.plan(queue.id)
+    expect(yield* planningRoot(restored, queue.id, 2, 2)).toBe(second)
+    expect(executionState.resumes).toEqual([first, second, second])
+    expect((yield* restored.get(queue.id)).tasks[0]?.plan).toEqual(approved)
+    yield* restored.stop(queue.id)
+  })))
+})
+
+describe("TaskQueue historical workflow", () => {
   it.live("stores generated names without rewriting prompts or explicit historical titles", () =>
     withQueueDirectory((directory) => Effect.gen(function* () {
       const queues = yield* setup()

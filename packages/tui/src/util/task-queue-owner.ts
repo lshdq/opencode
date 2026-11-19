@@ -1,6 +1,6 @@
 import type { OpenCodeClient, TaskQueueInfo } from "@opencode/client"
 
-type Api = Pick<OpenCodeClient["taskQueue"], "start" | "resume" | "heartbeat" | "stop">
+type Api = Pick<OpenCodeClient["taskQueue"], "plan" | "start" | "resume" | "heartbeat" | "stop">
 type Origin = {
   key: string | Api
   api: Api
@@ -88,7 +88,7 @@ export function createTaskQueueOwner(
     ).catch(() => undefined)
   }
 
-  function acquire(queueID: string, action: "start" | "resume") {
+  function acquire(queueID: string, action: "plan" | "start" | "resume", taskID?: string) {
     if (closing) return Promise.reject(new Error("TUI 正在退出，无法启动批次。"))
     const current = connection()
     const origin: Origin = origins.get(current.key) ?? {
@@ -101,7 +101,8 @@ export function createTaskQueueOwner(
     origins.set(current.key, origin)
     const existing = origin.pending.get(queueID)
     if (existing) return existing
-    const request = origin.api[action]({ queueID }).then(async (info) => {
+    const response = action === "plan" ? origin.api.plan({ queueID, taskID }) : origin.api[action]({ queueID })
+    const request = response.then(async (info) => {
       const latest = origin.observed.get(queueID)
       const current = latest && latest.time.updated >= info.time.updated ? latest : info
       // Only the explicit operation's response grants ownership. Observations may

@@ -7,12 +7,13 @@ import { createEventStream, json } from "./fixture/tui-client"
 test.each([
   ["start/active", "start", false], ["resume/active", "resume", false],
   ["start/shutdown", "start", true], ["resume/shutdown", "resume", true],
+  ["plan/active", "plan", false], ["plan/shutdown", "plan", true],
 ] as const)("two HTTP owners never transfer B's resumed run to A's delayed %s response", async (_, action, closing) => {
   const requested = Promise.withResolvers<void>()
   const response = Promise.withResolvers<Response>()
   const renewed = Promise.withResolvers<void>()
   const events = createEventStream()
-  let info = taskQueue({ status: action === "start" ? "queued" : "stopped" })
+  let info = taskQueue({ status: action === "start" ? "queued" : "stopped", ...(action === "plan" ? { workflowVersion: 2, phase: "planning" } : {}) })
   const stops: { actor: string; updated: number }[] = []
   const beats: string[] = []
   const publish = (status: TaskQueueInfo["status"]) => {
@@ -24,7 +25,7 @@ test.each([
     const path = new URL(request.url).pathname
     const actor = request.headers.get("x-test-owner") ?? "unknown"
     if (path === "/api/event") return events.v2()
-    if (path.endsWith("/start") || path.endsWith("/resume")) {
+    if (path.endsWith("/start") || path.endsWith("/resume") || path.endsWith("/plan")) {
       const started = publish("running")
       if (actor === "A") { requested.resolve(); return response.promise }
       return json({ data: started })
@@ -66,7 +67,7 @@ test.each([
     await observe("running", 2)
     await b.taskQueue.stop({ queueID: info.id, reason: "B stops A before resuming" })
     await observe("stopped", 3)
-    await ownerB.acquire(info.id, "resume")
+    await ownerB.acquire(info.id, action === "plan" ? "plan" : "resume")
     await observe("running", 4)
     expect(ownerB.owns(info.id)).toBe(true)
     if (closing) shutdown = ownerA.shutdown()

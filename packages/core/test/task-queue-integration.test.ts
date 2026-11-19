@@ -29,6 +29,8 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Deferred, Effect, Exit, Fiber, Layer, Schema, Scope } from "effect"
 import { tmpdirScoped } from "./fixture/tmpdir"
 import { it } from "./lib/effect"
+import { eq } from "drizzle-orm"
+import { TaskQueueTable } from "@opencode/core/task-queue/sql"
 
 // TC-001/002/006/028: only the model transport/selection is scripted. The queue, default
 // generate judge, SessionRunnerLLM, inbox delivery, execution coordinator and file I/O are real.
@@ -80,7 +82,14 @@ it.live(
         ),
       )
       yield* Effect.gen(function* () {
-        const queues = yield* TaskQueue.Service
+        const actualQueues = yield* TaskQueue.Service
+        const { db } = yield* Database.Service
+        // Explicit historical records keep this real execution/fencing regression independent
+        // of new interactive planning; production create always uses workflow version 2.
+        const queues = { ...actualQueues, create: (input: TaskQueue.CreateInput) => actualQueues.create(input).pipe(
+          Effect.tap((queue) => db.update(TaskQueueTable).set({ workflow_version: 1, phase: "execution" }).where(eq(TaskQueueTable.id, queue.id)).run().pipe(Effect.orDie)),
+          Effect.flatMap((queue) => actualQueues.get(queue.id).pipe(Effect.orDie)),
+        ) }
         const sessions = yield* Session.Service
         const operations: string[] = []
         yield* Agent.Service.use((agents) =>
@@ -309,6 +318,7 @@ it.live(
         const closing = yield* closingQueues.create({ directory: closingDirectory, tasks: [
           { prompt: "Keep working until shutdown" }, { prompt: "Must remain pending" },
         ] })
+        yield* db.update(TaskQueueTable).set({ workflow_version: 1, phase: "execution" }).where(eq(TaskQueueTable.id, closing.id)).run().pipe(Effect.orDie)
         yield* llm.push(TestLLM.hangAfter())
         yield* closingQueues.start(closing.id)
         yield* llm.wait(20)

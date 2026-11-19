@@ -1,5 +1,5 @@
 import { TaskQueue } from "@opencode/schema/task-queue"
-import { AbsolutePath } from "@opencode/schema/schema"
+import { AbsolutePath, optional } from "@opencode/schema/schema"
 import { Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api"
 import {
@@ -29,6 +29,9 @@ export const StopPayload = Schema.Struct({
 }).annotate({ identifier: "TaskQueue.StopPayload" })
 export type StopPayload = typeof StopPayload.Type
 
+export const PlanPayload = Schema.Struct({ taskID: TaskQueue.TaskID.pipe(optional) }).annotate({ identifier: "TaskQueue.PlanPayload" })
+export type PlanPayload = typeof PlanPayload.Type
+
 export const TaskQueueGroup = HttpApiGroup.make("server.taskQueue").add(
   HttpApiEndpoint.post("taskQueue.create", "/api/task-queue", {
     payload: TaskQueue.CreateInput,
@@ -38,7 +41,7 @@ export const TaskQueueGroup = HttpApiGroup.make("server.taskQueue").add(
     annotations(
       "create",
       "Create task queue",
-      "Create a queue of tasks that run serially and unattended, each task in its own session in the queue's directory.",
+      "Create an ordered batch requiring interactive per-task planning and real approval before manual start. Each task plans and executes in the same independent session.",
     ),
   ),
   HttpApiEndpoint.get("taskQueue.list", "/api/task-queue", {
@@ -56,8 +59,11 @@ export const TaskQueueGroup = HttpApiGroup.make("server.taskQueue").add(
     success: Schema.Struct({ data: TaskQueue.Info }),
     error: errors,
   }).annotateMerge(
-    annotations("start", "Start task queue", "Start a queued queue: its tasks run one at a time until done or stopped."),
+    annotations("start", "Start task queue", "Manually start a fully Auto-approved ready batch. The server saves a unique project plan snapshot before serial execution; incomplete or stale approvals are rejected."),
   ),
+  HttpApiEndpoint.post("taskQueue.plan", "/api/task-queue/:queueID/plan", {
+    params, payload: PlanPayload, success: Schema.Struct({ data: TaskQueue.Info }), error: errors,
+  }).annotateMerge(annotations("plan", "Plan task queue", "Acquire the owner lease and interactively plan tasks in order. Optional taskID reopens a plan before execution. Planning never starts execution; use heartbeat and stop for its owner lifecycle. Ready queues wait for manual start.")),
   HttpApiEndpoint.post("taskQueue.heartbeat", "/api/task-queue/:queueID/heartbeat", {
     params,
     success: Schema.Struct({ data: TaskQueue.Info }),
@@ -66,7 +72,7 @@ export const TaskQueueGroup = HttpApiGroup.make("server.taskQueue").add(
     annotations(
       "heartbeat",
       "Renew task queue lease",
-      "Extend a running queue's owner lease; a lease the owner stops renewing stops the queue like a user stop.",
+      "Extend a running planning or execution queue's owner lease; missing renewals stop its entire task tree. Ready queues have no active lease and still require manual start.",
     ),
   ),
   HttpApiEndpoint.post("taskQueue.stop", "/api/task-queue/:queueID/stop", {

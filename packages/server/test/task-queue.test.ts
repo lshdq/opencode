@@ -26,37 +26,58 @@ const client = (handler: (request: Request) => Promise<Response>) =>
   })
 type Api = Awaited<ReturnType<typeof client>>
 
+// Existing execution API regressions intentionally exercise historical persisted queues.
+// This test-only fixture seeds the legacy marker through SQLite; no API accepts it.
+const legacyClient = (handler: (request: Request) => Promise<Response>, databasePath: string): Api => {
+  const api = client(handler)
+  return { ...api, taskQueue: { ...api.taskQueue, create: async (...args: Parameters<Api["taskQueue"]["create"]>) => {
+    const queue = await api.taskQueue.create(...args)
+    using database = new Sqlite(databasePath)
+    database.query("UPDATE task_queue SET workflow_version = 1, phase = 'execution' WHERE id = ?").run(queue.id)
+    return api.taskQueue.get({ queueID: queue.id })
+  } } }
+}
+
 // Fake execution: every resume hangs until interrupted, so a started queue stays deterministically
 // running without an LLM and stop/resume follow the real scheduler state machine.
-const executionState: {
+type ExecutionState = {
   resumes: Array<Session.ID>
   interrupts: Array<Session.ID>
   hanging?: { readonly sessionID: Session.ID; readonly deferred: Deferred.Deferred<void, never> }
-} = { resumes: [], interrupts: [] }
+  started?: Queue.Queue<Session.ID>
+}
+let executionState: ExecutionState = { resumes: [], interrupts: [] }
+const resetExecution = (): ExecutionState => (executionState = { resumes: [], interrupts: [] })
 
-const execution = Layer.succeed(
+const execution = Layer.effect(
   SessionExecution.Service,
-  SessionExecution.Service.of({
-    active: Effect.sync(() => new Set(executionState.hanging ? [executionState.hanging.sessionID] : [])),
-    isActive: (sessionID) => Effect.sync(() => executionState.hanging?.sessionID === sessionID),
-    wake: () => Effect.void,
-    awaitIdle: () => Effect.void,
-    resume: (sessionID) =>
-      Effect.gen(function* () {
-        executionState.resumes.push(sessionID)
-        const deferred = yield* Deferred.make<void, never>()
-        executionState.hanging = { sessionID, deferred }
-        yield* Deferred.await(deferred)
-      }),
-    interrupt: (sessionID) =>
-      Effect.gen(function* () {
-        if (executionState.hanging?.sessionID !== sessionID) return false
-        executionState.interrupts.push(sessionID)
-        const deferred = executionState.hanging.deferred
-        executionState.hanging = undefined
-        yield* Deferred.interrupt(deferred)
-        return true
-      }),
+  Effect.sync(() => {
+    // Capture this server's observer. A Bun timeout does not cancel the returned
+    // Promise, so resetting for the next test must not redirect a late fake drain.
+    const state = executionState
+    return SessionExecution.Service.of({
+      active: Effect.sync(() => new Set(state.hanging ? [state.hanging.sessionID] : [])),
+      isActive: (sessionID) => Effect.sync(() => state.hanging?.sessionID === sessionID),
+      wake: () => Effect.void,
+      awaitIdle: () => Effect.void,
+      resume: (sessionID) =>
+        Effect.gen(function* () {
+          state.resumes.push(sessionID)
+          const deferred = yield* Deferred.make<void, never>()
+          state.hanging = { sessionID, deferred }
+          if (state.started) yield* Queue.offer(state.started, sessionID)
+          yield* Deferred.await(deferred)
+        }),
+      interrupt: (sessionID) =>
+        Effect.gen(function* () {
+          if (state.hanging?.sessionID !== sessionID) return false
+          state.interrupts.push(sessionID)
+          const deferred = state.hanging.deferred
+          state.hanging = undefined
+          yield* Deferred.interrupt(deferred)
+          return true
+        }),
+    })
   }),
 )
 
@@ -68,17 +89,18 @@ const twoTasks = [
 /** Polls until the queue has a running task with its session, then returns that session ID. */
 async function waitForTaskSession(api: Api, queueID: string, generation = 1) {
   const deadline = Date.now() + 5_000
+  const state = executionState
   while (true) {
     const info = await api.taskQueue.get({ queueID })
     const running = info.tasks.find((task) => task.status === "running" && task.sessionID)
-    if (running?.sessionID && executionState.resumes.filter((id) => id === running.sessionID).length >= generation)
+    if (running?.sessionID && state.resumes.filter((id) => id === running.sessionID).length >= generation)
       return running.sessionID
     if (Date.now() > deadline) throw new Error(`task never started running: ${JSON.stringify(info)}`)
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
 }
 
-const bootDirs = (dirs: ReadonlyArray<{ readonly name: string; readonly flag: boolean }>, rootFlag?: boolean) =>
+const bootDirs = (dirs: ReadonlyArray<{ readonly name: string; readonly flag: boolean }>, rootFlag?: boolean, project = true) =>
   Effect.fnUntraced(function* (root: string) {
     yield* Effect.promise(async () => {
       if (rootFlag !== undefined)
@@ -100,30 +122,41 @@ const bootDirs = (dirs: ReadonlyArray<{ readonly name: string; readonly flag: bo
       {
         app: { version: "test" },
         database: { path: path.join(root, "opencode.db") },
-        config: { directory: root, project: true, claude: false },
+        config: { directory: root, project, claude: false },
         models: { fetch: false },
         fs: { filewatcher: false },
       },
       { overrides: [SessionExecution.node.replace(execution)] },
     )
-    return client(handler)
+    return legacyClient(handler, path.join(root, "opencode.db"))
   })
 
-it.live("runs the task-queue lifecycle without an experimental flag", () =>
+it.live("runs the historical task-queue lifecycle without an experimental flag", () =>
   Effect.gen(function* () {
-    executionState.resumes = []
-    executionState.interrupts = []
-    executionState.hanging = undefined
+    const state = resetExecution()
+    const started = yield* Queue.unbounded<Session.ID>()
+    state.started = started
+    yield* Effect.addFinalizer(() => Effect.sync(() => {
+      if (state.started === started) state.started = undefined
+    }))
+    const run = Effect.runPromiseWith(yield* Effect.context())
+    const began = performance.now()
+    const timings: Array<{ stage: string; elapsedMs: number }> = []
+    const mark = (stage: string) => timings.push({ stage, elapsedMs: Math.round(performance.now() - began) })
     const root = (yield* tmpdirScoped("opencode-task-queue-api-")).path
-    const api = yield* bootDirs([])(root)
+    // This lifecycle contract does not exercise project config discovery; the flag and
+    // junction cases below own it. Keep unrelated cold filesystem discovery out of here.
+    const api = yield* bootDirs([], undefined, false)(root)
+    mark("server-built")
     const controller = new AbortController()
     yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
 
-    yield* Effect.promise(async () => {
+    yield* Effect.promise(async (signal) => {
       const events = api.event
         .subscribe({ types: ["taskqueue.updated"], signal: controller.signal })
         [Symbol.asyncIterator]()
       expect((await events.next()).value?.type).toBe("server.connected")
+      mark("event-stream-connected")
       const nextQueue = async (status: "queued" | "running" | "stopped") => {
         while (true) {
           const event = await events.next()
@@ -136,7 +169,8 @@ it.live("runs the task-queue lifecycle without an experimental flag", () =>
         title: "Release",
         tasks: twoTasks,
       })
-      expect(await nextQueue("queued")).toEqual(created)
+      mark("queue-created")
+      expect((await nextQueue("queued")).id).toBe(created.id)
       expect(created).toMatchObject({
         title: "Release",
         directory: root,
@@ -158,22 +192,32 @@ it.live("runs the task-queue lifecycle without an experimental flag", () =>
       await expect(api.taskQueue.resume({ queueID: created.id })).rejects.toMatchObject({
         _tag: "InvalidRequestError",
       })
+      mark("queued-contract-checked")
 
       // Start makes it running; a second start is refused, a heartbeat renews.
       expect(await api.taskQueue.start({ queueID: created.id })).toMatchObject({ status: "running" })
+      mark("start-response")
       await expect(api.taskQueue.start({ queueID: created.id })).rejects.toMatchObject({
         _tag: "InvalidRequestError",
       })
       expect(await api.taskQueue.heartbeat({ queueID: created.id })).toMatchObject({ status: "running" })
 
       // The first task hangs mid-run; a running queue cannot be removed.
-      const first = await waitForTaskSession(api, created.id)
+      // The fake executor's handshake observes actual execution, without repeatedly rebuilding
+      // the HTTP/Location read path while a cold server and other checks compete for CPU.
+      mark("waiting-first-execution")
+      const first = await run(Queue.take(started), { signal })
+      mark("first-execution-started")
+      expect((await api.taskQueue.get({ queueID: created.id })).tasks[0]).toMatchObject({ status: "running", sessionID: first })
+      expect(state.hanging?.sessionID).toBe(first)
       await expect(api.taskQueue.delete({ queueID: created.id })).rejects.toMatchObject({
         _tag: "InvalidRequestError",
       })
 
       // Stop records its reason, interrupts the current task, keeps the pending task, and is idempotent.
       const stopped = await api.taskQueue.stop({ queueID: created.id, reason: "the TUI exited" })
+      mark("first-execution-stopped")
+      expect(state.hanging).toBeUndefined()
       expect(await nextQueue("stopped")).toEqual(stopped)
       expect(stopped).toMatchObject({ status: "stopped", reason: "the TUI exited" })
       expect(stopped.tasks[0]).toMatchObject({ status: "interrupted", sessionID: first })
@@ -182,7 +226,12 @@ it.live("runs the task-queue lifecycle without an experimental flag", () =>
 
       // Resume continues the interrupted task in its own session, not a new one.
       expect(await api.taskQueue.resume({ queueID: created.id })).toMatchObject({ status: "running" })
-      expect(await waitForTaskSession(api, created.id, 2)).toBe(first)
+      mark("waiting-second-execution")
+      expect(await run(Queue.take(started), { signal })).toBe(first)
+      mark("second-execution-started")
+      expect((await api.taskQueue.get({ queueID: created.id })).tasks[0]).toMatchObject({ status: "running", sessionID: first })
+      expect(state.hanging?.sessionID).toBe(first)
+      expect(state.resumes.filter((id) => id === first)).toHaveLength(2)
       expect(await api.taskQueue.stop({ queueID: created.id })).toMatchObject({ status: "stopped" })
 
       // A stopped queue can be removed and then reads as gone.
@@ -192,13 +241,51 @@ it.live("runs the task-queue lifecycle without an experimental flag", () =>
       })
 
       // Every execution the scheduler drove belonged to the first task's session.
-      expect(executionState.resumes.length).toBeGreaterThanOrEqual(2)
-      expect(executionState.resumes.every((id) => id === first)).toBe(true)
-      expect(executionState.interrupts.map(() => first)).toEqual([first, first])
+      expect(state.resumes.length).toBeGreaterThanOrEqual(2)
+      expect(state.resumes.every((id) => id === first)).toBe(true)
+      expect(state.interrupts.map(() => first)).toEqual([first, first])
       await events.return?.()
+      mark("completed-and-closed-stream")
+      console.log(`TASK_QUEUE_SERVER_LIFECYCLE ${JSON.stringify({ timings, resumes: state.resumes.length, interrupts: state.interrupts.length, active: !!state.hanging })}`)
     })
   }).pipe(Effect.scoped),
 )
+
+it.live("new SDK queues require planning, retain interactive Forms and cannot start or resume before all plans are approved", () => Effect.gen(function* () {
+  resetExecution()
+  const root = (yield* tmpdirScoped("qp-")).path
+  const handler = yield* ServerFetch.make({ app: { version: "test" }, database: { path: path.join(root, "opencode.db") },
+    config: { directory: root, project: false, claude: false }, models: { fetch: false }, fs: { filewatcher: false },
+  }, { overrides: [SessionExecution.node.replace(execution)] })
+  const api = client(handler)
+  yield* Effect.promise(async () => {
+    const queue = await api.taskQueue.create({ directory: root, tasks: twoTasks })
+    expect(queue).toMatchObject({ workflowVersion: 2, phase: "planning", status: "queued" })
+    for (const operation of [api.taskQueue.start, api.taskQueue.resume])
+      await expect(operation({ queueID: queue.id })).rejects.toMatchObject({ _tag: "InvalidRequestError", kind: "task_queue" })
+    expect(executionState.resumes).toEqual([])
+    expect(await api.taskQueue.plan({ queueID: queue.id })).toMatchObject({ phase: "planning", status: "running" })
+    const deadline = Date.now() + 10_000
+    const sessionID = await (async () => {
+      while (true) {
+        const info = await api.taskQueue.get({ queueID: queue.id })
+        const task = info.tasks[0]
+        if (task?.status === "planning" && task.sessionID && executionState.resumes.includes(Session.ID.make(task.sessionID))) return task.sessionID
+        if (Date.now() >= deadline) throw new Error("planning root did not become active")
+        await Bun.sleep(1)
+      }
+    })()
+    const form = await api.session.form.create({ sessionID, title: "需求澄清", fields: [{ key: "answer", type: "string" }] })
+    expect(await api.session.form.get({ sessionID, formID: form.id })).toMatchObject({ state: { status: "pending" } })
+    await api.session.form.reply({ sessionID, formID: form.id, answer: { answer: "用户真实回答" } })
+    expect(await api.taskQueue.heartbeat({ queueID: queue.id })).toMatchObject({ phase: "planning", status: "running" })
+    await api.taskQueue.stop({ queueID: queue.id })
+    await expect(api.taskQueue.resume({ queueID: queue.id })).rejects.toMatchObject({ _tag: "InvalidRequestError" })
+    await api.taskQueue.plan({ queueID: queue.id })
+    expect((await api.taskQueue.get({ queueID: queue.id })).tasks[0]?.sessionID).toBe(sessionID)
+    await api.taskQueue.stop({ queueID: queue.id })
+  })
+}).pipe(Effect.scoped))
 
 it.live("accepts title-less tasks with legacy false config and reports missing queues", () =>
   Effect.gen(function* () {
@@ -281,9 +368,7 @@ it.live("keeps all ID-based methods' location errors when the queue directory di
 // not a manually lowercased string standing in for server-side filesystem identity.
 it.live("canonicalizes junction create/list and prevents alias and case variants from running a second batch", () =>
   Effect.gen(function* () {
-    executionState.resumes = []
-    executionState.interrupts = []
-    executionState.hanging = undefined
+    resetExecution()
     const root = (yield* tmpdirScoped("qa-")).path
     const api = yield* bootDirs([{ name: "project", flag: true }])(root)
     const directory = path.join(root, "project")
@@ -324,9 +409,7 @@ it.live("canonicalizes junction create/list and prevents alias and case variants
 // R-API-01: exercise the generated SDK and declared error mapping, not just direct Core admission.
 it.live("rejects start and resume through the formal API after a stored directory is replaced by a junction", () =>
   Effect.gen(function* () {
-    executionState.resumes = []
-    executionState.interrupts = []
-    executionState.hanging = undefined
+    resetExecution()
     const root = (yield* tmpdirScoped("qd-")).path
     const api = yield* bootDirs([])(root)
     const directory = path.join(root, "original")
@@ -414,7 +497,7 @@ it.live(`keeps Unicode directory ${phase} and list consistent through the formal
       SessionExecution.node.replace(unicodeExecution),
       TaskQueue.node.replace(TaskQueue.configured({ judge: () => Effect.succeed({ verdict: "blocked", reason: "approval missing" }) })),
     ] })
-    const api = client(handler)
+    const api = legacyClient(handler, path.join(root, "opencode.db"))
     const controller = new AbortController()
     yield* Effect.addFinalizer(() => Effect.sync(() => controller.abort()))
     yield* Effect.promise(async (signal) => {
@@ -538,7 +621,7 @@ it.live("keeps authentication on all formal task-queue routes and removes experi
     })
     yield* Effect.promise(async () => {
       for (const [method, suffix] of [["POST", ""], ["GET", ""], ["GET", "/tq_test"], ["DELETE", "/tq_test"],
-        ["POST", "/tq_test/start"], ["POST", "/tq_test/heartbeat"], ["POST", "/tq_test/stop"], ["POST", "/tq_test/resume"]]) {
+        ["POST", "/tq_test/start"], ["POST", "/tq_test/plan"], ["POST", "/tq_test/heartbeat"], ["POST", "/tq_test/stop"], ["POST", "/tq_test/resume"]]) {
         const response = await handler(new Request(`http://opencode.local/api/task-queue${suffix}`, { method }))
         expect(response.status).toBe(401)
         expect(await response.json()).toMatchObject({ _tag: "UnauthorizedError" })
@@ -567,7 +650,7 @@ it.live("keeps missing task-queue directories and malformed inputs as declared A
       models: { fetch: false },
       fs: { filewatcher: false },
     })
-    const api = client(handler)
+    const api = legacyClient(handler, path.join(root, "opencode.db"))
     yield* Effect.promise(async () => {
       for (const directory of [path.join(root, "missing"), path.join(root, "opencode.db"), path.join(root, "opencode.db", "child"), path.join(root, "invalid\u0000directory")]) {
         const missing = { _tag: "LocationNotFoundError", location: { directory }, message: `Location not found: ${directory}` }
@@ -644,7 +727,7 @@ it.live("a deleted batch's Session accepts manual API input but remains fenced w
         ],
       },
     )
-    const api = client(handler)
+    const api = legacyClient(handler, path.join(root, "opencode.db"))
     yield* Effect.promise(async () => {
       const queue = await api.taskQueue.create({
         directory: root,

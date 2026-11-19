@@ -295,6 +295,9 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`title\` text,
           \`directory\` text NOT NULL,
           \`status\` text DEFAULT 'queued' NOT NULL,
+          \`workflow_version\` integer DEFAULT 1 NOT NULL,
+          \`phase\` text DEFAULT 'execution' NOT NULL,
+          \`snapshot\` text,
           \`reason\` text,
           \`owner_boot\` text,
           \`owner_pid\` integer,
@@ -320,6 +323,7 @@ const schema: Omit<DatabaseMigration.Migration, "id"> = {
           \`stalls\` integer DEFAULT 0 NOT NULL,
           \`reason\` text,
           \`summary\` text,
+          \`plan\` text,
           \`time_created\` integer NOT NULL,
           \`time_updated\` integer NOT NULL,
           CONSTRAINT \`fk_task_queue_task_queue_id_task_queue_id_fk\` FOREIGN KEY (\`queue_id\`) REFERENCES \`task_queue\`(\`id\`) ON DELETE CASCADE

@@ -20,7 +20,7 @@ const entry = path.join(import.meta.dir, "../src/index.ts")
 // TC-012/013/018/027: real source CLI, generated client, database and execution pipeline.
 // These are adapter/ownership tests, not live TUI tests or an assessment of model judgement.
 test.each(["stop-release", "kill-owner", "crash-server"] as const)(
-  "private task work stays stopped after %s until an explicit same-session resume",
+  "historical private task work stays stopped after %s until an explicit same-session resume",
   async (mode) => {
     const base = await realpath(
       process.env.OPENCODE_TEST_TMP ?? (process.platform === "win32" ? "D:/temp/aiRunner/opencode" : os.tmpdir()),
@@ -83,6 +83,12 @@ test.each(["stop-release", "kill-owner", "crash-server"] as const)(
           { title: "TQ_LAST", prompt: "Reply OK for TQ_LAST; do not call tools." },
         ],
       })
+      // The original restart/ownership contract remains supported for persisted v1 batches.
+      // New batches cannot bypass planning via any public create/start payload.
+      {
+        using database = new Database(env.OPENCODE_DB)
+        database.query("UPDATE task_queue SET workflow_version = 1, phase = 'execution' WHERE id = ?").run(queue.id)
+      }
       await client.taskQueue.start({ queueID: queue.id })
       // A real outbound LLM request is held open. Merely seeing start's running response is insufficient.
       await model.wait("TQ_HOLD", 1)

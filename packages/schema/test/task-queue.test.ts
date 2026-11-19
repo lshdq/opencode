@@ -3,8 +3,21 @@ import { Schema } from "effect"
 import { EventManifest } from "../src/event-manifest.js"
 import { AbsolutePath } from "../src/schema.js"
 import { TaskQueue } from "../src/task-queue.js"
+import { Form } from "../src/form.js"
 
 describe("task queue contracts", () => {
+  test("only version-matched real Auto approval qualifies a complete plan", () => {
+    const plan = TaskQueue.Plan.make({ version: 2, requirementsVersion: 1, type: "development", requirements: "需求全文", acceptance: ["标准"], dependencies: [], proposal: "完整方案",
+      requirementsApproval: { version: 1, formID: Form.ID.create(), choice: "confirm", time: 1 },
+      approval: { version: 2, formID: Form.ID.create(), choice: "auto", time: 2 }, mode: "auto" })
+    expect(TaskQueue.approved(plan)).toBe(true)
+    for (const choice of ["confirm", "interactive", "revise", "cancelled"] as const)
+      expect(TaskQueue.approved({ ...plan, approval: { ...plan.approval!, choice } })).toBe(false)
+    expect(TaskQueue.approved({ ...plan, version: 3 })).toBe(false)
+    expect(TaskQueue.approved({ ...plan, requirementsVersion: 2 })).toBe(false)
+    expect(TaskQueue.approved(undefined)).toBe(false)
+    expect(Schema.encodeSync(TaskQueue.Plan)({ ...plan, proposal: undefined, approval: undefined, mode: undefined })).not.toHaveProperty("proposal")
+  })
   test("IDs validate exactly the prefix they emit", () => {
     expect(TaskQueue.ID.create()).toStartWith("tq_")
     expect(TaskQueue.TaskID.create()).toStartWith("tqt_")

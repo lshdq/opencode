@@ -25,6 +25,7 @@ import dropSessionPendingMigration from "@opencode/core/database/migration/20261
 import taskQueueMigration from "@opencode/core/database/migration/20261113063324_task_queue"
 import taskQueueFencingMigration from "@opencode/core/database/migration/20261116060551_task_queue_fencing"
 import taskQueueSessionIndexMigration from "@opencode/core/database/migration/20261116065026_task_queue_session_index"
+import taskQueuePlanningMigration from "@opencode/core/database/migration/20261118024727_task_queue_planning"
 import { Global } from "@opencode/util/global"
 
 const run = <A, E>(
@@ -149,7 +150,7 @@ describe("DatabaseMigration", () => {
         yield* db.run(
           sql`INSERT INTO task_queue_task (id, queue_id, position, title, prompt, status, session_id, rounds, time_created, time_updated) VALUES ('tqt_old', 'tq_old', 1, 'Task', 'Work', 'running', 'ses_old', 2, 1, 2)`,
         )
-        const queueMigrations = [taskQueueMigration, taskQueueFencingMigration, taskQueueSessionIndexMigration]
+        const queueMigrations = [taskQueueMigration, taskQueueFencingMigration, taskQueueSessionIndexMigration, taskQueuePlanningMigration]
         expect(migrations.filter((migration) => queueMigrations.some((item) => item.id === migration.id))).toEqual(
           queueMigrations,
         )
@@ -170,6 +171,8 @@ describe("DatabaseMigration", () => {
         expect(
           yield* db.get(sql`SELECT status, session_id, rounds, accepting FROM task_queue_task WHERE id = 'tqt_old'`),
         ).toEqual({ status: "running", session_id: "ses_old", rounds: 2, accepting: 0 })
+        expect(yield* db.get(sql`SELECT workflow_version, phase, snapshot FROM task_queue WHERE id = 'tq_old'`)).toEqual({ workflow_version: 1, phase: "execution", snapshot: null })
+        expect(yield* db.get(sql`SELECT plan FROM task_queue_task WHERE id = 'tqt_old'`)).toEqual({ plan: null })
         expect(yield* db.all(sql`SELECT name FROM pragma_index_info('task_queue_task_session_idx')`)).toEqual([
           { name: "session_id" },
         ])

@@ -62,11 +62,36 @@ test("task queues use the formal Effect client and retain deprecated SDK aliases
     expect(client.experimental.taskQueue.create).toBe(client.taskQueue.create)
     expect(yield* client.taskQueue.create(input)).toEqual(queue)
     expect(yield* client.experimental.taskQueue.create(input)).toEqual(queue)
+    expect(client.experimental.taskQueue.plan).toBe(client.taskQueue.plan)
+    expect(yield* client.taskQueue.plan({ queueID: queue.id, taskID: TaskQueue.TaskID.make("tqt_test") })).toEqual(queue)
+    expect(yield* client.experimental.taskQueue.plan({ queueID: queue.id, taskID: TaskQueue.TaskID.make("tqt_test") })).toEqual(queue)
   }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
   expect(requests).toEqual([
     { url: "http://localhost:3000/api/task-queue", body: input },
     { url: "http://localhost:3000/api/task-queue", body: input },
+    { url: "http://localhost:3000/api/task-queue/tq_test/plan", body: { taskID: "tqt_test" } },
+    { url: "http://localhost:3000/api/task-queue/tq_test/plan", body: { taskID: "tqt_test" } },
   ])
+})
+
+// TC-010: initial/resumed planning omits taskID; only reopening an item supplies it.
+test.each(["formal", "deprecated"] as const)("%s Effect taskQueue.plan accepts an omitted taskID", async (namespace) => {
+  const requests: Array<{ url: string; body: unknown }> = []
+  const queue = TaskQueue.Info.make({
+    id: TaskQueue.ID.make("tq_test"), directory: AbsolutePath.make("/project"), status: "queued", tasks: [],
+    time: { created: 1, updated: 1 },
+  })
+  const httpClient = HttpClient.make((request) => {
+    requests.push({ url: request.url, body: request.body._tag === "Uint8Array"
+      ? JSON.parse(new TextDecoder().decode(request.body.body)) : undefined })
+    return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({ data: queue })))
+  })
+  const result = await Effect.gen(function* () {
+    const client = yield* OpenCode.make({ baseUrl: "http://localhost:3000" })
+    return yield* (namespace === "formal" ? client.taskQueue : client.experimental.taskQueue).plan({ queueID: queue.id })
+  }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient), Effect.runPromise)
+  expect(result).toEqual(queue)
+  expect(requests).toEqual([{ url: "http://localhost:3000/api/task-queue/tq_test/plan", body: {} }])
 })
 
 test("vcs.base decodes nullable review-base metadata", async () => {

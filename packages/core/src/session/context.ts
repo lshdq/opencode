@@ -25,6 +25,8 @@ import { SessionModelRequest } from "./model-request.js"
 import { SessionRunnerModel } from "./runner/model.js"
 import { SessionSchema } from "./schema.js"
 import { SessionStore } from "./store.js"
+import { TaskQueueOwnership } from "../task-queue/ownership.js"
+import { TaskQueuePlanning } from "../task-queue/planning.js"
 
 export interface Selection {
   readonly session: SessionSchema.Info
@@ -140,13 +142,16 @@ const layer = Layer.effect(
         return yield* Effect.interrupt
 
       yield* mcpTools.flush
-      const agent = yield* agents.select(session.agent)
+      const owned = yield* TaskQueueOwnership.find(db, store, sessionID)
+      const planning = owned?.queue?.workflow_version === 2 && owned.queue.phase !== "execution"
+      const agent = yield* agents.select(planning ? Agent.ID.make("plan") : session.agent)
       if (!agent.info) return yield* new AgentNotFoundError({ sessionID: session.id, agent: session.agent ?? agent.id })
       // Session permissions narrow discovery the same way they narrow the tool snapshot.
       const permissions = Permission.merge(agent.info.permissions, session.permissions ?? [])
+      const names = planning ? TaskQueuePlanning.readOnlyTools : undefined
       const loaded = yield* Effect.all(
         {
-          tools: registry.snapshot(permissions),
+          tools: registry.snapshot(permissions, names),
           builtins: builtins.load(),
           discovery: discovery.load(),
           skills: skillInstructions.load(permissions),
@@ -171,7 +176,20 @@ const layer = Layer.effect(
           loaded.builtins,
           loaded.entries,
         ]),
-        tools: loaded.tools,
+        tools: {
+          ...loaded.tools,
+          definitions: loaded.tools.definitions.filter((tool) => tool.name !== "task_queue_plan" || (planning && owned?.root === sessionID)),
+          execute: (input: Parameters<Tool.Snapshot["execute"]>[0]) => Effect.gen(function* () {
+            // Recheck durable ownership at execution, not only when the catalog was captured.
+            if (owned && !(yield* TaskQueueOwnership.admitted(db, store, sessionID))) return yield* Effect.interrupt
+            const fresh = yield* TaskQueueOwnership.find(db, store, sessionID)
+            if ((planning || (fresh?.queue?.workflow_version === 2 && fresh.queue.phase !== "execution")) && !TaskQueuePlanning.readOnlyTools.has(input.call.name))
+              return yield* new Tool.Error({ message: "Task queue planning is read-only; manual batch start is required" })
+            if (input.call.name === "task_queue_plan" && (!planning || owned?.root !== sessionID))
+              return yield* new Tool.Error({ message: "Plan submission is only available to the active planning root" })
+            return yield* loaded.tools.execute(input)
+          }),
+        },
       }
     })
 

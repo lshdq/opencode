@@ -6,7 +6,7 @@ import { taskQueue } from "../fixture/task-queue"
 import { createEventStream, createFetch, directory, json, type FetchHandler } from "../fixture/tui-client"
 import { takeDraft } from "../../src/component/prompt/draft-stash"
 
-test.each((["start", "resume", "stop", "delete", "create"] as const).flatMap((action) => [
+test.each((["plan", "start", "resume", "stop", "delete", "create"] as const).flatMap((action) => [
   [`${action}/success`, action, true] as const, [`${action}/failure`, action, false] as const,
 ]))("obsolete %s cannot apply control data, errors or draft transitions to a replacement connection", async (_, action, success) => {
   takeDraft(undefined)
@@ -14,7 +14,8 @@ test.each((["start", "resume", "stop", "delete", "create"] as const).flatMap((ac
   const response = Promise.withResolvers<Response>()
   const submitted = Promise.withResolvers<void>()
   const created = Promise.withResolvers<Response>()
-  const old = taskQueue({ directory, title: "Obsolete operation", status: action === "resume" ? "stopped" : action === "stop" ? "running" : "queued" })
+  const old = taskQueue({ directory, title: "Obsolete operation", status: action === "resume" ? "stopped" : action === "stop" ? "running" : "queued",
+    ...(action === "plan" ? { workflowVersion: 2, phase: "planning" } : {}) })
   const replacement = taskQueue({ directory, title: "Replacement control receipt" })
   const payloads: TaskQueueCreateInput[] = []
   await using app = await migration(async (url, request) => {
@@ -144,11 +145,12 @@ test.each(["editor", "draft"] as const)("a new SDK preserves same-directory unsu
   expect(app.rejected).toEqual([])
 })
 
-test.each(["start", "resume", "stop", "delete", "create"] as const)("a current %s failure stays visible, releases busy for retry, and the new ticket blocks duplicate submissions", async (action) => {
+test.each(["plan", "start", "resume", "stop", "delete", "create"] as const)("a current %s failure stays visible, releases busy for retry, and the new ticket blocks duplicate submissions", async (action) => {
   takeDraft(undefined)
   const requested = Promise.withResolvers<void>()
   const response = Promise.withResolvers<Response>()
-  const info = taskQueue({ directory, title: "Current failure control", status: action === "resume" ? "stopped" : action === "stop" ? "running" : "queued" })
+  const info = taskQueue({ directory, title: "Current failure control", status: action === "resume" ? "stopped" : action === "stop" ? "running" : "queued",
+    ...(action === "plan" ? { workflowVersion: 2, phase: "planning" } : {}) })
   let attempts = 0
   let removed = false
   let current = info
@@ -195,7 +197,7 @@ test.each(["start", "resume", "stop", "delete", "create"] as const)("a current %
     expect(attempts).toBe(2)
     expect(app.captureCharFrame()).not.toContain("检查访问权限")
     removed = action === "delete"
-    current = { ...info, status: ["start", "resume"].includes(action) ? "running" : action === "stop" ? "stopped" : "queued", time: { created: 1, updated: 2 } }
+    current = { ...info, status: ["plan", "start", "resume"].includes(action) ? "running" : action === "stop" ? "stopped" : "queued", time: { created: 1, updated: 2 } }
     response.resolve(action === "delete" ? new Response(null, { status: 204 }) : json({ data: current }))
     await app.waitForFrame((frame) => action === "delete" ? frame.includes("暂无批次") : frame.includes("rounds") && !frame.includes("正在处理"))
     expect(attempts).toBe(2)

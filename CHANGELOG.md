@@ -4,6 +4,7 @@ Release notes for OpenCode V2, newest first.
 
 ## Unreleased
 
+- `/tasks` now plans and confirms each task's requirements and full proposal before any task executes. After all approved plans are saved, manually start serial execution. Development tasks follow the complete `dev-workflow`, including independent testing and review; hard-blocked tasks block their dependents while later independent tasks continue.
 - Task queues are now always enabled; the deprecated `experimental.task_queue` setting is ignored. HTTP routes move from `/api/experimental/task-queue` to `/api/task-queue`, with `taskQueue.*` operation IDs and `client.taskQueue.*` methods. Deprecated SDK methods and types remain aliases until the next minor, but the old experimental HTTP routes are removed.
 - Task queue items only require prompt content. When `title` is omitted, a short name is derived from the first non-empty line without changing the stored prompt. Existing titles are preserved.
 

@@ -2,7 +2,7 @@ import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { AbsolutePath } from "@opencode/core/schema"
 import { TaskQueue } from "@opencode/core/task-queue"
 import { InvalidRequestError, LocationNotFoundError, TaskQueueNotFoundError } from "@opencode/protocol/errors"
-import type { ListQuery, StopPayload } from "@opencode/protocol/groups/task-queue"
+import type { ListQuery, PlanPayload, StopPayload } from "@opencode/protocol/groups/task-queue"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Api } from "../api"
@@ -16,6 +16,7 @@ export const TaskQueueHandler = HttpApiBuilder.group(Api, "server.taskQueue", (h
       .handle("taskQueue.list", (ctx) => taskQueue.list(ctx.query))
       .handle("taskQueue.get", (ctx) => taskQueue.get(ctx.params.queueID))
       .handle("taskQueue.start", (ctx) => taskQueue.start(ctx.params.queueID))
+      .handle("taskQueue.plan", (ctx) => taskQueue.plan(ctx.params.queueID, ctx.payload))
       .handle("taskQueue.heartbeat", (ctx) => taskQueue.heartbeat(ctx.params.queueID))
       .handle("taskQueue.stop", (ctx) => taskQueue.stop(ctx.params.queueID, ctx.payload))
       .handle("taskQueue.resume", (ctx) => taskQueue.resume(ctx.params.queueID))
@@ -71,6 +72,10 @@ export const makeTaskQueue = Effect.gen(function* () {
         yield* find(id)
         return { data: yield* mapErrors(queues.start(id)) }
       }),
+    plan: (id: TaskQueue.ID, payload: PlanPayload) => Effect.gen(function* () {
+      yield* find(id)
+      return { data: yield* mapErrors(queues.plan(id, payload.taskID)) }
+    }),
     heartbeat: (id: TaskQueue.ID) =>
       Effect.gen(function* () {
         yield* find(id)

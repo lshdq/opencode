@@ -84,6 +84,8 @@ import { McpEventTools } from "../tool/plugin/mcp-events.js"
 import { McpResourceTools } from "../tool/plugin/mcp-resource.js"
 import { OpenCodeTools } from "../tool/plugin/opencode.js"
 import { QuestionTool } from "../tool/plugin/question.js"
+import { TaskQueuePlanTool } from "../tool/plugin/task-queue-plan.js"
+import { TaskQueuePlanning } from "../task-queue/planning.js"
 import { ReadToolFileSystem } from "../tool/read-filesystem.js"
 import { ReadTool } from "../tool/plugin/read.js"
 import { ArtifactTools } from "../tool/plugin/artifact.js"
@@ -157,6 +159,7 @@ const services = [
   Npm.Service,
   Permission.Service,
   Form.Service,
+  TaskQueuePlanning.Service,
   ReadToolFileSystem.Service,
   Reference.Service,
   WebSearch.Service,
@@ -219,6 +222,7 @@ export const requirements = LayerNode.group([
   Npm.node,
   Permission.node,
   Form.node,
+  TaskQueuePlanning.node,
   ReadToolFileSystem.node,
   Reference.node,
   WebSearch.node,
@@ -274,6 +278,7 @@ const pre = [
   McpEventTools.Plugin,
   McpResourceTools.Plugin,
   QuestionTool.Plugin,
+  TaskQueuePlanTool.Plugin,
   ReadTool.Plugin,
   ArtifactTools.Plugin,
   ScheduleTools.Plugin,

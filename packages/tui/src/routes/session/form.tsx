@@ -91,6 +91,8 @@ export function FormPrompt(props: { form: FormWithLocation }) {
   let textarea: TextareaRenderable | undefined
   const [inputTarget, setInputTarget] = createSignal<TextareaRenderable>()
   let review: ScrollBoxRenderable | undefined
+  let planDescription: ScrollBoxRenderable | undefined
+  const taskPlan = () => props.form.metadata?.["kind"] === "taskqueue.plan"
 
   const message = createMemo(() => {
     const value = props.form.metadata?.["message"]
@@ -540,6 +542,8 @@ export function FormPrompt(props: { form: FormWithLocation }) {
     mode: FORM_MODE,
     enabled: !confirm() && answerField() !== undefined,
     commands: [
+      { bind: "pageup", title: "Scroll plan up", enabled: taskPlan(), run: () => planDescription?.scrollBy(-5) },
+      { bind: "pagedown", title: "Scroll plan down", enabled: taskPlan(), run: () => planDescription?.scrollBy(5) },
       {
         id: "prompt.paste",
         title: "Paste from clipboard",
@@ -880,9 +884,15 @@ export function FormPrompt(props: { form: FormWithLocation }) {
 
         <Show when={!confirm() && answerField()}>
           <box paddingLeft={1} gap={1}>
-            <box>
-              <text fg={theme.text.base}>{answerField()!.description ?? formLabel(answerField()!)}</text>
-            </box>
+            <Show when={taskPlan()} fallback={<box><text fg={theme.text.base}>{answerField()!.description ?? formLabel(answerField()!)}</text></box>}>
+              <box flexShrink={0}>
+                <text fg={theme.text.muted}>PgUp/PgDn 查看完整内容 · 选择即提交</text>
+                <scrollbox maxHeight={Math.max(3, Math.floor(dimensions().height / 4))}
+                  ref={(value: ScrollBoxRenderable) => { planDescription = value }}>
+                  <text fg={theme.text.base} wrapMode="word">{answerField()!.description ?? formLabel(answerField()!)}</text>
+                </scrollbox>
+              </box>
+            </Show>
             <Show when={textual() ? answerField()!.key : undefined} keyed>
               <box paddingLeft={1}>
                 <textarea
@@ -940,6 +950,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
                           <box
                             backgroundColor={theme.background.raised.base}
                             flexDirection="row"
+                            minWidth={0} flexShrink={1}
                           >
                             <Show when={multi()}>
                               <text
@@ -956,7 +967,7 @@ export function FormPrompt(props: { form: FormWithLocation }) {
                                 [{picked() ? "✓" : " "}]
                               </text>
                             </Show>
-                            <text fg={active() ? theme.text.formfield.focused : theme.text.formfield.base}>
+                            <text fg={active() ? theme.text.formfield.focused : theme.text.formfield.base} wrapMode="word" minWidth={0} flexShrink={1}>
                               {row.label}
                             </text>
                           </box>

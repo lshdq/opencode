@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "59f2ba54-f3e0-4712-8024-c263a9400450",
-  "prevIds": ["991bebba-cc81-41b9-be3a-3df2c325dabf"],
+  "id": "e639aa72-b147-47d9-93f4-36284040cc2f",
+  "prevIds": ["59f2ba54-f3e0-4712-8024-c263a9400450"],
   "ddl": [
     {
       "name": "account_state",
@@ -1965,6 +1965,36 @@
       "table": "task_queue"
     },
     {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "1",
+      "generated": null,
+      "name": "workflow_version",
+      "entityType": "columns",
+      "table": "task_queue"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'execution'",
+      "generated": null,
+      "name": "phase",
+      "entityType": "columns",
+      "table": "task_queue"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "snapshot",
+      "entityType": "columns",
+      "table": "task_queue"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -2171,6 +2201,16 @@
       "default": null,
       "generated": null,
       "name": "summary",
+      "entityType": "columns",
+      "table": "task_queue_task"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "plan",
       "entityType": "columns",
       "table": "task_queue_task"
     },

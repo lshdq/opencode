@@ -11,12 +11,40 @@ export function sameTaskDirectory(left: string, right: string) {
   return /^[a-z]:(?:\/|$)/i.test(a) || a.startsWith("//") ? a.toLowerCase() === b.toLowerCase() : a === b
 }
 
-export function taskQueueCounts(tasks: readonly TaskQueueTask[]) {
+export function taskQueueCounts(tasks: readonly TaskQueueTask[], phase?: TaskQueueInfo["phase"]) {
   const count = (status: TaskQueueTask["status"]) => tasks.filter((task) => task.status === status).length
+  if (phase === "planning" || phase === "ready")
+    return `待规划 ${count("pending")} · 规划中 ${count("planning")} · 已就绪 ${count("ready")} · 中断 ${count("interrupted")}`
   return `完成 ${count("completed")} · 失败 ${count("failed")} · 阻塞 ${count("blocked")} · 待执行 ${count("pending")} · 中断 ${count("interrupted")} · 跳过 ${count("cancelled")}`
 }
 
+export function taskQueueProgress(info: TaskQueueInfo) {
+  return info.tasks.filter((task) => info.phase === "planning" || info.phase === "ready"
+    ? task.status === "ready" : ["completed", "failed", "blocked", "cancelled"].includes(task.status)).length
+}
+
+export function canPlanTaskQueue(info: TaskQueueInfo) {
+  return info.workflowVersion === 2 && info.phase === "planning" &&
+    ["queued", "stopped", "interrupted"].includes(info.status)
+}
+
+export function canReplanTaskQueue(info: TaskQueueInfo) {
+  return info.workflowVersion === 2 && (info.phase === "planning" || info.phase === "ready") && info.status !== "running"
+}
+
+export function canStartTaskQueue(info: TaskQueueInfo) {
+  if (info.status !== "queued") return false
+  if (info.workflowVersion !== 2) return true
+  return info.phase === "ready" && info.tasks.length > 0 && info.tasks.every((task) => {
+    const plan = task.plan
+    return task.status === "ready" && plan?.mode === "auto" && plan.proposal &&
+      plan.requirementsApproval?.choice === "confirm" && plan.requirementsApproval.version === plan.requirementsVersion &&
+      plan.approval?.choice === "auto" && plan.approval.version === plan.version
+  })
+}
+
 export function canResumeTaskQueue(info: TaskQueueInfo) {
+  if (info.workflowVersion === 2 && info.phase !== "execution") return false
   return info.status === "stopped" || info.status === "interrupted" ||
     (info.status === "done" && info.tasks.some((task) => task.status === "blocked" || task.status === "failed"))
 }

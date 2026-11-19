@@ -4,7 +4,7 @@ import { createTaskQueueOwner } from "../src/util/task-queue-owner"
 import { taskQueue } from "./fixture/task-queue"
 import { json } from "./fixture/tui-client"
 
-test.each(["start", "resume"] as const)("current B cannot intercept A's pending %s heartbeat or exit cleanup", async (action) => {
+test.each(["plan", "start", "resume"] as const)("current B cannot intercept A's pending %s heartbeat or exit cleanup", async (action) => {
   await using a = await endpoint("A", true)
   await using b = await endpoint("B", false, "running")
   let current = a
@@ -31,7 +31,7 @@ test.each(["start", "resume"] as const)("current B cannot intercept A's pending 
   }
 })
 
-test.each((["start", "resume"] as const).flatMap((action) => (["A-first", "B-first", "A-fails", "B-fails"] as const).map((order) => [`${action}/${order}`, action, order] as const)))("origin-scoped %s promises, results, observations and finally remain independent", async (_, action, order) => {
+test.each((["plan", "start", "resume"] as const).flatMap((action) => (["A-first", "B-first", "A-fails", "B-fails"] as const).map((order) => [`${action}/${order}`, action, order] as const)))("origin-scoped %s promises, results, observations and finally remain independent", async (_, action, order) => {
   await using a = await endpoint("A", true)
   await using b = await endpoint("B", true)
   let current = a
@@ -86,7 +86,7 @@ test.each((["start", "resume"] as const).flatMap((action) => (["A-first", "B-fir
   }
 })
 
-test.each(["start", "resume"] as const)("same endpoint SDK and credential refresh keeps an effective %s owner", async (action) => {
+test.each(["plan", "start", "resume"] as const)("same endpoint SDK and credential refresh keeps an effective %s owner", async (action) => {
   await using source = await endpoint("same", false)
   const ticks = new Set<() => void>()
   const owner = createTaskQueueOwner(() => source.api.taskQueue, (tick) => { ticks.add(tick); return () => { ticks.delete(tick) } }, () => source.url)
@@ -137,7 +137,7 @@ test("B terminal facts cannot cancel A eligibility, and source-bound renewal rep
   }
 })
 
-test.each((["start", "resume"] as const).flatMap((action) => ([true, false] as const).map((before) => [`${action}/${before ? "pending" : "owned"}`, action, before] as const)))("bound A observations end only A's %s while B has the same queue ID", async (_, action, before) => {
+test.each((["plan", "start", "resume"] as const).flatMap((action) => ([true, false] as const).map((before) => [`${action}/${before ? "pending" : "owned"}`, action, before] as const)))("bound A observations end only A's %s while B has the same queue ID", async (_, action, before) => {
   await using a = await endpoint("A", true)
   await using b = await endpoint("B", true)
   let current = a
@@ -173,7 +173,7 @@ test.each((["start", "resume"] as const).flatMap((action) => ([true, false] as c
   }
 })
 
-test.each(["start", "resume"] as const)("same canonical endpoint deduplicates a pending %s across credential refresh", async (action) => {
+test.each(["plan", "start", "resume"] as const)("same canonical endpoint deduplicates a pending %s across credential refresh", async (action) => {
   await using source = await endpoint("same", true)
   let url = `${source.url}#old-stream`
   const owner = createTaskQueueOwner(() => source.api.taskQueue, () => () => {}, () => url)
@@ -253,6 +253,7 @@ async function endpoint(name: string, pending: boolean, status: TaskQueueInfo["s
     credentials.push(credential)
     if (action === "heartbeat") { beat.resolve(); return holdHeartbeat ? beatReply.promise : json({ data: info }) }
     if (action === "stop") { info = { ...info, status: "stopped" }; return json({ data: info }) }
+    if (action === "plan") info = { ...info, workflowVersion: 2, phase: "planning" }
     requested.resolve()
     if (pending && controls.length === 1) return reply.promise
     info = { ...info, status: "running" }

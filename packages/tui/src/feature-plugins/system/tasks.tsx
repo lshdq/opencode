@@ -14,9 +14,13 @@ import { useTheme } from "../../context/theme"
 import { DialogFooter, DialogHeader, DialogLayout, useDialog, type DialogFooterAction } from "../../ui/dialog"
 import { DialogPrompt } from "../../ui/dialog-prompt"
 import { DialogSelect } from "../../ui/dialog-select"
-import { canResumeTaskQueue, createTaskQueueFeed, taskQueueCounts, taskQueueError } from "./tasks-data"
+import {
+  canPlanTaskQueue, canReplanTaskQueue, canResumeTaskQueue, canStartTaskQueue,
+  createTaskQueueFeed, taskQueueCounts, taskQueueError, taskQueueProgress,
+} from "./tasks-data"
 import { createTaskQueueEvents } from "./tasks-events"
 import { createTaskQueueDisplay, TASK_QUEUE_PANEL } from "./tasks-display"
+import { TaskQueuePlan } from "./tasks-plan"
 
 export type TaskDraft = { title?: string; prompt: string }
 
@@ -27,6 +31,26 @@ export function taskDraftName(task: TaskDraft) {
 const labels = {
   queued: "待开始", running: "执行中", done: "本批处理结束", stopped: "已停止", interrupted: "已中断",
   pending: "待执行", completed: "完成", failed: "失败", blocked: "阻塞", cancelled: "已跳过",
+  planning: "规划中", ready: "已就绪（未执行）",
+}
+
+function queueLabel(info: TaskQueueInfo) {
+  if (info.phase === "ready") return "等待手动开始"
+  if (info.phase === "planning") {
+    if (info.status === "running") return "规划中（未执行）"
+    if (info.status === "queued") return "待规划"
+    return `${labels[info.status]} · 规划未完成`
+  }
+  return labels[info.status]
+}
+
+function taskLabel(info: TaskQueueInfo, status: TaskQueueInfo["tasks"][number]["status"]) {
+  if (info.phase === "planning" && status === "pending") return "待规划"
+  return labels[status]
+}
+
+function activity(info: TaskQueueInfo) {
+  return info.phase === "planning" ? "规划中" : "执行中"
 }
 
 function statusColor(theme: Plugin.Context["theme"], status: string) {
@@ -118,7 +142,7 @@ export function TaskQueuePreview(props: {
         ref={(value: ScrollBoxRenderable) => { scroll = value }}>
         <text fg={theme.text.base}>{props.title || "未命名批次"} · {props.tasks.length} 项任务</text>
         <Show when={props.busy}><text fg={theme.text.muted}>创建中，暂不能修改；Esc/Ctrl+W 仅关闭面板，已提交批次仍会保存。</text></Show>
-        <text fg={theme.text.muted}>按序执行一次；阻塞先处理其余可执行内容，最后汇总，不自动回访。</text>
+        <text fg={theme.text.muted} wrapMode="word">创建后逐项规划；在任务会话确认需求和方案，全部选择 Auto 后仍须手动开始执行。</text>
           <For each={props.tasks}>{(task, index) => (
             <box paddingBottom={1} flexShrink={0}>
               <text fg={theme.text.base}>{index() + 1}. {taskDraftName(task)}</text>
@@ -133,6 +157,7 @@ export function TaskQueuePreview(props: {
 export function TaskQueueDetail(props: {
   info: TaskQueueInfo; busy: boolean; onBack: () => void; onStart: () => void; onResume: () => void
   onStop: () => void; onSession: (id: string) => void; onPanel?: () => void
+  onPlan?: () => void; onViewPlan?: (taskID: string) => void
 }) {
   const theme = useTheme().surface("dialog")
   const dimensions = useTerminalDimensions()
@@ -150,14 +175,22 @@ export function TaskQueueDetail(props: {
     const task = props.info.tasks[selected()]
     if (task?.sessionID) props.onSession(task.sessionID)
   }
+  const viewPlan = () => {
+    const task = props.info.tasks[selected()]
+    if (task?.plan) props.onViewPlan?.(task.id)
+  }
+  const planLabel = () => props.info.status === "queued" ? "开始规划" : "继续规划"
   const actions = (): DialogFooterAction[] => [
     { title: "返回", key: "esc", onTrigger: props.onBack },
     { title: "打开会话", key: "enter", disabled: !props.info.tasks[selected()]?.sessionID, onTrigger: open },
     ...(props.onPanel ? [{ title: "批次侧面板", key: "ctrl+o", disabled: !props.info.tasks.some((task) => task.sessionID), onTrigger: props.onPanel }] : []),
-    ...(props.info.status === "queued" ? [{ title: "开始", key: "ctrl+s", disabled: props.busy, onTrigger: props.onStart }] : []),
+    ...(canPlanTaskQueue(props.info) ? [{ title: planLabel(), key: "ctrl+s", disabled: props.busy, onTrigger: props.onPlan }] : []),
+    ...(canStartTaskQueue(props.info) ? [{ title: "手动开始", key: "ctrl+s", disabled: props.busy, onTrigger: props.onStart }] : []),
     ...(canResumeTaskQueue(props.info) ? [{ title: "手动续办", key: "ctrl+e", disabled: props.busy, onTrigger: props.onResume }] : []),
     ...(props.info.status === "running" ? [{ title: "停止", key: "ctrl+x", disabled: props.busy, onTrigger: props.onStop }] : []),
   ]
+  const planActions = () => props.onViewPlan && props.info.tasks[selected()]?.plan
+    ? [{ title: "查看方案", key: "ctrl+p", onTrigger: viewPlan }] : []
   Keymap.createLayer(() => ({
     mode: "modal", commands: [
       { bind: "escape", title: "返回列表", run: props.onBack },
@@ -167,7 +200,9 @@ export function TaskQueueDetail(props: {
       { bind: "pagedown", title: "向下翻页", run: () => scroll?.scrollBy(10) },
       { bind: "enter", title: "打开任务会话", run: open },
       { bind: "ctrl+o", title: "打开批次侧面板", enabled: !!props.onPanel && props.info.tasks.some((task) => task.sessionID), run: () => props.onPanel?.() },
-      { bind: "ctrl+s", title: "开始批次", enabled: !props.busy && props.info.status === "queued", run: props.onStart },
+      { bind: "ctrl+p", title: "查看完整方案", enabled: !!props.info.tasks[selected()]?.plan, run: viewPlan },
+      { bind: "ctrl+s", title: "开始规划或执行", enabled: !props.busy && (canStartTaskQueue(props.info) || canPlanTaskQueue(props.info)),
+        run: () => { if (canPlanTaskQueue(props.info)) return props.onPlan?.(); props.onStart() } },
       { bind: "ctrl+e", title: "手动续办", enabled: !props.busy && canResumeTaskQueue(props.info), run: props.onResume },
       { bind: "ctrl+x", title: "停止批次", enabled: !props.busy && props.info.status === "running", run: props.onStop },
     ],
@@ -175,11 +210,14 @@ export function TaskQueueDetail(props: {
   onMount(() => renderer.currentFocusedRenderable?.blur())
   return (
     <DialogLayout header={<DialogHeader title={props.info.title || "任务批次"} onClose={props.onBack} />}
-      footer={{ actions: { primary: actions() } }} legacyFooter={<DialogFooter actions={{ primary: actions() }} />}>
+      footer={{ actions: { primary: actions(), secondary: planActions() } }} legacyFooter={<DialogFooter actions={{ primary: actions(), secondary: planActions() }} />}>
       <scrollbox height={Math.max(3, dimensions().height - 10)} contentOptions={{ gap: 1 }}
         ref={(value: ScrollBoxRenderable) => { scroll = value }}>
-        <text fg={statusColor(theme, props.info.status)}>{labels[props.info.status]}{props.busy ? " · 正在处理…" : ""}</text>
-        <text fg={theme.text.muted} wrapMode="word">{taskQueueCounts(props.info.tasks)}</text>
+        <text fg={statusColor(theme, props.info.status)}>{queueLabel(props.info)}{props.busy ? " · 正在处理…" : ""}</text>
+        <text fg={theme.text.muted} wrapMode="word">{taskQueueCounts(props.info.tasks, props.info.phase)}</text>
+        <Show when={props.info.phase === "planning"}><text fg={theme.text.muted} wrapMode="word">打开当前任务会话回答问题和需求/方案 Form；方案 Form 是唯一确认，不会提前执行。</text></Show>
+        <Show when={props.info.phase === "ready"}><text fg={theme.text.muted} wrapMode="word">全部方案当前版本获批并选择 Auto 后才可手动开始。请开启自动接受权限；显式 deny 仍有效。</text></Show>
+        <Show when={props.info.snapshot}><text fg={theme.text.muted} wrapMode="word">方案快照：{props.info.snapshot}</text></Show>
         <Show when={props.info.reason}><text fg={theme.text.muted}>{props.info.reason}</text></Show>
         <text fg={theme.text.muted}>↑/↓ 选择 · PgUp/PgDn 滚动 · 关闭面板不会停止；退出本 TUI 才停止自有批次。</text>
           <For each={props.info.tasks}>{(task, index) => (
@@ -190,7 +228,8 @@ export function TaskQueueDetail(props: {
               <text fg={theme.text.formfield.base}>
                 {props.info.currentTaskID === task.id ? "▶ " : "  "}{index() + 1}. {task.title}
               </text>
-              <text fg={statusColor(theme, task.status)}>{labels[task.status]} · rounds {task.rounds}</text>
+              <text fg={statusColor(theme, task.status)}>{taskLabel(props.info, task.status)} · rounds {task.rounds}</text>
+              <Show when={task.plan}>{(plan) => <text fg={theme.text.muted} wrapMode="word">{plan().type === "development" ? "开发" : "其他"} · 方案 v{plan().version} · {plan().mode ?? "未选择模式"} · {plan().approval ? `方案审批 ${plan().approval!.choice} v${plan().approval!.version}` : "方案未批准"}</text>}</Show>
               <Show when={task.reason}><text fg={theme.text.muted} wrapMode="word">原因：{task.reason}</text></Show>
               <Show when={task.summary}><text fg={theme.text.base} wrapMode="word">摘要：{task.summary}</text></Show>
               <Show when={task.sessionID}><text fg={theme.text.muted} wrapMode="word">会话：{task.sessionID}</text></Show>
@@ -232,30 +271,32 @@ export function TaskQueuePanel(props: {
       { bind: "pageup", title: "向上翻页", run: () => scroll?.scrollBy(-10) },
       { bind: "pagedown", title: "向下翻页", run: () => scroll?.scrollBy(10) },
       { bind: "enter", title: "查看任务会话", run: () => open() },
-      { bind: "r", title: "回到执行中", run: props.onFollow },
-      { bind: "escape", title: "收起批次（继续执行）", run: props.panel.close },
+      { bind: "r", title: "回到当前任务", run: props.onFollow },
+      { bind: "escape", title: "收起批次（继续处理）", run: props.panel.close },
       { bind: "f", title: "切换面板大小", run: props.panel.toggleFullscreen },
     ],
   }))
-  const progress = () => props.info.tasks.filter((task) => ["completed", "failed", "blocked", "cancelled"].includes(task.status)).length
   return <box flexGrow={1} minHeight={0} minWidth={0} paddingLeft={1} paddingRight={1}>
     <box flexDirection="row" gap={1} flexShrink={0}>
       <text fg={theme.text.base} flexGrow={1} minWidth={0} wrapMode="word">批次：{props.info.title || "未命名批次"}</text>
       <text fg={theme.text.action.secondary.base} onMouseUp={props.panel.toggleFullscreen}>大小 [f]</text>
       <text fg={theme.text.action.secondary.base} onMouseUp={props.panel.close}>收起 [esc]</text>
     </box>
-    <text fg={statusColor(theme, props.info.status)} flexShrink={0}>{labels[props.info.status]} · {progress()}/{props.info.tasks.length}</text>
-    <text fg={theme.text.muted} flexShrink={0}>{props.following ? "跟随执行中" : "已暂停跟随"}</text>
-    <text fg={theme.text.action.secondary.base} flexShrink={0} onMouseUp={props.onFollow}>回到执行中 [r]</text>
+    <text fg={statusColor(theme, props.info.status)} flexShrink={0} wrapMode="word">{queueLabel(props.info)} · {taskQueueProgress(props.info)}/{props.info.tasks.length}</text>
+    <text fg={theme.text.muted} flexShrink={0}>{props.following ? props.info.phase === "ready" ? "规划完成，未执行" : `跟随${activity(props.info)}` : "已暂停跟随"}</text>
+    <text fg={theme.text.action.secondary.base} flexShrink={0} onMouseUp={props.onFollow}>{props.info.phase === "ready" ? "查看最后规划会话" : `回到${activity(props.info)}`} [r]</text>
     <scrollbox flexGrow={1} minHeight={0} contentOptions={{ gap: 1 }} ref={(value: ScrollBoxRenderable) => { scroll = value }}>
-      <text fg={theme.text.muted} wrapMode="word">{taskQueueCounts(props.info.tasks)}</text>
+      <text fg={theme.text.muted} wrapMode="word">{taskQueueCounts(props.info.tasks, props.info.phase)}</text>
+      <Show when={props.info.phase === "ready"}><text fg={theme.text.muted} wrapMode="word">/tasks 手动开始；Auto 不授予工具权限，请开启自动接受权限，显式 deny 仍有效。</text></Show>
+      <Show when={props.info.snapshot}><text fg={theme.text.muted} wrapMode="word">方案快照：{props.info.snapshot}</text></Show>
       <Show when={props.info.reason}><text fg={theme.text.muted} wrapMode="word">批次原因：{props.info.reason}</text></Show>
       <For each={props.info.tasks}>{(task, index) => <box id={`batch-panel-${task.id}`} flexShrink={0} paddingLeft={1} paddingRight={1}
         ref={(value: BoxRenderable) => { rows[index()] = value }}
         backgroundColor={selected() === index() && props.panel.focused ? theme.background.formfield.focused : undefined}
         onMouseUp={() => open(index())}>
         <text fg={theme.text.formfield.base} wrapMode="word">{index() + 1}. {task.title}</text>
-        <text fg={statusColor(theme, task.status)} wrapMode="word">{labels[task.status]} · rounds {task.rounds}{props.info.currentTaskID === task.id ? " · ▶ 执行" : ""}{task.sessionID === props.panel.sessionID ? " · ◉ 查看" : ""}</text>
+        <text fg={statusColor(theme, task.status)} wrapMode="word">{taskLabel(props.info, task.status)} · rounds {task.rounds}{props.info.currentTaskID === task.id && props.info.status === "running" ? props.info.phase === "planning" ? " · ▶ 规划" : " · ▶ 执行" : ""}{task.sessionID === props.panel.sessionID ? " · ◉ 查看" : ""}</text>
+        <Show when={task.plan}>{(plan) => <text fg={theme.text.muted}>方案 v{plan().version} · {plan().mode ?? "未选择模式"}</text>}</Show>
         <Show when={!task.sessionID}><text fg={theme.text.muted}>会话尚未创建，不会提前执行</text></Show>
         <Show when={task.reason}><text fg={theme.text.muted} wrapMode="word">原因：{task.reason}</text></Show>
         <Show when={task.summary}><text fg={theme.text.base} wrapMode="word">摘要：{task.summary}</text></Show>
@@ -271,7 +312,7 @@ function TaskQueuePending(props: { feed: Workspace["feed"]; panel: PanelInput })
   Keymap.createLayer(() => ({
     mode: "global", enabled: () => props.panel.focused && dialog.stack.length === 0,
     commands: [
-      { bind: "escape", title: "收起批次（继续执行）", run: props.panel.close },
+      { bind: "escape", title: "收起批次（继续处理）", run: props.panel.close },
       { bind: "f", title: "切换面板大小", run: props.panel.toggleFullscreen },
     ],
   }))
@@ -329,10 +370,11 @@ export function TasksDialog(props: { context: Plugin.Context; workspace: Workspa
   const owner = useTaskQueueOwner()
   const theme = useTheme().surface("dialog")
   const feed = props.workspace.feed
-  const [view, updateView] = createSignal<"list" | "detail" | "draft" | "edit" | "title" | "preview" | "delete">("list")
+  const [view, updateView] = createSignal<"list" | "detail" | "plan" | "draft" | "edit" | "title" | "preview" | "delete">("list")
   let viewIntent = 0
   const setView = (value: ReturnType<typeof view>) => { viewIntent++; updateView(value) }
   const [queueID, setQueueID] = createSignal<string>()
+  const [taskID, setTaskID] = createSignal<string>()
   const [title, setTitle] = createSignal("")
   const [tasks, setTasks] = createSignal<TaskDraft[]>([])
   const [index, setIndex] = createSignal(0)
@@ -360,7 +402,7 @@ export function TasksDialog(props: { context: Plugin.Context; workspace: Workspa
   }, { defer: true }))
   createEffect(() => {
     const id = queueID()
-    if (!id || !feed.missing(id) || !["detail", "delete"].includes(view())) return
+    if (!id || !feed.missing(id) || !["detail", "plan", "delete"].includes(view())) return
     setQueueID(undefined)
     setView("list")
   })
@@ -379,7 +421,7 @@ export function TasksDialog(props: { context: Plugin.Context; workspace: Workspa
       if (active()) setFailure(taskQueueError(cause))
     }).finally(() => { if (active()) setBusy(false) })
   }
-  const acquire = (action: "start" | "resume") => {
+  const acquire = (action: "plan" | "start" | "resume", taskID?: string) => {
     if (busy()) return
     const id = queueID()
     if (!id) return
@@ -387,7 +429,7 @@ export function TasksDialog(props: { context: Plugin.Context; workspace: Workspa
     const currentGeneration = generation
     const intent = viewIntent
     run(async (valid) => {
-      const info = await owner.acquire(id, action)
+      const info = await owner.acquire(id, action, taskID)
       accept(info, () => {
         if (intent !== viewIntent || queueID() !== id) return false
         if (currentGeneration === generation) dialog.clear()
@@ -448,23 +490,25 @@ export function TasksDialog(props: { context: Plugin.Context; workspace: Workspa
         <Match when={view() === "list"}>
           <DialogSelect title="任务队列 / tasks" options={feed.items().map((info) => ({
             title: info.title || "未命名批次", value: info.id,
-            footer: `${info.tasks.filter((task) => ["completed", "failed", "blocked", "cancelled"].includes(task.status)).length}/${info.tasks.length} · ${labels[info.status]}`,
+            footer: `${taskQueueProgress(info)}/${info.tasks.length} · ${queueLabel(info)}`,
             details: info.reason ? [info.reason] : undefined,
           }))} current={current()?.id ?? feed.items()[0]?.id} preserveSelection locked={busy()}
             onMove={(option) => { if (queueID() !== option.value) viewIntent++; setQueueID(option.value) }} onSelect={(option) => open(option.value)}
-            footer={<text fg={theme.text.muted} wrapMode="word">{busy() ? "正在处理…" : props.context.ui.format.path(directory())} · 面板关闭继续执行</text>}
+            footer={<text fg={theme.text.muted} wrapMode="word">{busy() ? "正在处理…" : props.context.ui.format.path(directory())} · 面板关闭继续规划/执行</text>}
              emptyView={<box paddingLeft={4} paddingRight={4}><text fg={theme.text.muted}>{feed.loading() ? "正在加载…" : "暂无批次。Ctrl+A 新建；访问被拒绝时请检查权限。"}</text></box>}
             actions={[
               { command: "tasks.new", bind: "ctrl+a", title: "新建", selection: "none", onTrigger: () => { setTasks([]); setTitle(""); setIndex(0); setView("draft") } },
               { command: "tasks.refresh", bind: "ctrl+r", title: "刷新", selection: "none", onTrigger: () => void feed.load() },
-              { command: "tasks.start", bind: "ctrl+s", title: "开始", hidden: current()?.status !== "queued", onTrigger: () => acquire("start") },
+              { command: "tasks.plan", bind: "ctrl+s", title: current()?.status === "queued" ? "开始规划" : "继续规划", hidden: !current() || !canPlanTaskQueue(current()!), onTrigger: () => acquire("plan") },
+              { command: "tasks.start", bind: "ctrl+s", title: "手动开始", hidden: !current() || !canStartTaskQueue(current()!), onTrigger: () => acquire("start") },
               { command: "tasks.resume", bind: "ctrl+e", title: "手动续办", hidden: !current() || !canResumeTaskQueue(current()!), onTrigger: () => acquire("resume") },
               { command: "tasks.delete", bind: "ctrl+x", title: "删除", hidden: !current() || current()?.status === "running", onTrigger: () => setView("delete") },
             ]} />
         </Match>
         <Match when={view() === "detail" && current()}>
           <TaskQueueDetail info={current()!} busy={busy()} onBack={() => setView("list")}
-            onStart={() => acquire("start")} onResume={() => acquire("resume")} onStop={stop}
+            onStart={() => acquire("start")} onResume={() => acquire("resume")} onStop={stop} onPlan={() => acquire("plan")}
+            onViewPlan={(taskID) => { setTaskID(taskID); setView("plan") }}
              onPanel={() => {
                const info = current()!
                const sessionID = info.tasks.find((task) => task.id === info.currentTaskID)?.sessionID ?? info.tasks.findLast((task) => task.sessionID)?.sessionID
@@ -473,6 +517,11 @@ export function TasksDialog(props: { context: Plugin.Context; workspace: Workspa
                props.workspace.display.view(info, sessionID)
              }}
              onSession={(sessionID) => { const info = current()!; dialog.clear(); props.workspace.display.view(info, sessionID) }} />
+        </Match>
+        <Match when={view() === "plan" && current()}>
+          <Show when={current()!.tasks.find((task) => task.id === taskID())}>{(task) => <TaskQueuePlan info={current()!} task={task()} busy={busy()}
+            onBack={() => setView("detail")} onReplan={canReplanTaskQueue(current()!) ? () => acquire("plan", task().id) : undefined}
+            onSession={(sessionID) => { const info = current()!; dialog.clear(); props.workspace.display.view(info, sessionID) }} />}</Show>
         </Match>
         <Match when={view() === "draft"}>
           <DialogSelect title={`新建批次：${title() || "未命名"}`} renderFilter={false} current={index()} focusTarget={index()}

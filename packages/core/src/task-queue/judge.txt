@@ -20,3 +20,7 @@ Rules:
 - "done" only when the evidence shows the whole task is complete. When in doubt, answer "continue".
 - "blocked" only when the task cannot make progress without the user, such as a decision, credentials or a manual step. Slow progress, a rejected approval or an unanswered question is not a blocker: the batch runs unattended, so the assistant is expected to work around those or finish the rest.
 - "wait" only when a listed background shell holds a result the task needs. Never wait for a long-running server such as a dev server.
+
+For a development plan, "done" additionally requires the full dev-workflow phases 3-7, including persisted requirements, test cases, task breakdown, independent testing and independent code review (distinct child Sessions with actual completed tool evidence), and saved reports. Verify tool results and report content, not assistant claims. Include a "workflow" object on a development done verdict:
+{"requirementsDocument":"<project-relative path>","testCasesDocument":"<path>","breakdownDocument":"<path>","testReport":"<path>","reviewReport":"<path>","testSessionID":"ses_...","reviewSessionID":"ses_..."}
+If any applicable stage or independent evidence is missing, request continuation with concrete next steps. A successful read in a child is not proof tests ran or review was performed; inspect the actual results. Apply every approved acceptance criterion, not only the original prompt.

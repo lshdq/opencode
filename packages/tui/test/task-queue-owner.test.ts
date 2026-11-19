@@ -1,7 +1,7 @@
 import { expect, jest, test } from "bun:test"
 import type { OpenCodeClient, TaskQueueInfo } from "@opencode/client"
 import { createTaskQueueOwner } from "../src/util/task-queue-owner"
-import { taskQueue } from "./fixture/task-queue"
+import { planningTaskQueue, taskQueue } from "./fixture/task-queue"
 
 function fixture(input: Partial<OpenCodeClient["experimental"]["taskQueue"]> = {}) {
   const timers = new Set<() => void>()
@@ -9,6 +9,7 @@ function fixture(input: Partial<OpenCodeClient["experimental"]["taskQueue"]> = {
   const stops: string[] = []
   let beats = 0
   const api = {
+    plan: async () => taskQueue({ workflowVersion: 2, phase: "planning", status: "running" }),
     start: async () => taskQueue({ status: "running" }),
     resume: async () => taskQueue({ status: "running" }),
     heartbeat: async () => { beats++; return taskQueue({ status: "running" }) },
@@ -26,6 +27,67 @@ function fixture(input: Partial<OpenCodeClient["experimental"]["taskQueue"]> = {
 test("observing other TUI's running batch never acquires or resumes it", async () => {
   const setup = fixture()
   setup.owner.observe(taskQueue({ status: "running" }))
+  expect(setup.owner.owns("tq_fixture")).toBe(false)
+  expect(setup.timers.size).toBe(0)
+  await setup.owner.shutdown()
+  expect(setup.stops).toEqual([])
+})
+
+test.each(["queued", "stopped", "interrupted"] as const)("planning owner releases on %s without executing or resuming", async (status) => {
+  const renewed = Promise.withResolvers<TaskQueueInfo>()
+  const requests: unknown[] = []
+  const setup = fixture({ plan: async (input) => { requests.push(input); return planningTaskQueue({ status: "running" }) }, heartbeat: () => renewed.promise })
+  try {
+    await setup.owner.acquire("tq_fixture", "plan", "tqt_one")
+    expect(requests).toEqual([{ queueID: "tq_fixture", taskID: "tqt_one" }])
+    expect(setup.owner.owns("tq_fixture")).toBe(true)
+    const tick = [...setup.timers][0]
+    tick()
+    renewed.resolve(planningTaskQueue({ status, phase: status === "queued" ? "ready" : "planning", time: { created: 1, updated: 2 } }))
+    // Reconcile the actual heartbeat promise, including its .finally.
+    await renewed.promise; await Promise.resolve(); await Promise.resolve()
+    expect(setup.owner.owns("tq_fixture")).toBe(false)
+    expect(setup.timers.size).toBe(0)
+    await setup.owner.shutdown()
+    expect(setup.stops).toEqual([])
+  } finally { renewed.resolve(planningTaskQueue()); await setup.owner.shutdown() }
+})
+
+test.each([false, true])("late plan success after exit%s is stopped exactly once", async (deadline) => {
+  const reply = Promise.withResolvers<TaskQueueInfo>()
+  const setup = fixture({ plan: () => reply.promise })
+  jest.useFakeTimers()
+  const pending = setup.owner.acquire("tq_fixture", "plan")
+  try {
+    const closing = setup.owner.shutdown()
+    if (deadline) { jest.runOnlyPendingTimers(); await closing }
+    reply.resolve(planningTaskQueue({ status: "running" }))
+    await pending
+    await closing
+    expect(setup.stops).toHaveLength(1)
+    expect(setup.timers.size).toBe(0)
+  } finally { reply.resolve(planningTaskQueue()); await pending; await setup.owner.shutdown(); jest.useRealTimers() }
+})
+
+test("ready before a delayed plan reply revokes that planning run, not a later manual execution", async () => {
+  const reply = Promise.withResolvers<TaskQueueInfo>()
+  const setup = fixture({ plan: () => reply.promise })
+  const pending = setup.owner.acquire("tq_fixture", "plan")
+  try {
+    setup.owner.observe(planningTaskQueue({ status: "queued", phase: "ready", time: { created: 1, updated: 3 } }))
+    setup.owner.observe(planningTaskQueue({ status: "running", phase: "execution", time: { created: 1, updated: 4 } }))
+    reply.resolve(planningTaskQueue({ status: "running", time: { created: 1, updated: 2 } }))
+    expect((await pending).phase).toBe("execution")
+    expect(setup.owner.owns("tq_fixture")).toBe(false)
+    expect(setup.timers.size).toBe(0)
+    await setup.owner.shutdown()
+    expect(setup.stops).toEqual([])
+  } finally { reply.resolve(planningTaskQueue()); await pending; await setup.owner.shutdown() }
+})
+
+test("a plan response that already reached ready never acquires a lease or exit stop", async () => {
+  const setup = fixture({ plan: async () => planningTaskQueue({ phase: "ready" }) })
+  await setup.owner.acquire("tq_fixture", "plan")
   expect(setup.owner.owns("tq_fixture")).toBe(false)
   expect(setup.timers.size).toBe(0)
   await setup.owner.shutdown()

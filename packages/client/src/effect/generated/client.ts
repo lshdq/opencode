@@ -277,6 +277,8 @@ import type {
   TaskQueueGetOutput,
   TaskQueueStartInput,
   TaskQueueStartOutput,
+  TaskQueuePlanInput,
+  TaskQueuePlanOutput,
   TaskQueueHeartbeatInput,
   TaskQueueHeartbeatOutput,
   TaskQueueStopInput,
@@ -1797,6 +1799,14 @@ const EndpointTaskQueueStart = (raw: RawClient["server.taskQueue"]) => (input: T
     ),
   )
 
+const EndpointTaskQueuePlan = (raw: RawClient["server.taskQueue"]) => (input: TaskQueuePlanInput) =>
+  preserveEffect<TaskQueuePlanOutput>()(
+    raw["taskQueue.plan"]({ params: { queueID: input["queueID"] }, payload: { taskID: input["taskID"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const EndpointTaskQueueHeartbeat = (raw: RawClient["server.taskQueue"]) => (input: TaskQueueHeartbeatInput) =>
   preserveEffect<TaskQueueHeartbeatOutput>()(
     raw["taskQueue.heartbeat"]({ params: { queueID: input["queueID"] } }).pipe(
@@ -1831,6 +1841,7 @@ const adaptGroupTaskQueue = (raw: RawClient["server.taskQueue"]) => ({
   list: EndpointTaskQueueList(raw),
   get: EndpointTaskQueueGet(raw),
   start: EndpointTaskQueueStart(raw),
+  plan: EndpointTaskQueuePlan(raw),
   heartbeat: EndpointTaskQueueHeartbeat(raw),
   stop: EndpointTaskQueueStop(raw),
   resume: EndpointTaskQueueResume(raw),
@@ -2182,6 +2193,8 @@ const adaptClient = (raw: RawClient) => {
         get: client.taskQueue.get,
         /** @deprecated Use `client.taskQueue.start`. Removed in the next minor. */
         start: client.taskQueue.start,
+        /** @deprecated Use `client.taskQueue.plan`. Removed in the next minor. */
+        plan: client.taskQueue.plan,
         /** @deprecated Use `client.taskQueue.heartbeat`. Removed in the next minor. */
         heartbeat: client.taskQueue.heartbeat,
         /** @deprecated Use `client.taskQueue.stop`. Removed in the next minor. */

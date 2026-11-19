@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { InputRenderable, TextareaRenderable } from "@opentui/core"
 import type { TaskQueueCreateInput } from "@opencode/client"
 import { createAppFixture } from "../fixture/app"
-import { taskQueue } from "../fixture/task-queue"
+import { planningTaskQueue, taskQueue } from "../fixture/task-queue"
 import { createEventStream, createFetch, directory, json } from "../fixture/tui-client"
 import { takeDraft } from "../../src/component/prompt/draft-stash"
 import { TaskEditor, TaskQueueDetail, TaskQueuePreview, taskDraftName } from "../../src/feature-plugins/system/tasks"
@@ -13,11 +13,11 @@ import path from "node:path"
 import stringWidth from "string-width"
 import { tmpdir } from "../fixture/fixture"
 
-test.each([100, 44])("global /tasks creates three multi-line tasks, previews/reorders, survives panel close, and stops on TUI exit at width %s", async (width) => {
+test.each([100, 44])("global /tasks creates three multi-line tasks, previews/reorders, plans without execution, and stops on TUI exit at width %s", async (width) => {
   takeDraft(undefined)
   const created: TaskQueueCreateInput[] = []
   const stopped: string[] = []
-  let info = taskQueue({ directory })
+  let info = planningTaskQueue({ directory })
   let deleted = false
   {
     await using app = await createAppFixture({ width, height: 24, config: { animations: false, tabs: { mode: "off" } }, fetch: async (url, request) => {
@@ -25,7 +25,7 @@ test.each([100, 44])("global /tasks creates three multi-line tasks, previews/reo
       if (url.pathname === "/api/task-queue" && request.method === "POST") {
         const input = await request.json() as TaskQueueCreateInput
         created.push(input)
-        info = taskQueue({ directory, title: input.title, tasks: input.tasks.map((task, index) => ({
+        info = planningTaskQueue({ directory, title: input.title, tasks: input.tasks.map((task, index) => ({
           ...taskQueue().tasks[0], ...task, title: taskDraftName(task), id: `tqt_${index}`, position: index,
         })) })
         return json({ data: info })
@@ -34,8 +34,10 @@ test.each([100, 44])("global /tasks creates three multi-line tasks, previews/reo
         if (request.method === "DELETE") { deleted = true; return new Response(null, { status: 204 }) }
         return json({ data: info })
       }
-      if (url.pathname.endsWith(`/${info.id}/start`)) {
-        info = { ...info, status: "running", currentTaskID: info.tasks[0].id, time: { created: 1, updated: 2 } }
+      if (url.pathname.endsWith(`/${info.id}/start`)) throw new Error("Planning queue must not execute")
+      if (url.pathname.endsWith(`/${info.id}/plan`)) {
+        info = { ...info, status: "running", currentTaskID: info.tasks[0].id,
+          tasks: info.tasks.map((task, index) => index === 0 ? { ...task, status: "planning" } : task), time: { created: 1, updated: 2 } }
         return json({ data: info })
       }
       if (url.pathname.endsWith(`/${info.id}/stop`)) {
@@ -93,18 +95,20 @@ test.each([100, 44])("global /tasks creates three multi-line tasks, previews/reo
     await app.waitForFrame((frame) => frame.includes("创建前预览") && frame.includes("第一行-1"))
     expect(app.captureCharFrame()).toContain("暂不开始")
     app.mockInput.pressKey("\x1b[6~")
+    app.mockInput.pressKey("\x1b[6~")
     await app.waitForFrame((frame) => frame.includes("第三行-2"))
     const preview = app.captureCharFrame()
     expect(preview.indexOf("任务3")).toBeLessThan(preview.indexOf("任务2"))
     app.mockInput.pressKey("s", { ctrl: true })
-    await app.waitForFrame((frame) => frame.includes("待开始"))
+    await app.waitForFrame((frame) => frame.includes("待规划") && frame.includes("开始规划"))
+    expect(app.captureCharFrame()).not.toContain("手动开始")
     expect(created).toHaveLength(1)
     expect(created[0].title).toBe("三项批次")
     expect(created[0].tasks.map((task) => task.title)).toEqual([undefined, undefined, undefined])
     expect(created[0].tasks.map((task) => task.prompt)).toEqual([1, 3, 2].map((index) => `任务${index}\n第一行-${index}\n第二行-${index}\n第三行-${index}`))
     expect(info.status).toBe("queued")
     app.mockInput.pressKey("s", { ctrl: true })
-    await app.waitForFrame((frame) => frame.includes("执行中"))
+    await app.waitForFrame((frame) => frame.includes("规划中（未执行）"))
     app.mockInput.pressArrow("down")
     app.mockInput.pressArrow("up")
     await app.waitForFrame((frame) => frame.includes("▶"))
@@ -118,7 +122,7 @@ test.each([100, 44])("global /tasks creates three multi-line tasks, previews/reo
     await app.mockInput.typeText("/tasks")
     await app.waitForFrame((frame) => frame.includes("Task queues"))
     app.mockInput.pressEnter()
-    await app.waitForFrame((frame) => frame.includes("执行中") && app.renderer.currentFocusedEditor instanceof InputRenderable)
+    await app.waitForFrame((frame) => frame.includes("规划中") && app.renderer.currentFocusedEditor instanceof InputRenderable)
     app.events.emit({ id: "evt_other_queue_open", created: 4, type: "taskqueue.updated", data: taskQueue({ directory: "/other", title: "Secret other location" }) })
     await app.renderOnce()
     expect(app.captureCharFrame()).not.toContain("Secret other location")
@@ -239,9 +243,9 @@ test("closing the panel and exiting during an in-flight start stops its late suc
   }
 })
 
-test("viewing another TUI's running queue neither adopts ownership nor polls on frames", async () => {
+test.each(["planning", "execution"] as const)("viewing another TUI's running %s queue neither adopts ownership nor polls on frames", async (phase) => {
   takeDraft(undefined)
-  const info = taskQueue({ directory, status: "running" })
+  const info = taskQueue({ directory, status: "running", phase, workflowVersion: phase === "planning" ? 2 : 1 })
   const requests: string[] = []
   {
     await using app = await createAppFixture({ config: { animations: false, tabs: { mode: "off" } }, fetch: (url) => {
@@ -256,14 +260,14 @@ test("viewing another TUI's running queue neither adopts ownership nor polls on 
     await app.mockInput.typeText("/tasks")
     await app.waitForFrame((frame) => frame.includes("Task queues"))
     app.mockInput.pressEnter()
-    await app.waitForFrame((frame) => frame.includes("执行中") && app.renderer.currentFocusedEditor instanceof InputRenderable)
+    await app.waitForFrame((frame) => frame.includes(phase === "planning" ? "规划中" : "执行中") && app.renderer.currentFocusedEditor instanceof InputRenderable)
     app.mockInput.pressEnter()
     await app.waitForFrame((frame) => frame.includes("Fixture batch") && frame.includes("rounds"))
     const reads = requests.length
     for (const _ of [1, 2, 3, 4]) await app.renderOnce()
     expect(requests).toHaveLength(reads)
   }
-  expect(requests.filter((path) => /\/(heartbeat|stop|resume|start)$/.test(path))).toEqual([])
+  expect(requests.filter((path) => /\/(plan|heartbeat|stop|resume|start)$/.test(path))).toEqual([])
 })
 
 test("non-running deletion is confirmed, preserves sessions, and returns to the empty list", async () => {

@@ -279,6 +279,8 @@ import type {
   TaskQueueGetOutput,
   TaskQueueStartInput,
   TaskQueueStartOutput,
+  TaskQueuePlanInput,
+  TaskQueuePlanOutput,
   TaskQueueHeartbeatInput,
   TaskQueueHeartbeatOutput,
   TaskQueueStopInput,
@@ -2440,6 +2442,18 @@ export function make(options: ClientOptions) {
           },
           requestOptions,
         ).then((value) => value.data),
+      plan: (input: TaskQueuePlanInput, requestOptions?: RequestOptions) =>
+        request<{ readonly data: TaskQueuePlanOutput }>(
+          {
+            method: "POST",
+            path: `/api/task-queue/${encodeURIComponent(input.queueID)}/plan`,
+            body: { taskID: input["taskID"] },
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404],
+            empty: false,
+          },
+          requestOptions,
+        ).then((value) => value.data),
       heartbeat: (input: TaskQueueHeartbeatInput, requestOptions?: RequestOptions) =>
         request<{ readonly data: TaskQueueHeartbeatOutput }>(
           {
@@ -2888,6 +2902,8 @@ export function make(options: ClientOptions) {
         get: client.taskQueue.get,
         /** @deprecated Use `client.taskQueue.start`. Removed in the next minor. */
         start: client.taskQueue.start,
+        /** @deprecated Use `client.taskQueue.plan`. Removed in the next minor. */
+        plan: client.taskQueue.plan,
         /** @deprecated Use `client.taskQueue.heartbeat`. Removed in the next minor. */
         heartbeat: client.taskQueue.heartbeat,
         /** @deprecated Use `client.taskQueue.stop`. Removed in the next minor. */

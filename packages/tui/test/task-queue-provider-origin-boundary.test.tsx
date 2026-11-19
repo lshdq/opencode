@@ -9,7 +9,7 @@ import { taskQueue } from "./fixture/task-queue"
 import { createEventStream, json } from "./fixture/tui-client"
 
 // TC-035: real ClientProvider buffering, not a second implementation of its routing.
-test.each(["start", "resume"] as const)("Provider FIFO keeps buffered A termination on A after live SDK replacement during %s", async (action) => {
+test.each(["plan", "start", "resume"] as const)("Provider FIFO keeps buffered A termination on A after live SDK replacement during %s", async (action) => {
   const eventsA = createEventStream()
   const eventsB = createEventStream()
   const controlsA: string[] = []
@@ -79,7 +79,7 @@ function endpoint(controls: string[], action?: () => Promise<Response>) {
   const server = Bun.serve({ port: 0, fetch(request) {
     const method = new URL(request.url).pathname.split("/").at(-1)!
     controls.push(method)
-    if (action && (method === "start" || method === "resume")) return action()
+    if (action && (method === "plan" || method === "start" || method === "resume")) return action()
     return json({ data: taskQueue({ status: method === "stop" ? "stopped" : "running" }) })
   } })
   return { url: server.url.toString(), async [Symbol.asyncDispose]() { await server.stop(true) } }

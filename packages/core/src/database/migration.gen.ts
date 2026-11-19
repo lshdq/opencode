@@ -61,6 +61,7 @@ import m58 from "./migration/20261030054400_job.js"
 import m59 from "./migration/20261113063324_task_queue.js"
 import m60 from "./migration/20261116060551_task_queue_fencing.js"
 import m61 from "./migration/20261116065026_task_queue_session_index.js"
+import m62 from "./migration/20261118024727_task_queue_planning.js"
 
 export const migrations = [
   m00,
@@ -125,4 +126,5 @@ export const migrations = [
   m59,
   m60,
   m61,
+  m62,
 ] satisfies DatabaseMigration.Migration[]

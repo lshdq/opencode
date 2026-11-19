@@ -2573,6 +2573,9 @@ export interface ExperimentalApi<E = never> {
     /** @deprecated Use `client.taskQueue.start`. Removed in the next minor. */
     readonly start: TaskQueueStartOperation<E>
 
+    /** @deprecated Use `client.taskQueue.plan`. Removed in the next minor. */
+    readonly plan: TaskQueuePlanOperation<E>
+
     /** @deprecated Use `client.taskQueue.heartbeat`. Removed in the next minor. */
     readonly heartbeat: TaskQueueHeartbeatOperation<E>
 
@@ -2609,6 +2612,10 @@ export type TaskQueueStartInput = { readonly queueID: TaskQueue.ID }
 export type TaskQueueStartOutput = TaskQueue.Info
 export type TaskQueueStartOperation<E = never> = (input: TaskQueueStartInput) => Effect.Effect<TaskQueueStartOutput, E>
 
+export type TaskQueuePlanInput = { readonly queueID: TaskQueue.ID; readonly taskID?: TaskQueue.TaskID | undefined }
+export type TaskQueuePlanOutput = TaskQueue.Info
+export type TaskQueuePlanOperation<E = never> = (input: TaskQueuePlanInput) => Effect.Effect<TaskQueuePlanOutput, E>
+
 export type TaskQueueHeartbeatInput = { readonly queueID: TaskQueue.ID }
 export type TaskQueueHeartbeatOutput = TaskQueue.Info
 export type TaskQueueHeartbeatOperation<E = never> = (
@@ -2636,6 +2643,7 @@ export interface TaskQueueApi<E = never> {
   readonly list: TaskQueueListOperation<E>
   readonly get: TaskQueueGetOperation<E>
   readonly start: TaskQueueStartOperation<E>
+  readonly plan: TaskQueuePlanOperation<E>
   readonly heartbeat: TaskQueueHeartbeatOperation<E>
   readonly stop: TaskQueueStopOperation<E>
   readonly resume: TaskQueueResumeOperation<E>
@@ -3131,6 +3139,15 @@ export type ExperimentalTaskQueueStartOutput = TaskQueueStartOutput
 
 /** @deprecated Use `TaskQueueStartOperation`. Removed in the next minor. */
 export type ExperimentalTaskQueueStartOperation<E = never> = TaskQueueStartOperation<E>
+
+/** @deprecated Use `TaskQueuePlanInput`. Removed in the next minor. */
+export type ExperimentalTaskQueuePlanInput = TaskQueuePlanInput
+
+/** @deprecated Use `TaskQueuePlanOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueuePlanOutput = TaskQueuePlanOutput
+
+/** @deprecated Use `TaskQueuePlanOperation`. Removed in the next minor. */
+export type ExperimentalTaskQueuePlanOperation<E = never> = TaskQueuePlanOperation<E>
 
 /** @deprecated Use `TaskQueueHeartbeatInput`. Removed in the next minor. */
 export type ExperimentalTaskQueueHeartbeatInput = TaskQueueHeartbeatInput

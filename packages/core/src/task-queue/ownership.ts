@@ -59,7 +59,7 @@ export const admitted = Effect.fnUntraced(function* (
     owned.queue.run_id !== null &&
     owned.queue.lease_expires_at !== null &&
     owned.queue.lease_expires_at > (yield* Clock.currentTimeMillis) &&
-    owned.task?.status === "running" &&
+    (owned.task?.status === "running" || (owned.queue.phase === "planning" && owned.task?.status === "planning")) &&
     owned.task.accepting
   )
 })

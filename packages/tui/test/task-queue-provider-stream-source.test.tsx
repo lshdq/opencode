@@ -8,7 +8,7 @@ import { TuiLifecycleProvider } from "../src/context/runtime"
 import { taskQueue } from "./fixture/task-queue"
 import { createEventStream, json } from "./fixture/tui-client"
 
-test.each((["start", "resume"] as const).flatMap((action) => ([false, true] as const).map((pending) => [`${action}/${pending ? "pending" : "owned"}`, action, pending] as const)))("authenticated A-B-A before B flush preserves A's %s and complete exit responsibility", async (_, action, pending) => {
+test.each((["plan", "start", "resume"] as const).flatMap((action) => ([false, true] as const).map((pending) => [`${action}/${pending ? "pending" : "owned"}`, action, pending] as const)))("authenticated A-B-A before B flush preserves A's %s and complete exit responsibility", async (_, action, pending) => {
   const result = await scenario(action, pending, "B")
   console.info("R1A16 actual HTTP/SSE", JSON.stringify({ action, pending, terminal: "B", ...result }))
   expect(result).toEqual({
@@ -18,7 +18,7 @@ test.each((["start", "resume"] as const).flatMap((action) => ([false, true] as c
   })
 })
 
-test.each(["start", "resume"] as const)("authenticated A-B-A-B cannot lose A's received terminal before a late %s ACK", async (action) => {
+test.each(["plan", "start", "resume"] as const)("authenticated A-B-A-B cannot lose A's received terminal before a late %s ACK", async (action) => {
   const result = await scenario(action, true, "A")
   console.info("R1A16 actual HTTP/SSE", JSON.stringify({ action, pending: true, terminal: "A", ...result }))
   expect(result).toEqual({
@@ -38,7 +38,7 @@ test("an intermediate same-URL credential refresh remains usable after the live 
   })
 })
 
-async function scenario(action: "start" | "resume", pending: boolean, terminal: "A" | "B", state: "running" | "done" = "done") {
+async function scenario(action: "plan" | "start" | "resume", pending: boolean, terminal: "A" | "B", state: "running" | "done" = "done") {
   const initial = Promise.withResolvers<void>()
   const onB = Promise.withResolvers<void>()
   const again = Promise.withResolvers<void>()

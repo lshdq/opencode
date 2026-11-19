@@ -310,16 +310,22 @@ export type TaskQueueID = string
 
 export type TaskQueueStatus = "queued" | "running" | "done" | "stopped" | "interrupted"
 
+export type TaskQueuePhase = "planning" | "ready" | "execution"
+
 export type TaskQueueTaskID = string
 
 export type TaskQueueTaskStatus =
   | "pending"
+  | "planning"
+  | "ready"
   | "running"
   | "interrupted"
   | "completed"
   | "failed"
   | "blocked"
   | "cancelled"
+
+export type TaskQueueTaskType = "development" | "other"
 
 export type SessionStatus =
   | { type: "idle" }
@@ -944,19 +950,6 @@ export type FormMultiselectField1 = {
 
 export type FormAnswer1 = { [x: string]: FormValue1 }
 
-export type TaskQueueTask = {
-  id: TaskQueueTaskID
-  title: string
-  prompt: string
-  status: TaskQueueTaskStatus
-  position: number
-  sessionID?: SessionID
-  rounds: number
-  reason?: string
-  summary?: string
-  time: { created: number; updated: number }
-}
-
 export type ScheduleWhenIn = { type: "in"; in: ScheduleDuration; tz?: string }
 
 export type ScheduleWhenEvery = { type: "every"; every: ScheduleDuration; tz?: string }
@@ -1200,6 +1193,14 @@ export type FormState =
   | { status: "pending" }
   | { status: "answered"; answer: FormAnswer }
   | { status: "cancelled"; message?: string }
+
+export type TaskQueueApproval1 = {
+  version: number
+  formID: FormID
+  choice: "confirm" | "auto" | "interactive" | "revise" | "cancelled"
+  answer?: FormAnswer
+  time: number
+}
 
 export type SessionAgentSelected = {
   id: EventID
@@ -2293,33 +2294,12 @@ export type FormReplied = {
   data: { id: FormID; sessionID: string; answer: FormAnswer1 }
 }
 
-export type TaskqueueUpdated = {
-  id: EventID
-  created: number
-  metadata?: { [x: string]: any }
-  type: "taskqueue.updated"
-  location?: LocationRef
-  data: {
-    id: TaskQueueID
-    title?: string
-    directory: AbsolutePath
-    status: TaskQueueStatus
-    reason?: string
-    currentTaskID?: TaskQueueTaskID
-    tasks: Array<TaskQueueTask>
-    time: { created: number; updated: number }
-  }
-}
-
-export type TaskQueueInfo = {
-  id: TaskQueueID
-  title?: string
-  directory: AbsolutePath
-  status: TaskQueueStatus
-  reason?: string
-  currentTaskID?: TaskQueueTaskID
-  tasks: Array<TaskQueueTask>
-  time: { created: number; updated: number }
+export type TaskQueueApproval = {
+  version: number
+  formID: FormID
+  choice: "confirm" | "auto" | "interactive" | "revise" | "cancelled"
+  answer?: FormAnswer1
+  time: number
 }
 
 export type ScheduleWhen = ScheduleWhenIn | ScheduleWhenAt | ScheduleWhenEvery | ScheduleWhenCron
@@ -2706,6 +2686,19 @@ export type SessionMessageAssistantTool = {
 
 export type FormFields = [FormField, ...Array<FormField>]
 
+export type TaskQueuePlan1 = {
+  version: number
+  requirementsVersion: number
+  type: TaskQueueTaskType
+  requirements: string
+  acceptance: Array<string>
+  dependencies: Array<TaskQueueTaskID>
+  proposal?: string
+  requirementsApproval?: TaskQueueApproval1
+  approval?: TaskQueueApproval1
+  mode?: "auto" | "interactive"
+}
+
 export type SessionInboxItem =
   | { type: "user"; payload: SessionInboxUserPayload1; delivery: SessionInboxDelivery }
   | { type: "synthetic"; payload: SessionInboxSyntheticPayload1; delivery: SessionInboxDelivery }
@@ -2742,6 +2735,19 @@ export type CredentialEntry = {
 }
 
 export type FormFields1 = [FormField1, ...Array<FormField1>]
+
+export type TaskQueuePlan = {
+  version: number
+  requirementsVersion: number
+  type: TaskQueueTaskType
+  requirements: string
+  acceptance: Array<string>
+  dependencies: Array<TaskQueueTaskID>
+  proposal?: string
+  requirementsApproval?: TaskQueueApproval
+  approval?: TaskQueueApproval
+  mode?: "auto" | "interactive"
+}
 
 export type ScheduleInfo = {
   id: ScheduleID
@@ -2819,6 +2825,20 @@ export type IntegrationKeyMethod = { type: "key"; label?: string; form?: FormFie
 
 export type IntegrationExternalMethod = { id: IntegrationMethodID; type: "external"; label: string; form?: FormFields }
 
+export type TaskQueueTask1 = {
+  id: TaskQueueTaskID
+  title: string
+  prompt: string
+  status: TaskQueueTaskStatus
+  position: number
+  sessionID?: SessionID
+  rounds: number
+  reason?: string
+  summary?: string
+  plan?: TaskQueuePlan1
+  time: { created: number; updated: number }
+}
+
 export type SessionInboxEnqueued = {
   id: EventID
   created: number
@@ -2837,6 +2857,20 @@ export type SessionMessageAssistantContentEncoded =
 export type GenerateDecisionsResponse = { data: GenerateDecisionResult }
 
 export type FormInfo1 = { id: FormID; sessionID: string; title: string; metadata?: FormMetadata1; fields: FormFields1 }
+
+export type TaskQueueTask = {
+  id: TaskQueueTaskID
+  title: string
+  prompt: string
+  status: TaskQueueTaskStatus
+  position: number
+  sessionID?: SessionID
+  rounds: number
+  reason?: string
+  summary?: string
+  plan?: TaskQueuePlan
+  time: { created: number; updated: number }
+}
 
 export type SessionMessageInfo =
   | SessionMessageAgentSelected
@@ -2858,6 +2892,20 @@ export type IntegrationMethod =
   | IntegrationExternalMethod
   | IntegrationEnvMethod
 
+export type TaskQueueInfo = {
+  id: TaskQueueID
+  title?: string
+  directory: AbsolutePath
+  status: TaskQueueStatus
+  workflowVersion?: number
+  phase?: TaskQueuePhase
+  snapshot?: AbsolutePath
+  reason?: string
+  currentTaskID?: TaskQueueTaskID
+  tasks: Array<TaskQueueTask1>
+  time: { created: number; updated: number }
+}
+
 export type SessionMessageContentUpdated = {
   id: EventID
   created: number
@@ -2875,6 +2923,27 @@ export type FormCreated = {
   type: "form.created"
   location?: LocationRef
   data: { form: FormInfo1 }
+}
+
+export type TaskqueueUpdated = {
+  id: EventID
+  created: number
+  metadata?: { [x: string]: any }
+  type: "taskqueue.updated"
+  location?: LocationRef
+  data: {
+    id: TaskQueueID
+    title?: string
+    directory: AbsolutePath
+    status: TaskQueueStatus
+    workflowVersion?: number
+    phase?: TaskQueuePhase
+    snapshot?: AbsolutePath
+    reason?: string
+    currentTaskID?: TaskQueueTaskID
+    tasks: Array<TaskQueueTask>
+    time: { created: number; updated: number }
+  }
 }
 
 export type SessionTransferData = { info: SessionInfo; messages: Array<SessionMessageInfo> }
@@ -4846,6 +4915,10 @@ export type TaskQueueStartInput = { readonly queueID: string }
 
 export type TaskQueueStartOutput = { data: TaskQueueInfo }["data"]
 
+export type TaskQueuePlanInput = { readonly queueID: string; readonly taskID?: string | undefined }
+
+export type TaskQueuePlanOutput = { data: TaskQueueInfo }["data"]
+
 export type TaskQueueHeartbeatInput = { readonly queueID: string }
 
 export type TaskQueueHeartbeatOutput = { data: TaskQueueInfo }["data"]
@@ -5173,6 +5246,12 @@ export type ExperimentalTaskQueueStartInput = TaskQueueStartInput
 
 /** @deprecated Use `TaskQueueStartOutput`. Removed in the next minor. */
 export type ExperimentalTaskQueueStartOutput = TaskQueueStartOutput
+
+/** @deprecated Use `TaskQueuePlanInput`. Removed in the next minor. */
+export type ExperimentalTaskQueuePlanInput = TaskQueuePlanInput
+
+/** @deprecated Use `TaskQueuePlanOutput`. Removed in the next minor. */
+export type ExperimentalTaskQueuePlanOutput = TaskQueuePlanOutput
 
 /** @deprecated Use `TaskQueueHeartbeatInput`. Removed in the next minor. */
 export type ExperimentalTaskQueueHeartbeatInput = TaskQueueHeartbeatInput

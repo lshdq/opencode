@@ -11,6 +11,9 @@ export const TaskQueueTable = sqliteTable(
     title: text(),
     directory: text().$type<AbsolutePath>().notNull(),
     status: text().$type<TaskQueue.Status>().notNull().default("queued"),
+    workflow_version: integer().notNull().default(1),
+    phase: text().$type<TaskQueue.Phase>().notNull().default("execution"),
+    snapshot: text().$type<AbsolutePath>(),
     reason: text(),
     /** The service instance driving this queue. A different boot alone is never evidence of death. */
     owner_boot: text(),
@@ -49,6 +52,7 @@ export const TaskQueueTaskTable = sqliteTable(
     stalls: integer().notNull().default(0),
     reason: text(),
     summary: text(),
+    plan: text({ mode: "json" }).$type<TaskQueue.Plan>(),
     ...Timestamps,
   },
   (table) => [

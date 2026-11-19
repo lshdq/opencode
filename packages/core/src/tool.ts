@@ -43,7 +43,7 @@ type Data = {
 
 export interface Interface extends State.Transformable<Editor> {
   readonly list: () => Effect.Effect<ReadonlyArray<Tool.Info & { readonly id: string }>>
-  readonly snapshot: (permissions?: Permission.Ruleset) => Effect.Effect<Snapshot>
+  readonly snapshot: (permissions?: Permission.Ruleset, names?: ReadonlySet<string>) => Effect.Effect<Snapshot>
   /**
    * Runs a Code Mode program with no model step over only the Code Mode tools named in `tools` (still subject to
    * whole-tool permission filtering and each tool's own executor policy), with no `fetch`.
@@ -251,16 +251,17 @@ const layer = Layer.effect(
       transform: state.transform,
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
-      snapshot: Effect.fn("Tool.snapshot")((permissions) =>
+      snapshot: Effect.fn("Tool.snapshot")((permissions, allowedNames) =>
         Effect.sync(() => {
           const data = state.get()
           const active = new Map<string, Tool.Info>()
           const rules = permissions ?? []
           for (const [name, tool] of data.tools) {
+            if (allowedNames && !allowedNames.has(name)) continue
             if (whollyDisabled(tool.options?.permission ?? name, rules)) continue
             active.set(name, tool)
           }
-          const codeModeEnabled = !whollyDisabled("execute", rules)
+          const codeModeEnabled = (!allowedNames || allowedNames.has("execute")) && !whollyDisabled("execute", rules)
           // Without Code Mode its tools would be unreachable, so expose them as direct tools instead.
           const direct = codeModeEnabled
             ? new Map(Array.from(active).filter(([, tool]) => tool.options?.codemode === false))
