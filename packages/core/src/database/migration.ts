@@ -21,7 +21,7 @@ export type Migration = {
 
 // Not serialized here: the Database layer holds a lock scoped to the database
 // it is bootstrapping, since two instances over one file must not race.
-export function apply(db: Database) {
+export function apply(db: Database, options = { legacyCredentials: true }) {
   return Effect.gen(function* () {
     // OpenCode owns the unprefixed table namespace. Embedders sharing this
     // database may own underscore-prefixed tables, which bootstrap ignores.
@@ -31,7 +31,7 @@ export function apply(db: Database) {
     if (tables.some((table) => table.name === "session" || table.name === "session_v2"))
       return yield* applyOnly(db, migrations)
     if (tables.length > 0) return yield* Effect.die(new Error("Database is not empty and has no session table"))
-    yield* bootstrap(db)
+    yield* bootstrap(db, options)
   })
 }
 
@@ -40,7 +40,7 @@ export function apply(db: Database) {
 // processes can both read an empty sqlite_master before either commits. SQLite
 // itself serializes the bootstrap transactions, so the loser rolls back
 // atomically and adopts the winner's committed schema instead of dying on it.
-function bootstrap(db: Database) {
+function bootstrap(db: Database, options: { legacyCredentials: boolean }) {
   return Effect.gen(function* () {
     const started = Date.now()
     yield* Effect.logInfo("database schema bootstrap started", { migrations: migrations.length })
@@ -48,7 +48,7 @@ function bootstrap(db: Database) {
       db.transaction((tx) =>
         Effect.gen(function* () {
           yield* schema.up(tx)
-          yield* legacyCredentials.up(tx)
+          if (options.legacyCredentials) yield* legacyCredentials.up(tx)
           yield* tx.run(
             sql`CREATE TABLE ${sql.identifier("migration")} (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL)`,
           )

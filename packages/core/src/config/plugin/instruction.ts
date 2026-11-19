@@ -39,12 +39,17 @@ export const Plugin = define({
       const project = discovery.project && FSUtil.contains(root, start)
       const stop = FSUtil.contains(home, start) ? home : root
       const globalFile = yield* fs.resolve(join(global.config, "AGENTS.md"))
+      // ~/.claude/CLAUDE.md stands in for the global AGENTS.md when it is missing.
+      const claudeGlobalFile = yield* fs.resolve(join(home, ".claude", "CLAUDE.md"))
+      const names = InstructionDiscovery.filenames(discovery)
+      const globalFiles = discovery.claude ? [globalFile, claudeGlobalFile] : [globalFile]
       const loaded: { current: Loaded; configured: boolean } = {
         current: { type: "available", files: [] },
         configured: false,
       }
       const fixed = yield* FiberMap.make<string>()
       const configured = yield* FiberMap.make<string>()
+      const remote = new Map<string, InstructionDiscovery.File>()
       let matched = new Map<string, string[]>()
 
       const publish = (update: Watcher.Update) => PubSub.publish(changes, update.path).pipe(Effect.asVoid)
@@ -56,11 +61,11 @@ export const Plugin = define({
       // The ancestor walk can reach the global file when the location sits
       // beneath the global config dir; global: false excludes it there too.
       const candidates = [
-        ...(discovery.global ? [globalFile] : []),
+        ...(discovery.global ? globalFiles : []),
         ...(project
           ? ancestorDirectories(start, stop)
-              .map((directory) => join(directory, "AGENTS.md"))
-              .filter((file) => discovery.global || file !== globalFile)
+              .flatMap((directory) => names.map((name) => join(directory, name)))
+              .filter((file) => discovery.global || !globalFiles.includes(file))
           : []),
       ]
       for (const path of new Set(candidates)) {
@@ -83,22 +88,23 @@ export const Plugin = define({
 
       const globalSource = Effect.fn("ConfigInstructionPlugin.globalSource")(function* () {
         if (!discovery.global) return []
-        const present = yield* fs.stat(globalFile).pipe(
-          Effect.as(true),
-          Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(false)),
-        )
-        if (!present) return []
-        const file = yield* read(globalFile)
-        return file instanceof InstructionDiscovery.File ? [file] : []
+        for (const candidate of globalFiles) {
+          const present = yield* fs.stat(candidate).pipe(
+            Effect.as(true),
+            Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed(false)),
+          )
+          if (!present) continue
+          const file = yield* read(candidate)
+          return file instanceof InstructionDiscovery.File ? [file] : []
+        }
+        return []
       })
 
       const projectSource = Effect.fn("ConfigInstructionPlugin.projectSource")(function* () {
         if (!project) return []
-        const walked = yield* Effect.forEach(
-          yield* fs.up({ targets: ["AGENTS.md"], start, stop, type: "file" }),
-          fs.resolve,
-        )
-        const discovered = new Set(walked.filter((file) => discovery.global || file !== globalFile))
+        const found = yield* fs.up({ targets: names, start, stop, type: "file" })
+        const walked = yield* Effect.forEach(InstructionDiscovery.preferAgents(found), fs.resolve)
+        const discovered = new Set(walked.filter((file) => discovery.global || !globalFiles.includes(file)))
         const files = yield* Effect.forEach(discovered, read, { concurrency: "unbounded" })
         if (files.some((file) => file === undefined)) return Instructions.unavailable
         return files.filter((file) => file instanceof InstructionDiscovery.File)
@@ -136,6 +142,8 @@ export const Plugin = define({
           }
         })
         loaded.configured = patterns.length > 0
+        const urls = new Set(patterns.filter((source) => source.type === "remote").map((source) => source.pattern))
+        for (const key of remote.keys()) if (!urls.has(key)) remote.delete(key)
         const files: InstructionDiscovery.File[] = []
         const plan = new Map<string, { path: string; type: "file" | "directory" }>()
         for (const source of patterns) {
@@ -183,14 +191,18 @@ export const Plugin = define({
                 ),
               ),
             )
-            if (content === undefined) return Instructions.unavailable
-            files.push(
-              new InstructionDiscovery.File({
+            const file = content === undefined
+              ? remote.get(source.pattern)
+              : new InstructionDiscovery.File({
                 path: `instruction-url:sha256:${createHash("sha256").update(source.pattern).digest("hex")}`,
                 label,
                 content,
-              }),
-            )
+              })
+            // A known URL can retain its last good copy while local sources change. An unknown
+            // unavailable URL still preserves previously admitted rules instead of silently dropping them.
+            if (!file) return Instructions.unavailable
+            remote.set(source.pattern, file)
+            files.push(file)
             continue
           }
 

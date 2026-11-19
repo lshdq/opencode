@@ -44,21 +44,27 @@ const instructionLayer = (input: {
   watcherLayer?: Layer.Layer<Watcher.Service | Watcher.Test>
   project?: boolean
   configEntries?: Document[]
+  claude?: boolean
 }) => {
   const watcher = input.watcherLayer ?? Watcher.testLayer
   return Layer.mergeAll(
     AppNodeBuilder.build(
-       LayerNode.group([
-         InstructionDiscovery.node,
-         Bus.node,
-         FSUtil.node,
-         Global.node,
-         Location.node,
-         Watcher.node,
-         httpClient,
-       ]),
+      LayerNode.group([
+        InstructionDiscovery.node,
+        Bus.node,
+        FSUtil.node,
+        Global.node,
+        Location.node,
+        Watcher.node,
+        httpClient,
+      ]),
       [
-        InstructionDiscovery.node.replace(InstructionDiscovery.configured({ project: input.project })),
+        InstructionDiscovery.node.replace(
+          InstructionDiscovery.configured({
+            project: input.project,
+            claude: input.claude,
+          }),
+        ),
         Global.node.replace(
           input.config || input.home
             ? Global.layerWith({
@@ -1038,11 +1044,17 @@ describe("ConfigInstructionPlugin.Plugin", () => {
           const watcher = yield* Watcher.Test
           expect(yield* watcher.subscriptions()).toEqual([
             { path: globalFile, type: "file" },
+            { path: path.join(home, ".claude", "CLAUDE.md"), type: "file" },
             { path: packageFile, type: "file" },
+            { path: path.join(directory, "CLAUDE.md"), type: "file" },
             { path: path.join(project, "packages", "AGENTS.md"), type: "file" },
+            { path: path.join(project, "packages", "CLAUDE.md"), type: "file" },
             { path: projectFile, type: "file" },
+            { path: path.join(project, "CLAUDE.md"), type: "file" },
             { path: sharedFile, type: "file" },
+            { path: path.join(shared, "CLAUDE.md"), type: "file" },
             { path: path.join(home, "AGENTS.md"), type: "file" },
+            { path: path.join(home, "CLAUDE.md"), type: "file" },
           ])
           expect(yield* watcher.subscriptions()).not.toContainEqual({
             path: path.join(tmp.path, "AGENTS.md"),
@@ -1145,6 +1157,121 @@ describe("ConfigInstructionPlugin.Plugin", () => {
     ),
   )
 
+  it.live("keeps a last-good URL while reloading configured local sources", () =>
+    tmpdirScoped().pipe(
+      Effect.flatMap((tmp) => {
+        const first = path.join(tmp.path, "first.md")
+        const second = path.join(tmp.path, "second.md")
+        const failed = { value: false }
+        return Effect.acquireRelease(
+          Effect.sync(() =>
+            Bun.serve({
+              port: 0,
+              fetch: () => new Response(failed.value ? "unavailable" : "remote", { status: failed.value ? 500 : 200 }),
+            }),
+          ),
+          (server) => Effect.promise(() => server.stop()),
+        ).pipe(
+          Effect.flatMap((server) => {
+            const remote = `http://127.0.0.1:${server.port}/instructions.md`
+            return Effect.gen(function* () {
+              yield* Effect.promise(async () => {
+                await fs.writeFile(first, "first")
+                await fs.writeFile(second, "second")
+              })
+              const config = yield* Config.Test
+              const discovery = yield* start()
+              const initialized = yield* readInitial(yield* discovery.load())
+              expect(initialized.text).toBe(
+                [`Instructions from: ${first}\nfirst`, `Instructions from: ${remote}\nremote`].join("\n\n"),
+              )
+
+              failed.value = true
+              yield* config.setEntries([
+                new Document({ type: "document", info: new Info({ instructions: [second, remote] }) }),
+              ])
+              expect((yield* readInitial(yield* discovery.load())).text).toBe(
+                [`Instructions from: ${second}\nsecond`, `Instructions from: ${remote}\nremote`].join("\n\n"),
+              )
+            }).pipe(
+              Effect.provide(
+                instructionLayer({
+                  config: path.join(tmp.path, "global"),
+                  configEntries: [new Document({ type: "document", info: new Info({ instructions: [first, remote] }) })],
+                  locationServiceLayer: Layer.succeed(
+                    Location.Service,
+                    Location.Service.of(location({ directory: AbsolutePath.make(tmp.path) })),
+                  ),
+                }),
+              ),
+            )
+          }),
+        )
+      }),
+    ),
+  )
+
+  it.live("falls back to CLAUDE.md where no AGENTS.md exists", () =>
+    tmpdirScoped().pipe(
+      Effect.flatMap((tmp) => {
+        const global = path.join(tmp.path, "global")
+        const home = path.join(tmp.path, "home")
+        const project = path.join(home, "repo")
+        const directory = path.join(project, "packages", "core")
+        const claudeGlobal = path.join(home, ".claude", "CLAUDE.md")
+        const projectAgents = path.join(project, "AGENTS.md")
+        const packageClaude = path.join(directory, "CLAUDE.md")
+        const load = (claude?: boolean) =>
+          Effect.gen(function* () {
+            const discovery = yield* start()
+            return (yield* readInitial(yield* discovery.load())).text
+          }).pipe(Effect.provide(layer(claude)), Effect.scoped)
+        const layer = (claude?: boolean) =>
+          instructionLayer({
+            config: global,
+            home,
+            claude,
+            locationServiceLayer: Layer.succeed(
+              Location.Service,
+              Location.Service.of(
+                location({ directory: AbsolutePath.make(directory) }, { projectDirectory: AbsolutePath.make(project) }),
+              ),
+            ),
+          })
+        return Effect.gen(function* () {
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.dirname(claudeGlobal), { recursive: true })
+            await fs.mkdir(directory, { recursive: true })
+            await fs.writeFile(claudeGlobal, "claude global")
+            await fs.writeFile(projectAgents, "project agents")
+            await fs.writeFile(path.join(project, "CLAUDE.md"), "project claude")
+            await fs.writeFile(packageClaude, "package claude")
+          })
+
+          expect(yield* load()).toBe(
+            [
+              `Instructions from: ${claudeGlobal}\nclaude global`,
+              `Instructions from: ${packageClaude}\npackage claude`,
+              `Instructions from: ${projectAgents}\nproject agents`,
+            ].join("\n\n"),
+          )
+
+          yield* Effect.promise(async () => {
+            await fs.mkdir(global, { recursive: true })
+            await fs.writeFile(path.join(global, "AGENTS.md"), "global agents")
+          })
+          const preferred = yield* load()
+          expect(preferred).toContain(`Instructions from: ${path.join(global, "AGENTS.md")}\nglobal agents`)
+          expect(preferred).not.toContain("claude global")
+
+          const disabled = yield* load(false)
+          expect(disabled).not.toContain("CLAUDE.md")
+          expect(disabled).toContain(`Instructions from: ${projectAgents}\nproject agents`)
+        })
+      }),
+    ),
+  )
+
   it.live("keeps an empty AGENTS.md as available context", () =>
     tmpdirScoped().pipe(
       Effect.flatMap((tmp) =>
@@ -1225,9 +1352,13 @@ describe("ConfigInstructionPlugin.Plugin", () => {
           const watcher = yield* Watcher.Test
           expect(yield* watcher.subscriptions()).toEqual([
             { path: path.join(global, "AGENTS.md"), type: "file" },
+            { path: path.join(home, ".claude", "CLAUDE.md"), type: "file" },
             { path: path.join(directory, "AGENTS.md"), type: "file" },
+            { path: path.join(directory, "CLAUDE.md"), type: "file" },
             { path: path.join(project, "packages", "AGENTS.md"), type: "file" },
+            { path: path.join(project, "packages", "CLAUDE.md"), type: "file" },
             { path: path.join(project, "AGENTS.md"), type: "file" },
+            { path: path.join(project, "CLAUDE.md"), type: "file" },
           ])
         }).pipe(
           Effect.provide(
@@ -1268,7 +1399,9 @@ describe("ConfigInstructionPlugin.Plugin", () => {
             const watcher = yield* Watcher.Test
             expect(yield* watcher.subscriptions()).toEqual([
               { path: path.join(global, "AGENTS.md"), type: "file" },
+              { path: path.join(home, ".claude", "CLAUDE.md"), type: "file" },
               { path: path.join(directory, "AGENTS.md"), type: "file" },
+              { path: path.join(directory, "CLAUDE.md"), type: "file" },
             ])
             expect((yield* readInitial(yield* discovery.load())).text).toBe(
               `Instructions from: ${path.join(directory, "AGENTS.md")}\nproject`,
@@ -1492,7 +1625,7 @@ describe("ConfigInstructionPlugin.Plugin", () => {
       )
 
       const repo = path.resolve("/repo")
-      expect(observed.values).toEqual([{ targets: ["AGENTS.md"], start: repo, stop: repo, type: "file" }])
+      expect(observed.values).toEqual([{ targets: ["AGENTS.md", "CLAUDE.md"], start: repo, stop: repo, type: "file" }])
     }),
   )
 })

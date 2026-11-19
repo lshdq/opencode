@@ -50,7 +50,7 @@ export namespace Glob {
     return matches
   }
 
-  export function match(pattern: string, filepath: string): boolean {
-    return minimatch(filepath, pattern, { dot: true })
+  export function match(pattern: string, filepath: string, options: { dot?: boolean } = {}): boolean {
+    return minimatch(filepath, pattern, { dot: options.dot ?? true })
   }
 }
